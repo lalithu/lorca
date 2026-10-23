@@ -1,5 +1,6 @@
 mod chat;
 mod config;
+mod lifecycle;
 mod model;
 mod timer;
 mod ui;
@@ -20,6 +21,6 @@ fn run() -> io::Result<()> {
     let Some(config) = config::Config::load()? else {
         return Ok(());
     };
-    let model = model::Ollama::new(&config)?;
-    ui::run(&config, &model)
+    let mut model = model::Ollama::new(&config)?;
+    ui::run(&config, &mut model)
 }

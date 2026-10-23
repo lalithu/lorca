@@ -7,6 +7,7 @@ use std::{
 use crate::{
     chat::Chat,
     config::Config,
+    lifecycle::Models,
     model::{Generation, Ollama, Update, Usage},
     timer::TurnTimer,
 };
@@ -15,7 +16,7 @@ use crossterm::{
     cursor::{MoveToColumn, MoveUp, Show},
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
-    style::{Color, Print, ResetColor, SetForegroundColor},
+    style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
     terminal::{Clear, ClearType, SetTitle, disable_raw_mode, enable_raw_mode, size},
 };
 use ratatui::text::Line;
@@ -23,7 +24,7 @@ use ratatui::text::Line;
 const ASCII: &str = include_str!("../assets/lorca.txt");
 const LOGO: &str = include_str!("../assets/orca.txt");
 
-pub fn run(config: &Config, model: &Ollama) -> io::Result<()> {
+pub fn run(config: &Config, model: &mut Ollama) -> io::Result<()> {
     let mut stdout = io::stdout();
 
     // Restore input before the default panic hook writes its diagnostic.
@@ -55,7 +56,12 @@ pub fn run(config: &Config, model: &Ollama) -> io::Result<()> {
     cleanup?;
 
     // Printed at the current cursor, not the screen bottom.
-    execute!(stdout, Print("● session closed\r\n"))?;
+    execute!(
+        stdout,
+        SetForegroundColor(Color::Red),
+        Print("● session closed\r\n"),
+        ResetColor
+    )?;
 
     Ok(())
 }
@@ -168,16 +174,28 @@ fn print_header(stdout: &mut io::Stdout, config: &Config) -> io::Result<()> {
     stdout.flush()
 }
 
-fn session(stdout: &mut io::Stdout, model: &Ollama) -> io::Result<()> {
+fn session(stdout: &mut io::Stdout, model: &mut Ollama) -> io::Result<()> {
     let mut prompt = Prompt::default();
-    let result = read_input(stdout, &mut prompt, model);
+    let mut models = Models::default();
+    let result = (|| {
+        if models.start(stdout, model)? {
+            read_input(stdout, &mut prompt, model, &mut models)?;
+        }
+        Ok(())
+    })();
     // Clear the entire transient prompt, including wrapped warning/input rows,
     // on normal exit and on event/output errors. History above it stays intact.
     let cleanup = prompt.clear(stdout);
-    result.and(cleanup)
+    let unload = models.close(stdout, model);
+    result.and(cleanup).and(unload)
 }
 
-fn read_input(stdout: &mut io::Stdout, prompt: &mut Prompt, model: &Ollama) -> io::Result<()> {
+fn read_input(
+    stdout: &mut io::Stdout,
+    prompt: &mut Prompt,
+    model: &mut Ollama,
+    models: &mut Models,
+) -> io::Result<()> {
     let mut input = String::new();
     let mut quit_armed = false;
     let mut chat = Chat::default();
@@ -205,6 +223,7 @@ fn read_input(stdout: &mut io::Stdout, prompt: &mut Prompt, model: &Ollama) -> i
                         chat.append(&text);
                     }
                     Update::Done(usage) => {
+                        models.response_completed();
                         execute!(stdout, Print("\r\n"))?;
                         finish_timer(stdout, &mut timer)?;
                         chat.finish();
@@ -265,12 +284,42 @@ fn read_input(stdout: &mut io::Stdout, prompt: &mut Prompt, model: &Ollama) -> i
 
                     quit_armed = false;
 
+                    let command = input.trim();
+                    if command == "/model" || command.starts_with("/model ") {
+                        prompt.clear(stdout)?;
+                        let name = command.strip_prefix("/model").unwrap().trim().to_string();
+                        input.clear();
+                        if name.is_empty() || name.split_whitespace().count() != 1 {
+                            execute!(
+                                stdout,
+                                SetForegroundColor(Color::Red),
+                                Print("Usage: /model NAME\r\n"),
+                                ResetColor
+                            )?;
+                        } else {
+                            let previous = model.name().to_string();
+                            if !models.switch(stdout, model, &name)? {
+                                break;
+                            }
+                            if previous != model.name() {
+                                prompt.usage = Usage::default();
+                            }
+                        }
+                        prompt.draw(stdout, &input, false)?;
+                        continue;
+                    }
+
                     if !input.trim().is_empty() {
                         prompt.clear(stdout)?;
                         execute!(
                             stdout,
-                            SetForegroundColor(Color::Cyan),
-                            Print("you  "),
+                            SetForegroundColor(Color::Rgb {
+                                r: 75,
+                                g: 156,
+                                b: 211
+                            }),
+                            SetAttribute(Attribute::Bold),
+                            Print("me🦦  "),
                             ResetColor,
                             Print(input.as_str())
                         )?;
@@ -281,8 +330,14 @@ fn read_input(stdout: &mut io::Stdout, prompt: &mut Prompt, model: &Ollama) -> i
                         generation = Some(model.start(chat.begin(std::mem::take(&mut input))));
                         execute!(
                             stdout,
-                            SetForegroundColor(Color::Green),
-                            Print("lorca  "),
+                            SetForegroundColor(Color::Rgb {
+                                r: 255,
+                                g: 255,
+                                b: 255
+                            }),
+                            SetAttribute(Attribute::Bold),
+                            Print("lorca🫍  "),
+                            SetAttribute(Attribute::NormalIntensity),
                             ResetColor
                         )?;
                         if let Some(timer) = timer.as_mut() {

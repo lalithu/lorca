@@ -3,6 +3,8 @@
 A compact terminal chat client for local Ollama models. Conversations stay in
 memory for the current session.
 
+See [FUNCTIONALITY.md](FUNCTIONALITY.md) for the complete feature reference.
+
 ## Install and run
 
 Install [Ollama](https://ollama.com), start it, and download a model:
@@ -48,6 +50,45 @@ On another computer, install Ollama and lorca, download your preferred model,
 and set its name in the configuration file. Lorca does not download models or
 start Ollama automatically.
 
+## Model lifecycle
+
+Lorca preloads the selected model on launch with an indeterminate animated bar
+and elapsed time, then sends `keep_alive: -1` with every chat request to keep it
+loaded for the session. The animation shows activity, not a loading percentage.
+
+Switch to another installed model at the input prompt:
+
+```text
+/model MODEL_NAME
+```
+
+Lorca loads the replacement first, then unloads the previous model. The current
+conversation is retained, and saved configuration is unchanged. A failed or
+cancelled switch keeps the previous model selected. `/model NAME` with the
+already selected model does not reload it.
+
+On `/exit` or double Ctrl+C, lorca requests `keep_alive: 0`. After server-confirmed
+unloading, it prints:
+
+```text
+● model unloaded
+● session closed
+```
+
+Ollama shares loaded models across clients and does not provide per-client
+ownership information. Lorca warns before every unload because another client
+may be using that model. Its requests cannot prevent other clients or Ollama's
+scheduler from changing a model's lifetime.
+
+Loading has a 120-second timeout. Unloading has a five-second request timeout
+(with up to one additional second for status verification when needed).
+Failures are reported without claiming the model was unloaded. Failed retirements
+are retried once when the session exits. A startup loading failure leaves the
+prompt available so you can retry with a message or `/model NAME`.
+
+During loading, Esc cancels the operation; two Ctrl+C presses exit. During an
+unload, Ctrl+C or Esc skips waiting and reports that cleanup is unconfirmed.
+
 ## Conversation
 
 - Enter sends your message. Replies stream into normal terminal scrollback.
@@ -68,7 +109,8 @@ start Ollama automatically.
 
 - `main`: startup and wiring.
 - `config`: saved settings and launch flag overrides.
-- `model`: Ollama HTTP requests, streamed replies, and cancellation.
+- `model`: Ollama HTTP requests, streamed replies, cancellation, and model operations.
+- `lifecycle`: preload/switch/unload orchestration, progress animation, and shared-model warnings.
 - `chat`: session message history.
 - `ui`: terminal rendering and keyboard input.
 
