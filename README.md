@@ -22,7 +22,16 @@ cargo install --path . --locked --force
 lorca
 ```
 
-Launching `lorca` runs the installed binary without Cargo output.
+```sh
+lorca        # Terminal chat (TUI)
+lorca main   # macOS dashboard + Mini
+```
+
+Build the macOS app once with `./macos/build.sh` before using `lorca main`.
+In the GUI, `⌘W` closes the dashboard and shows Mini, even if Mini was hidden.
+Use `⌘1` to reopen the dashboard and `⌘Q` to quit both.
+See [macOS instructions](macos/README.md). Launching either mode does not build
+or print Cargo output.
 
 ## Configuration
 

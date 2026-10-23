@@ -1,5 +1,7 @@
 # lorca functionality
 
+- `lorca`: terminal chat; `lorca main`: macOS dashboard + Mini.
+
 - Local Ollama chat with streaming replies and session-only conversation memory.
 - Automatic model preloading; animated loading bar with elapsed time.
 - Models stay loaded during the session (`keep_alive: -1`).

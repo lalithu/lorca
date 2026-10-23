@@ -5,6 +5,10 @@ use serde_json::{Value, json};
 pub const HELP: &str = "lorca — chat with a local Ollama model
 
 Usage: lorca [--model NAME] [--host URL] [--config PATH]
+       lorca main
+
+  lorca          Start terminal chat
+  lorca main     Open the macOS dashboard and Mini
 
   --model NAME   Override the saved model for this session
   --host URL     Override the saved Ollama address for this session
