@@ -45,12 +45,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !isQuitting else { return .terminateLater }
         let models = store.modelSession.modelsToRelease.sorted()
-        guard !models.isEmpty else { return .terminateNow }
         let alert = sharedModelAlert("Quit lorca and unload its models?", models: models)
         alert.addButton(withTitle: "Quit & Unload")
         alert.addButton(withTitle: "Keep Loaded & Quit")
         alert.addButton(withTitle: "Cancel")
-        let choice = alert.runModal()
+        let choice: NSApplication.ModalResponse = models.isEmpty ? .alertSecondButtonReturn : alert.runModal()
         guard choice != .alertThirdButtonReturn else { return .terminateCancel }
         isQuitting = true
         store.stop()

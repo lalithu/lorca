@@ -8,29 +8,25 @@ enum Appearance: String, CaseIterable, Identifiable {
 
 @MainActor
 final class ChatStore: ObservableObject {
-    let library: ConversationLibrary
-    var messages: [ChatMessage] {
-        get { library.current.messages }
-        set { library.edit { $0.messages = newValue } }
-    }
-    var draft: String {
-        get { library.current.draft }
-        set { library.edit { $0.draft = newValue } }
-    }
+    let library = ConversationLibrary()
+    let modelSession = ModelSession()
+    let backend: BackendTransport
+    var messages: [ChatMessage] { library.current.messages }
+    var draft: String { get { library.current.draft } set { library.setDraft(newValue) } }
     var draftImages: [ChatAttachment] { library.current.draftImages }
-    var imageStore: AttachmentStore { library.repository.imageStore }
-    var canSend: Bool { (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftImages.isEmpty)
+    var imageStore: AttachmentStore { AttachmentStore(directory: backend.root.appendingPathComponent("attachments")) }
+    var canSend: Bool { ready && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftImages.isEmpty)
         && !isGenerating && !isImportingImages && !modelSession.isLoading && !modelSession.isClosing }
     @Published private(set) var chatTextZoom: CGFloat = 0
     @Published var isImportingImages = false
-    @Published var models: [String] = []
+    @Published private(set) var models: [String] = []
     @Published var selectedModel: String {
         didSet {
             defaults.set(selectedModel, forKey: "model")
-            guard oldValue != selectedModel else { return }
-            if isGenerating { stop() }
-            usage = ChatUsage(contextUsed: messages.isEmpty ? 0 : nil)
-            if !isChecking && !restoringModel { loadSelectedModel() }
+            guard oldValue != selectedModel, !applying else { return }
+            stop()
+            let loading = modelSession.prepare(selectedModel)
+            Task { _ = await loading.value }
         }
     }
     @Published var appearance: Appearance {
@@ -43,175 +39,158 @@ final class ChatStore: ObservableObject {
     @Published var error: String?
     @Published private(set) var usage = ChatUsage()
     var appearanceChanged: (() -> Void)?
-    let modelSession: ModelSession
-
-    private let client: OllamaClient
     private let defaults: UserDefaults
-    private var generation: Task<Void, Never>?
-    private var generationID: UUID?
     private var updates: Set<AnyCancellable> = []
-    private var restoringModel = false
-    private var visionCapabilities: [String: Bool] = [:]
+    private var pending: Task<Void, Never>?
+    private var eventTask: Task<Void, Never>?
+    private var applying = false
+    private var revision: UInt64 = 0
+    @Published private(set) var ready = false
+    private var closing = false
+    private var pendingTurn: UUID?
 
-    init(client: OllamaClient = OllamaClient(), defaults: UserDefaults = .standard,
-         repository: ConversationRepository = ConversationRepository()) {
-        self.client = client
+    init(backend: BackendTransport? = nil, defaults: UserDefaults = .standard) {
+        self.backend = backend ?? BackendClient()
         self.defaults = defaults
-        library = ConversationLibrary(repository: repository)
-        modelSession = ModelSession(client: client)
         selectedModel = defaults.string(forKey: "model") ?? "qwen3.5:9b"
         appearance = Appearance(rawValue: defaults.string(forKey: "appearance") ?? "Dark") ?? .dark
-        resetUsage()
         for source in [modelSession.objectWillChange, library.objectWillChange] {
             source.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &updates)
         }
+        library.perform = { [weak self] in self?.enqueue($0) }
+        modelSession.clearAction = { [weak self] in self?.enqueue(["op": "clearError"]) }
+        modelSession.prepareAction = { [weak self] model, approve in
+            guard let self else { return false }
+            await self.pending?.value
+            _ = await self.perform(["op": "prepare", "model": model, "unloadPrevious": approve])
+            return self.modelSession.activeModel == model
+        }
+        modelSession.closeAction = { [weak self] unload in
+            guard let self else { return [] }
+            await self.pending?.value
+            self.closing = true
+            self.eventTask?.cancel()
+            do {
+                let data = try await self.backend.command(["op": "close", "unload": unload])
+                struct Closed: Decodable { let failures: [String] }
+                return try JSONDecoder().decode(Closed.self, from: data).failures
+            } catch { return unload ? self.modelSession.modelsToRelease.sorted() : [] }
+        }
     }
-
     var modelChoices: [String] { Array(Set(models + [selectedModel])).sorted() }
     var status: String {
         if modelSession.isClosing { return "Closing session" }
         if modelSession.isLoading { return "Loading model" }
         if isGenerating { return receivedText ? "Responding" : "Thinking" }
         if isChecking { return "Connecting" }
-        return isConnected ? "Connected" : "Offline"
+        return isConnected && ready ? "Connected" : "Offline"
     }
-
     func refreshConnection() async {
-        guard !isChecking else { return }
+        guard !isChecking, !closing else { return }
         isChecking = true
         defer { isChecking = false }
         do {
-            models = try await client.models()
-            visionCapabilities = [:]
-            isConnected = true
-            error = models.isEmpty ? "No local models yet. Run ‘ollama pull qwen3.5:9b’ to get started." : nil
-            if !models.isEmpty && !models.contains(selectedModel) {
-                selectedModel = models.contains("qwen3.5:9b") ? "qwen3.5:9b" : models[0]
+            if !ready {
+                revision = 0
+                apply(try await backend.connect(model: selectedModel))
+                ready = true
+                library.restorePendingDrafts()
+                observeEvents()
             }
-            if !models.isEmpty, await modelSession.prepare(selectedModel).value { await refreshContextLimit() }
-        } catch { isConnected = false; self.error = friendlyError(error) }
+            await pending?.value
+            guard await perform(["op": "refresh"]) else { return }
+            guard isConnected else { return }
+            if models.isEmpty { error = "No local models yet. Run ‘ollama pull qwen3.5:9b’ to get started."; return }
+            let chosen = models.contains(selectedModel) ? selectedModel : models.contains("qwen3.5:9b") ? "qwen3.5:9b" : models[0]
+            _ = await modelSession.prepare(chosen).value
+        } catch { ready = false; isConnected = false; self.error = friendlyError(error) }
     }
-
-    private func loadSelectedModel() {
-        let model = selectedModel
-        let loading = modelSession.prepare(model)
-        Task { [weak self] in
-            let ready = await loading.value
-            guard let self, self.selectedModel == model else { return }
-            if ready { await self.refreshContextLimit() }
-            else if let previous = self.modelSession.activeModel {
-                self.restoringModel = true
-                self.selectedModel = previous
-                self.restoringModel = false
+    private func observeEvents() {
+        eventTask?.cancel()
+        eventTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled && !self.closing {
+                do { try await self.backend.events { [weak self] in self?.apply($0) } }
+                catch {
+                    if Task.isCancelled || self.closing { return }
+                    // Reconnect state, never replay send commands. Rust saved any partial reply.
+                    do {
+                        let data = try await self.backend.command(["op": "snapshot"])
+                        self.apply(try JSONDecoder().decode(BackendSnapshot.self, from: data))
+                    } catch {
+                        self.ready = false
+                        self.isConnected = false
+                        self.isGenerating = false
+                        self.pendingTurn = nil
+                        self.error = friendlyError(error)
+                        do {
+                            self.revision = 0
+                            self.apply(try await self.backend.connect(model: self.selectedModel))
+                            self.ready = true
+                            self.library.restorePendingDrafts()
+                            self.error = nil
+                            await self.refreshConnection()
+                        } catch { self.error = friendlyError(error) }
+                    }
+                    try? await Task.sleep(for: .seconds(1))
+                }
             }
         }
     }
-
-    private func refreshContextLimit() async {
-        let model = selectedModel
-        let limit = try? await client.contextLimit(model: model)
-        guard selectedModel == model else { return }
-        usage.contextLimit = limit
+    func enqueue(_ fields: [String: Any]) {
+        let preceding = pending
+        pending = Task { [weak self] in
+            await preceding?.value
+            _ = await self?.perform(fields)
+        }
     }
-
+    @discardableResult private func perform(_ fields: [String: Any]) async -> Bool {
+        do {
+            let data = try await backend.command(fields)
+            if fields["op"] as? String == "draft", let id = (fields["conversationId"] as? String).flatMap(UUID.init(uuidString:)), let text = fields["text"] as? String {
+                library.acknowledgedDraft(text, id: id)
+            }
+            if fields["op"] as? String != "send" { apply(try JSONDecoder().decode(BackendSnapshot.self, from: data)) }
+            error = nil
+            return true
+        } catch {
+            self.error = friendlyError(error)
+            if fields["op"] as? String == "send" { pendingTurn = nil; isGenerating = false }
+            return false
+        }
+    }
+    func apply(_ snapshot: BackendSnapshot) {
+        guard snapshot.revision >= revision, let session = snapshot.sessions.first(where: { $0.id == backend.sessionID }) else { return }
+        revision = snapshot.revision
+        library.apply(snapshot, selected: session.selectedId)
+        modelSession.apply(session)
+        models = session.models
+        isConnected = session.isConnected
+        applying = true
+        selectedModel = session.model
+        applying = false
+        if let pendingTurn, snapshot.turns.contains(where: { $0.id == pendingTurn }) { self.pendingTurn = nil }
+        let turn = snapshot.turns.last { $0.conversationId == session.selectedId }
+        isGenerating = turn?.running == true || pendingTurn != nil
+        receivedText = isGenerating && messages.last?.role == .assistant && messages.last?.content.isEmpty == false
+        if let turn, turn.model == session.model {
+            usage = turn.running ? ChatUsage(contextUsed: nil, contextLimit: session.usage.contextLimit) : turn.usage
+        } else { usage = session.usage }
+    }
     func send() {
         guard canSend else { return }
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        let images = draftImages
-        library.edit { conversation in
-            conversation.draft = ""
-            conversation.draftImages = []
-            if conversation.title == "New chat", conversation.messages.isEmpty {
-                conversation.title = String((text.isEmpty ? "Image: \(images.first?.name ?? "image")" : text).prefix(60))
-            }
-            conversation.messages.append(ChatMessage(role: .user, content: text, attachments: images))
-        }
-        let history = messages.filter { !$0.content.isEmpty || !$0.attachments.isEmpty }
-        let response = ChatMessage(role: .assistant, content: "")
-        messages.append(response)
-        library.flush()
-        error = nil
         let id = UUID()
-        generationID = id
+        pendingTurn = id
         isGenerating = true
-        receivedText = false
-        usage.contextUsed = nil
-        usage.tokensPerSecond = nil
-        let model = selectedModel
-        let storage = imageStore
-        generation = Task { [weak self] in
-            guard let self else { return }
-            defer {
-                if self.generationID == id {
-                    self.isGenerating = false
-                    self.generationID = nil
-                    self.generation = nil
-                    self.removeEmptyReply(response.id)
-                    self.library.flush()
-                }
-            }
-            do {
-                let attachments = history.flatMap(\.attachments)
-                if !attachments.isEmpty {
-                    if self.visionCapabilities[model] == nil, let supported = try await self.client.supportsVision(model: model) {
-                        self.visionCapabilities[model] = supported
-                    }
-                    if self.visionCapabilities[model] == false { throw OllamaError.unsupportedVision(model) }
-                }
-                let imageData = try await Task.detached(priority: .userInitiated) {
-                    var result: [UUID: Data] = [:]
-                    var total = 0
-                    for attachment in attachments where result[attachment.id] == nil {
-                        let data = try storage.data(for: attachment)
-                        total += data.count
-                        guard total <= 24 * 1024 * 1024 else { throw ImageError.payloadTooLarge }
-                        result[attachment.id] = data
-                    }
-                    return result
-                }.value
-                try Task.checkCancellation()
-                guard self.generationID == id, await self.modelSession.prepare(model).value else { return }
-                guard !Task.isCancelled, self.generationID == id else { return }
-                let usage = try await self.client.reply(model: model, messages: history, imageData: imageData) { [weak self] text in
-                    guard let self, self.generationID == id,
-                          let index = self.messages.firstIndex(where: { $0.id == response.id }) else { return }
-                    self.messages[index].content += text
-                    self.receivedText = true
-                    self.isConnected = true
-                }
-                if self.generationID == id { self.isConnected = true; self.usage = usage }
-            } catch {
-                guard self.generationID == id, !Task.isCancelled else { return }
-                self.error = friendlyError(error)
-                if error is URLError { self.isConnected = false }
-            }
-        }
+        error = nil
+        enqueue(["op": "send", "conversationId": library.selectedID.uuidString, "requestId": id.uuidString])
     }
-
-    func stop() {
-        generationID = nil
-        generation?.cancel()
-        generation = nil
-        isGenerating = false
-        if let last = messages.last, last.role == .assistant { removeEmptyReply(last.id) }
-        library.flush()
-    }
-
+    func stop() { guard ready, !closing else { return }; enqueue(["op": "cancel", "conversationId": library.selectedID.uuidString]) }
     func resizeChatText(by amount: CGFloat) { chatTextZoom = min(10, max(-4, chatTextZoom + amount)) }
-    func newChat() { stop(); library.create(); error = nil; resetUsage() }
+    func newChat() { stop(); enqueue(["op": "new"]) }
     func openConversation(_ id: UUID) {
         guard id != library.selectedID else { return }
-        stop(); library.open(id); error = nil; resetUsage()
+        stop(); enqueue(["op": "open", "conversationId": id.uuidString])
     }
-    func deleteConversation(_ id: UUID) {
-        let active = id == library.selectedID
-        if active { stop() }
-        library.delete(id)
-        if active { resetUsage() }
-    }
-
-    private func resetUsage() { usage = ChatUsage(contextUsed: messages.isEmpty ? 0 : nil, contextLimit: usage.contextLimit) }
-    private func removeEmptyReply(_ id: UUID) {
-        messages.removeAll { $0.id == id && $0.role == .assistant && $0.content.isEmpty }
-    }
+    func deleteConversation(_ id: UUID) { stop(); enqueue(["op": "delete", "conversationId": id.uuidString]) }
 }

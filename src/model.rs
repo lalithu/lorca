@@ -1,518 +1,299 @@
+// Terminal adapter. All model, conversation and lifecycle work runs in the shared core.
+use crate::config::Config;
+use lorca::client::Client;
+pub use lorca::{provider::same_model, types::Usage};
+use serde_json::json;
 use std::{
-    sync::mpsc::{self, Receiver, Sender},
+    io,
+    sync::{
+        Arc,
+        mpsc::{self, Receiver},
+    },
     time::Duration,
 };
-
-use futures_util::StreamExt;
-use serde_json::{Value, json};
-use tokio::{runtime::Runtime, task::JoinHandle};
-
-use crate::{chat::Message, config::Config};
-
+use tokio::{runtime::Runtime, sync::Mutex, task::JoinHandle};
+type Link = Arc<Mutex<(Client, String)>>;
 pub enum Update {
     Text(String),
     Done(Usage),
     Error(String),
 }
-
-#[derive(Debug, Default)]
-pub struct Usage {
-    pub context_used: Option<u64>,
-    pub context_limit: Option<u64>,
-    pub tokens_per_second: Option<f64>,
-}
-
-impl Usage {
-    fn from_response(value: &Value) -> Self {
-        let generated = value["eval_count"].as_u64();
-        let duration = value["eval_duration"]
-            .as_u64()
-            .filter(|duration| *duration > 0);
-        Self {
-            context_used: value["prompt_eval_count"]
-                .as_u64()
-                .zip(generated)
-                .map(|(prompt, reply)| prompt.saturating_add(reply)),
-            context_limit: None,
-            tokens_per_second: generated
-                .zip(duration)
-                .map(|(tokens, nanos)| tokens as f64 * 1_000_000_000.0 / nanos as f64),
-        }
-    }
-}
-
 pub struct Ollama {
     runtime: Runtime,
-    client: reqwest::Client,
-    base_url: String,
+    link: Link,
+    conversation: String,
     model: String,
+    events: JoinHandle<()>,
+    host: String,
 }
-
 pub struct Generation {
     pub updates: Receiver<Update>,
     task: JoinHandle<()>,
+    link: Link,
+    conversation: String,
+    runtime: tokio::runtime::Handle,
+    request_id: String,
 }
-
 pub struct ModelOperation {
     pub result: Receiver<Result<(), String>>,
     task: JoinHandle<()>,
+    link: Link,
+    model: String,
+    load: bool,
+    runtime: tokio::runtime::Handle,
 }
-
 impl Drop for ModelOperation {
     fn drop(&mut self) {
-        self.task.abort();
+        if !self.task.is_finished() {
+            self.task.abort();
+            if self.load {
+                let link = self.link.clone();
+                let model = self.model.clone();
+                self.runtime.spawn(async move {
+                    let (client, session) = link.lock().await.clone();
+                    let _ = client
+                        .command(json!({"op":"cancelLoad","session":session,"model":model}))
+                        .await;
+                });
+            }
+        }
     }
 }
-
 impl Drop for Generation {
     fn drop(&mut self) {
-        // Dropping the HTTP stream stops generation on Ollama as well.
         self.task.abort();
+        let link = self.link.clone();
+        let conversation = self.conversation.clone();
+        let request = self.request_id.clone();
+        self.runtime.spawn(async move {
+            let (client,session)=link.lock().await.clone();
+            let _ = client
+                .command(json!({"op":"cancel","session":session,"conversationId":conversation,"requestId":request}))
+                .await;
+        });
     }
 }
-
 impl Ollama {
-    pub fn name(&self) -> &str {
-        &self.model
-    }
-
-    pub fn select(&mut self, name: String) {
-        self.model = name;
-    }
-
-    pub fn load(&self, name: &str) -> ModelOperation {
-        self.manage(name, true)
-    }
-
-    pub fn unload(&self, name: &str) -> ModelOperation {
-        self.manage(name, false)
-    }
-
-    fn manage(&self, name: &str, load: bool) -> ModelOperation {
-        let client = self.client.clone();
-        let base_url = self.base_url.clone();
-        let name = name.to_string();
-        let (sender, result) = mpsc::channel();
-        let task = self.runtime.spawn(async move {
-            let outcome = manage_model(&client, &base_url, &name, load).await;
-            let _ = sender.send(outcome);
-        });
-        ModelOperation { result, task }
-    }
-
-    pub fn new(config: &Config) -> std::io::Result<Self> {
+    pub fn new(config: &Config) -> io::Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
             .build()?;
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(5))
-            .build()
-            .map_err(std::io::Error::other)?;
+        let (link, conversation, events) = runtime.block_on(async {
+            let client = Client::connect(&std::env::current_exe()?).await?;
+            let session = client
+                .attach(&config.model, &config.base_url, true)
+                .await
+                .map_err(io::Error::other)?;
+            let state = client
+                .command(json!({"op":"snapshot","session":session}))
+                .await
+                .map_err(io::Error::other)?;
+            let conversation = state["sessions"]
+                .as_array()
+                .and_then(|a| a.iter().find(|s| s["id"] == session))
+                .and_then(|s| s["selectedId"].as_str())
+                .ok_or_else(|| io::Error::other("Missing conversation"))?
+                .to_string();
+            let link = Arc::new(Mutex::new((client.clone(), session.clone())));
+            let heartbeat = link.clone();
+            let events = tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(15)).await;
+                    let (client, session) = heartbeat.lock().await.clone();
+                    let _ = client
+                        .command(json!({"op":"heartbeat","session":session}))
+                        .await;
+                }
+            });
+            Ok::<_, io::Error>((link, conversation, events))
+        })?;
         Ok(Self {
             runtime,
-            client,
-            base_url: config.base_url.clone(),
+            link,
+            conversation,
             model: config.model.clone(),
+            events,
+            host: config.base_url.clone(),
         })
     }
-
-    pub fn start(&self, messages: &[Message]) -> Generation {
-        let messages: Vec<Value> = messages
-            .iter()
-            .map(|message| {
-                json!({
-                    "role": message.role, "content": message.content
-                })
-            })
-            .collect();
-        let body = chat_body(&self.model, messages);
-        let client = self.client.clone();
-        let base_url = self.base_url.clone();
-        let (sender, updates) = mpsc::channel();
+    pub fn name(&self) -> &str {
+        &self.model
+    }
+    pub fn select(&mut self, name: String) {
+        self.model = name;
+    }
+    pub fn load(&self, name: &str) -> ModelOperation {
+        self.manage(name, true)
+    }
+    pub fn unload(&self, name: &str) -> ModelOperation {
+        self.manage(name, false)
+    }
+    fn manage(&self, name: &str, load: bool) -> ModelOperation {
+        let link = self.link.clone();
+        let host = self.host.clone();
+        let selected = self.model.clone();
+        let conversation = self.conversation.clone();
+        let name = name.to_string();
+        let (tx, result) = mpsc::channel();
+        let name_for_cancel = name.clone();
         let task = self.runtime.spawn(async move {
-            if let Err(error) = stream_reply(client, &base_url, body, &sender).await {
-                let _ = sender.send(Update::Error(error));
+            let outcome = async {
+                let (client, session) = connected(&link, &selected, &host, &conversation).await?;
+                client.command(
+                    json!({"op":if load{"prepare"}else{"release"},"session":session,"model":name}),
+                )
+                .await
+                .and_then(|v| {
+                    if load {
+                        let s = v["sessions"]
+                            .as_array()
+                            .and_then(|a| a.iter().find(|s| s["id"] == session))
+                            .ok_or("Session closed")?;
+                        if s["activeModel"].as_str() != Some(&name) {
+                            return Err(s["error"]
+                                .as_str()
+                                .unwrap_or("Model could not be loaded")
+                                .into());
+                        }
+                    }
+                    Ok(())
+                })
+            }
+            .await;
+            let _ = tx.send(outcome);
+        });
+        ModelOperation {
+            result,
+            task,
+            link: self.link.clone(),
+            model: name_for_cancel,
+            load,
+            runtime: self.runtime.handle().clone(),
+        }
+    }
+    pub fn start(&self, input: String) -> Generation {
+        let link = self.link.clone();
+        let conversation = self.conversation.clone();
+        let (tx, updates) = mpsc::channel();
+        let task_link = link.clone();
+        let model = self.model.clone();
+        let host = self.host.clone();
+        let task_conversation = conversation.clone();
+        let request_id = lorca::types::id();
+        let request = request_id.clone();
+        let task = self.runtime.spawn(async move {
+            let result = async {
+                let (client, session) =
+                    connected(&task_link, &model, &host, &task_conversation).await?;
+                terminal_reply(&client, &session, &task_conversation, &request, input, &tx).await
+            }
+            .await;
+            if let Err(error) = result {
+                let _ = tx.send(Update::Error(error));
             }
         });
-        Generation { updates, task }
-    }
-}
-
-fn chat_body(model: &str, messages: Vec<Value>) -> Value {
-    json!({ "model": model, "messages": messages, "stream": true, "think": false, "keep_alive": -1 })
-}
-
-pub fn same_model(left: &str, right: &str) -> bool {
-    fn qualified(name: &str) -> String {
-        if name.rsplit('/').next().unwrap_or(name).contains(':') {
-            name.to_string()
-        } else {
-            format!("{name}:latest")
+        Generation {
+            updates,
+            task,
+            link,
+            conversation,
+            runtime: self.runtime.handle().clone(),
+            request_id,
         }
     }
-    qualified(left) == qualified(right)
 }
-
-async fn manage_model(
-    client: &reqwest::Client,
-    base_url: &str,
-    name: &str,
-    load: bool,
-) -> Result<(), String> {
-    let action = if load { "load" } else { "unload" };
-    let response = client
-        .post(format!("{base_url}/api/generate"))
-        .json(&json!({"model": name, "stream": false, "keep_alive": if load { -1 } else { 0 }}))
-        .timeout(Duration::from_secs(if load { 120 } else { 5 }))
-        .send()
-        .await
-        .map_err(|error| {
-            if error.is_timeout() {
-                format!("Ollama {action} timed out; model state is unconfirmed")
-            } else {
-                format!("Cannot {action} {name} at {base_url}. Check Ollama is running.")
-            }
-        })?;
-    let status = response.status();
-    let value: Value = response
-        .json()
-        .await
-        .map_err(|_| format!("Invalid Ollama {action} acknowledgement"))?;
-    if !status.is_success() || value["error"].is_string() {
-        return Err(format!(
-            "Ollama {status}: {}",
-            value["error"].as_str().unwrap_or("model request failed")
-        ));
+impl Drop for Ollama {
+    fn drop(&mut self) {
+        self.events.abort();
+        self.runtime.block_on(async {
+            let (client, session) = self.link.lock().await.clone();
+            let _ = client
+                .command(json!({"op":"close","session":session,"unload":false}))
+                .await;
+        });
     }
-    if value["done"].as_bool() != Some(true) {
-        return Err(format!("Ollama did not confirm model {action}"));
-    }
-    if let Some(returned) = value["model"].as_str()
-        && !same_model(returned, name)
+}
+async fn connected(
+    link: &Link,
+    model: &str,
+    host: &str,
+    conversation: &str,
+) -> Result<(Client, String), String> {
+    let mut current = link.lock().await;
+    if current
+        .0
+        .command(json!({"op":"heartbeat","session":current.1}))
+        .await
+        .is_err()
     {
-        return Err(format!(
-            "Ollama acknowledged a different model during {action}"
-        ));
+        let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+        let client = Client::connect(&executable)
+            .await
+            .map_err(|e| e.to_string())?;
+        let session = client.attach(model, host, false).await?;
+        client
+            .command(json!({"op":"open","session":session,"conversationId":conversation}))
+            .await?;
+        *current = (client, session);
     }
-    if !load && value["done_reason"].as_str() != Some("unload") {
-        // Older servers may omit done_reason. A successful /ps response with
-        // the model absent is also an explicit server confirmation.
-        let response = client
-            .get(format!("{base_url}/api/ps"))
-            .timeout(Duration::from_secs(1))
-            .send()
-            .await
-            .map_err(|_| "Ollama did not confirm unloading".to_string())?;
-        if !response.status().is_success() {
-            return Err("Ollama did not confirm unloading".into());
-        }
-        let running: Value = response
-            .json()
-            .await
-            .map_err(|_| "Invalid Ollama model status".to_string())?;
-        let models = running["models"]
+    Ok(current.clone())
+}
+
+struct StreamGuard<T>(JoinHandle<T>);
+impl<T> Drop for StreamGuard<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+async fn terminal_reply(
+    client: &Client,
+    session: &str,
+    conversation: &str,
+    request: &str,
+    input: String,
+    output: &mpsc::Sender<Update>,
+) -> Result<(), String> {
+    client.command(json!({"op":"send","session":session,"conversationId":conversation,"requestId":request,"text":input})).await?;
+    let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
+    let c = client.clone();
+    let s = session.to_string();
+    let stream = StreamGuard(tokio::spawn(async move { c.events(&s, send).await }));
+    let mut previous = String::new();
+    while let Some(state) = receive.recv().await {
+        if let Some(chat) = state["conversations"]
             .as_array()
-            .ok_or("Invalid Ollama model status")?;
-        if models.iter().any(|model| {
-            model["name"]
-                .as_str()
-                .or_else(|| model["model"].as_str())
-                .is_none()
-        }) {
-            return Err("Invalid Ollama model status".into());
-        }
-        if models.iter().any(|model| {
-            same_model(
-                model["name"]
-                    .as_str()
-                    .or_else(|| model["model"].as_str())
-                    .unwrap_or(""),
-                name,
-            )
-        }) {
-            return Err("Ollama still reports the model loaded".into());
-        }
-    }
-    Ok(())
-}
-
-async fn stream_reply(
-    client: reqwest::Client,
-    base_url: &str,
-    body: Value,
-    sender: &Sender<Update>,
-) -> Result<(), String> {
-    let response = client.post(format!("{base_url}/api/chat")).json(&body).send().await
-        .map_err(|_| format!("Cannot connect to Ollama at {base_url}. Start it with `ollama serve` and check --host."))?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.json::<Value>().await.unwrap_or_default();
-        let error = body["error"].as_str().unwrap_or("request failed");
-        return Err(format!("Ollama {status}: {error}"));
-    }
-    let mut stream = response.bytes_stream();
-    let mut pending = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        pending.extend_from_slice(&chunk.map_err(|_| "Ollama connection interrupted".to_string())?);
-        while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
-            let line: Vec<u8> = pending.drain(..=end).collect();
-            if let Some(usage) = parse_line(&line, sender)? {
-                finish(&client, base_url, &body, sender, usage).await;
-                return Ok(());
+            .and_then(|chats| chats.iter().find(|c| c["id"] == conversation))
+            && let Some(last) = chat["messages"]
+                .as_array()
+                .and_then(|messages| messages.last())
+                .filter(|m| m["role"] == "assistant")
+        {
+            let text = last["content"].as_str().unwrap_or("");
+            if let Some(delta) = text.strip_prefix(&previous).filter(|s| !s.is_empty()) {
+                output
+                    .send(Update::Text(delta.into()))
+                    .map_err(|_| "Response cancelled")?;
+                previous = text.into();
             }
         }
-    }
-    if let Some(usage) = parse_line(&pending, sender)? {
-        finish(&client, base_url, &body, sender, usage).await;
-        return Ok(());
-    }
-    Err("Ollama ended the response before it finished. You can try again.".into())
-}
-
-async fn finish(
-    client: &reqwest::Client,
-    base_url: &str,
-    body: &Value,
-    sender: &Sender<Update>,
-    mut usage: Usage,
-) {
-    // Use the running model's allocated window, not its theoretical maximum.
-    // Metadata is best effort and must never make a successful reply fail.
-    if let Ok(response) = client
-        .get(format!("{base_url}/api/ps"))
-        .timeout(Duration::from_secs(1))
-        .send()
-        .await
-        && let Ok(value) = response.json::<Value>().await
-        && let Some(models) = value["models"].as_array()
-    {
-        let requested = body["model"].as_str().unwrap_or_default();
-        usage.context_limit = models
-            .iter()
-            .find(|model| {
-                let name = model["name"]
-                    .as_str()
-                    .or_else(|| model["model"].as_str())
-                    .unwrap_or_default();
-                name == requested || name == format!("{requested}:latest")
-            })
-            .and_then(|model| model["context_length"].as_u64())
-            .filter(|limit| *limit > 0);
-    }
-    if let (Some(used), Some(limit)) = (usage.context_used, usage.context_limit) {
-        usage.context_used = Some(used.min(limit));
-    }
-    let _ = sender.send(Update::Done(usage));
-}
-
-fn parse_line(line: &[u8], sender: &Sender<Update>) -> Result<Option<Usage>, String> {
-    if line.iter().all(u8::is_ascii_whitespace) {
-        return Ok(None);
-    }
-    let value: Value =
-        serde_json::from_slice(line).map_err(|_| "Invalid response from Ollama".to_string())?;
-    if let Some(error) = value["error"].as_str() {
-        return Err(error.to_string());
-    }
-    if let Some(text) = value["message"]["content"]
-        .as_str()
-        .filter(|text| !text.is_empty())
-    {
-        sender
-            .send(Update::Text(text.to_string()))
-            .map_err(|_| "Response cancelled".to_string())?;
-    }
-    if value["done"].as_bool() == Some(true) {
-        return Ok(Some(Usage::from_response(&value)));
-    }
-    Ok(None)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn mock_server(replies: Vec<(u16, Value)>) -> (String, std::thread::JoinHandle<Vec<Value>>) {
-        use std::{
-            io::{Read, Write},
-            net::TcpListener,
-        };
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let address = format!("http://{}", listener.local_addr().unwrap());
-        let task = std::thread::spawn(move || {
-            let mut bodies = Vec::new();
-            for (status, reply) in replies {
-                let deadline = std::time::Instant::now() + Duration::from_secs(5);
-                let mut stream = loop {
-                    if let Ok((stream, _)) = listener.accept() {
-                        break stream;
-                    }
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "No lifecycle request received"
-                    );
-                    std::thread::sleep(Duration::from_millis(5));
-                };
-                // Accepted sockets can inherit O_NONBLOCK on macOS.
-                stream.set_nonblocking(false).unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(2)))
-                    .unwrap();
-                let mut bytes = Vec::new();
-                let (header_end, length) = loop {
-                    let mut buffer = [0; 1024];
-                    let count = stream.read(&mut buffer).unwrap();
-                    assert!(count > 0);
-                    bytes.extend_from_slice(&buffer[..count]);
-                    if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
-                        let header = std::str::from_utf8(&bytes[..end]).unwrap();
-                        let length = header
-                            .lines()
-                            .find_map(|line| {
-                                let (key, value) = line.split_once(':')?;
-                                key.eq_ignore_ascii_case("content-length")
-                                    .then(|| value.trim().parse::<usize>().unwrap())
-                            })
-                            .unwrap_or(0);
-                        break (end + 4, length);
-                    }
-                };
-                while bytes.len() < header_end + length {
-                    let mut buffer = [0; 1024];
-                    let count = stream.read(&mut buffer).unwrap();
-                    assert!(count > 0);
-                    bytes.extend_from_slice(&buffer[..count]);
-                }
-                bodies.push(
-                    serde_json::from_slice(&bytes[header_end..header_end + length])
-                        .unwrap_or(Value::Null),
-                );
-                let reply = reply.to_string();
-                write!(stream, "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}", reply.len()).unwrap();
+        if let Some(turn) = state["turns"]
+            .as_array()
+            .and_then(|turns| turns.iter().find(|t| t["id"] == request))
+            && turn["running"] == false
+        {
+            if let Some(error) = turn["error"].as_str() {
+                return Err(error.into());
             }
-            bodies
-        });
-        (address, task)
+            let usage = serde_json::from_value(turn["usage"].clone()).unwrap_or_default();
+            let _ = output.send(Update::Done(usage));
+            drop(stream);
+            return Ok(());
+        }
     }
-
-    #[test]
-    fn lifecycle_pins_and_requires_server_confirmation_to_unload() {
-        let (base_url, server) = mock_server(vec![
-            (
-                200,
-                json!({"model": "orca", "done": true, "done_reason": "load"}),
-            ),
-            (200, json!({"model": "orca", "done": true})),
-            (200, json!({"models": [{"name": "orca:latest"}]})),
-            (
-                200,
-                json!({"model": "orca", "done": true, "done_reason": "unload"}),
-            ),
-        ]);
-        let model = Ollama::new(&Config {
-            model: "orca".into(),
-            base_url,
-        })
-        .unwrap();
-        assert!(
-            model
-                .load("orca")
-                .result
-                .recv_timeout(Duration::from_secs(3))
-                .unwrap()
-                .is_ok()
-        );
-        assert!(
-            model
-                .unload("orca")
-                .result
-                .recv_timeout(Duration::from_secs(3))
-                .unwrap()
-                .is_err()
-        );
-        assert!(
-            model
-                .unload("orca")
-                .result
-                .recv_timeout(Duration::from_secs(3))
-                .unwrap()
-                .is_ok()
-        );
-        let bodies = server.join().unwrap();
-        assert_eq!(bodies[0]["keep_alive"], -1);
-        assert_eq!(bodies[0]["stream"], false);
-        assert!(bodies[0].get("prompt").is_none());
-        assert_eq!(bodies[1]["keep_alive"], 0);
-        assert_eq!(bodies[3]["keep_alive"], 0);
-    }
-
-    #[test]
-    fn lifecycle_reports_server_load_failure() {
-        let (base_url, server) = mock_server(vec![(500, json!({"error": "not enough memory"}))]);
-        let model = Ollama::new(&Config {
-            model: "orca".into(),
-            base_url,
-        })
-        .unwrap();
-        let error = model
-            .load("orca")
-            .result
-            .recv_timeout(Duration::from_secs(3))
-            .unwrap()
-            .unwrap_err();
-        assert!(error.contains("not enough memory"));
-        server.join().unwrap();
-    }
-
-    #[test]
-    fn every_chat_keeps_the_selected_model_loaded() {
-        let body = chat_body("orca", vec![json!({"role": "user", "content": "hello"})]);
-        assert_eq!(body["keep_alive"], -1);
-        assert_eq!(body["model"], "orca");
-        assert!(same_model("orca", "orca:latest"));
-        assert!(!same_model("orca:9b", "orca:latest"));
-        assert!(same_model(
-            "localhost:5000/orca",
-            "localhost:5000/orca:latest"
-        ));
-    }
-
-    #[test]
-    fn final_chunk_keeps_text_before_done() {
-        let (sender, receiver) = mpsc::channel();
-        assert!(
-            parse_line(
-                r#"{"message":{"content":"orca 🐋"},"done":true}"#.as_bytes(),
-                &sender
-            )
-            .unwrap()
-            .is_some()
-        );
-        assert!(matches!(receiver.recv().unwrap(), Update::Text(text) if text == "orca 🐋"));
-        assert!(receiver.try_recv().is_err());
-    }
-
-    #[test]
-    fn usage_counts_prompt_and_reply_and_uses_generation_time() {
-        let usage = Usage::from_response(&json!({
-            "prompt_eval_count": 120, "eval_count": 80, "eval_duration": 2_000_000_000_u64
-        }));
-        assert_eq!(usage.context_used, Some(200));
-        assert_eq!(usage.tokens_per_second, Some(40.0));
-        let missing = Usage::from_response(&json!({"eval_duration": 0}));
-        assert_eq!(missing.context_used, None);
-        assert_eq!(missing.tokens_per_second, None);
-    }
-
-    #[test]
-    fn stream_errors_are_reported() {
-        let (sender, _) = mpsc::channel();
-        assert_eq!(
-            parse_line(br#"{"error":"model missing"}"#, &sender).unwrap_err(),
-            "model missing"
-        );
-        assert!(parse_line(b"not json", &sender).is_err());
-    }
+    Err(
+        "Lost connection to lorca’s backend. The partial reply is saved; relaunch to reconnect."
+            .into(),
+    )
 }

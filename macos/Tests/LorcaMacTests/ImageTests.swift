@@ -25,37 +25,27 @@ final class ImageTests: XCTestCase {
     }
     override func tearDownWithError() throws { try? FileManager.default.removeItem(at: directory) }
 
-    func testValidImageIsNormalizedAndSurvivesOriginalDeletion() throws {
-        let source = directory.appendingPathComponent("input.png")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try imageFixture().write(to: source)
-        let attachment = try storage.importFile(source)
-        try FileManager.default.removeItem(at: source)
-        let data = try storage.data(for: attachment)
-        XCTAssertEqual(attachment.width, 80)
-        XCTAssertEqual(attachment.height, 60)
-        XCTAssertTrue(attachment.fileName.hasSuffix(".jpg"))
-        XCTAssertEqual(data.prefix(2), Data([0xff, 0xd8]))
-        XCTAssertNotNil(storage.thumbnail(for: attachment))
-        try storage.remove(attachment.id)
-        XCTAssertThrowsError(try storage.data(for: attachment))
+    func testNativeNormalizationReturnsJPEGWithoutWritingAttachmentFiles() throws {
+        let prepared = try storage.importData(imageFixture(), name: "photo.png")
+        XCTAssertEqual(prepared.data.prefix(2), Data([0xff, 0xd8]))
+        XCTAssertEqual(prepared.name, "photo.png")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(prepared.data as CFData, nil))
+        let properties = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
+        XCTAssertEqual(properties[kCGImagePropertyPixelWidth] as? Int, 80)
     }
-
     func testInvalidOversizedAndMissingImagesFailGracefully() throws {
         XCTAssertThrowsError(try storage.importData(Data("not an image".utf8), name: "fake.png"))
         XCTAssertThrowsError(try storage.importData(Data(count: AttachmentStore.maxSourceBytes + 1), name: "large.png"))
         let attachment = ChatAttachment(id: UUID(), name: "missing", width: 2, height: 2)
         XCTAssertNil(storage.thumbnail(for: attachment))
         XCTAssertThrowsError(try storage.data(for: attachment))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
     }
-
-    func testLargeDimensionsAreBoundedAndNamesCannotEscapeStorage() throws {
-        let attachment = try storage.importData(imageFixture(width: 5000, height: 20), name: "../../external.png")
-        XCTAssertEqual(attachment.width, 4096)
-        XCTAssertLessThanOrEqual(attachment.height, 20)
-        XCTAssertEqual(storage.url(for: attachment).deletingLastPathComponent().path, directory.path)
-        XCTAssertNoThrow(try storage.data(for: attachment))
+    func testLargeDimensionsAreBounded() throws {
+        let prepared = try storage.importData(imageFixture(width: 5000, height: 20), name: "large")
+        let image = try XCTUnwrap(NSBitmapImageRep(data: prepared.data))
+        XCTAssertEqual(image.pixelsWide, 4096)
+        XCTAssertLessThanOrEqual(image.pixelsHigh, 20)
     }
 
     func testClipboardAndDropProvidersLoadRealImageBytesAndFiles() async throws {
@@ -63,6 +53,7 @@ final class ImageTests: XCTestCase {
         let provider = NSItemProvider(item: data as NSData, typeIdentifier: UTType.png.identifier)
         let pasted = try await ImageInput.load(provider)
         XCTAssertNoThrow(try pasted.store(in: storage))
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let file = directory.appendingPathComponent("dropped.png")
         try data.write(to: file)
         let dropped = try await ImageInput.load(NSItemProvider(contentsOf: file)!)

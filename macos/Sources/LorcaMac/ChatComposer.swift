@@ -8,7 +8,7 @@ struct ChatComposer: View {
     @State private var dropTarget = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        VStack(alignment: .leading, spacing: compact ? 14 : 20) {
             if !store.draftImages.isEmpty {
                 AttachmentStrip(attachments: store.draftImages, storage: store.imageStore, compact: compact,
                     remove: store.library.removeDraftImage)
@@ -22,32 +22,38 @@ struct ChatComposer: View {
                     maxLines: compact ? 3 : 5,
                     identifier: compact ? "mini-message-input" : "dashboard-message-input",
                     send: store.send, attach: store.attachImages)
+                    .disabled(!store.ready)
             }
-            HStack(spacing: 10) {
+            .frame(minHeight: compact ? 34 : 50, alignment: .topLeading)
+            HStack(spacing: compact ? 12 : 16) {
                 Button { choosingImages = true } label: { Image(systemName: "plus").font(.system(size: 16)) }
                     .help("Attach images (up to four)").accessibilityLabel("Attach images")
-                    .disabled(store.isImportingImages || store.draftImages.count >= AttachmentStore.maxImages)
+                    .disabled(!store.ready || store.isImportingImages || store.draftImages.count >= AttachmentStore.maxImages)
                 if store.isImportingImages { ProgressView().controlSize(.mini).accessibilityLabel("Importing images") }
                 Spacer(minLength: 0)
+                ModelPicker(store: store, compact: compact)
                 if store.isGenerating {
                     Button { store.stop() } label: {
-                        Image(systemName: "stop.circle.fill").font(.system(size: 25)).foregroundStyle(Color.lorcaBlue)
+                        Image(systemName: "stop.fill").font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.white).frame(width: 32, height: 32).background(Color.lorcaBlue, in: Circle())
                     }
                     .help("Stop response (Esc)").keyboardShortcut(.escape, modifiers: [])
                     .accessibilityLabel("Stop response")
                 } else {
                     Button { store.send() } label: {
-                        Image(systemName: "arrow.up.circle.fill").font(.system(size: 25))
-                            .foregroundStyle(store.canSend ? Color.lorcaBlue : .secondary.opacity(0.45))
+                        Image(systemName: "arrow.up").font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(store.canSend ? .white : .secondary.opacity(0.55))
+                            .frame(width: 32, height: 32)
+                            .background(store.canSend ? Color.lorcaBlue : Color.primary.opacity(0.10), in: Circle())
                     }
                     .disabled(!store.canSend).keyboardShortcut(.return, modifiers: .command)
                     .help("Send (⌘Return)").accessibilityLabel("Send message")
                 }
             }
         }
-        .buttonStyle(.plain).padding(compact ? 12 : 16)
-        .background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: compact ? 12 : 16))
-        .overlay(RoundedRectangle(cornerRadius: compact ? 12 : 16)
+        .buttonStyle(.plain).padding(compact ? 14 : 18)
+        .background(.primary.opacity(0.075), in: RoundedRectangle(cornerRadius: compact ? 20 : 26))
+        .overlay(RoundedRectangle(cornerRadius: compact ? 20 : 26)
             .strokeBorder(dropTarget ? Color.lorcaBlue : Color.primary.opacity(0.10)))
         .onDrop(of: [UTType.fileURL, .image], isTargeted: $dropTarget) { providers in
             guard !store.isImportingImages else { return false }

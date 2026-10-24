@@ -4,13 +4,16 @@
 - GUI chat history: create, switch, rename, delete, and restore local conversations.
 - Images: picker, drag/drop, paste, previews, local storage, and Ollama vision.
 - Shared Dashboard/Mini chats, Markdown, manual scrolling, and `⌘=` / `⌘−` text sizing.
-- Terminal Ollama chat: streaming replies and session-only memory.
+- One Rust core for both interfaces: saved chats, images, Ollama, streaming, and cancellation.
+- Terminal sessions start fresh; their history remains available in the dashboard.
 - Automatic model preloading; animated loading bar with elapsed time.
 - Models stay loaded during the session (`keep_alive: -1`).
 - `/model NAME`: load a replacement, then unload the previous model.
 - `/exit` or double Ctrl+C: unload the model and close the session.
 - Ctrl+C stops generation; Esc cancels loading.
-- Shared-model warnings; unload success requires server confirmation.
+- Shared-model warnings; lorca session leases prevent unloading another session’s model.
+- Authenticated local backend, automatic startup/reuse, reconnect, and original-data backup.
+- Unload success requires server confirmation.
 - Cyan context bar: usage percentage, token count, capacity, and tokens/second.
 - Live elapsed timer beside each submitted message.
 - ASCII orca, compact header, title emoji, bold amber labels, natural scrollback.

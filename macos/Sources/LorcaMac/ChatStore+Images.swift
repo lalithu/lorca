@@ -7,12 +7,12 @@ extension ChatStore {
     func attachFiles(_ urls: [URL]) { importImages(urls.map(ImageInput.file)) }
 
     func attachProviders(_ providers: [NSItemProvider]) {
-        guard !isImportingImages else { return }
+        guard ready, !isImportingImages else { return }
         importImages([], providers: providers)
     }
 
     private func importImages(_ inputs: [ImageInput], providers: [NSItemProvider] = []) {
-        guard !isImportingImages else { return }
+        guard ready, !isImportingImages else { return }
         guard inputs.count + providers.count + draftImages.count <= AttachmentStore.maxImages else {
             error = ImageError.tooMany.localizedDescription
             return
@@ -26,14 +26,13 @@ extension ChatStore {
             do {
                 for provider in providers { pending.append(try await ImageInput.load(provider)) }
             } catch { self.error = friendlyError(error); return }
-            var imported: [ChatAttachment] = []
             for input in pending {
                 do {
                     let attachment = try await Task.detached(priority: .userInitiated) { try input.store(in: storage) }.value
-                    imported.append(attachment)
+                    enqueue(["op": "importImage", "conversationId": chatID.uuidString, "data": attachment.data.base64EncodedString(), "name": attachment.name])
                 } catch { self.error = friendlyError(error) }
             }
-            library.addImages(imported, to: chatID)
+
         }
     }
 }

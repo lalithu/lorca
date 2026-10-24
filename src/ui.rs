@@ -5,7 +5,6 @@ use std::{
 };
 
 use crate::{
-    chat::Chat,
     config::Config,
     lifecycle::Models,
     model::{Generation, Ollama, Update, Usage},
@@ -198,7 +197,6 @@ fn read_input(
 ) -> io::Result<()> {
     let mut input = String::new();
     let mut quit_armed = false;
-    let mut chat = Chat::default();
     let mut generation: Option<Generation> = None;
     let mut timer: Option<TurnTimer> = None;
 
@@ -220,13 +218,11 @@ fn read_input(
                         if let Some(timer) = timer.as_mut() {
                             timer.advance(&text);
                         }
-                        chat.append(&text);
                     }
                     Update::Done(usage) => {
                         models.response_completed();
                         execute!(stdout, Print("\r\n"))?;
                         finish_timer(stdout, &mut timer)?;
-                        chat.finish();
                         generation = None;
                         prompt.usage = usage;
                         prompt.draw(stdout, &input, false)?;
@@ -237,7 +233,6 @@ fn read_input(
                         execute!(stdout, SetForegroundColor(Color::Red))?;
                         print_response(stdout, &error)?;
                         execute!(stdout, ResetColor, Print("\r\n"))?;
-                        chat.finish();
                         generation = None;
                         prompt.draw(stdout, &input, false)?;
                     }
@@ -259,7 +254,6 @@ fn read_input(
             if generation.is_some() {
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     generation = None; // Dropping the task closes its HTTP stream.
-                    chat.finish();
                     execute!(stdout, Print("\r\n"))?;
                     finish_timer(stdout, &mut timer)?;
                     quit_armed = false;
@@ -327,7 +321,7 @@ fn read_input(
 
                         prompt.usage.context_used = None;
                         prompt.usage.tokens_per_second = None;
-                        generation = Some(model.start(chat.begin(std::mem::take(&mut input))));
+                        generation = Some(model.start(std::mem::take(&mut input)));
                         execute!(
                             stdout,
                             SetForegroundColor(Color::Rgb {

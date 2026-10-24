@@ -49,13 +49,6 @@ struct ChatView: View {
                 ModelLoadingBar(model: model, started: started, compact: compact)
             }
             ChatComposer(store: store, compact: compact)
-            HStack {
-                ModelPicker(store: store, compact: compact)
-                Spacer(minLength: 3)
-                if !compact {
-                    Text("Local to your Mac").font(.system(size: 10)).foregroundStyle(.tertiary)
-                }
-            }
         }
     }
 
@@ -106,20 +99,6 @@ struct ChatView: View {
         }
         .padding(11)
         .background(.orange.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
-    }
-}
-
-struct ModelPicker: View {
-    @ObservedObject var store: ChatStore
-    var compact = false
-    var body: some View {
-        Picker("Model", selection: $store.selectedModel) {
-            ForEach(store.modelChoices, id: \.self) { Text($0).tag($0) }
-        }
-        .labelsHidden().pickerStyle(.menu).controlSize(.small)
-        .frame(maxWidth: compact ? 220 : 270, alignment: .leading)
-        .disabled(store.isGenerating || store.isChecking || store.modelSession.isLoading)
-        .help("Choose an installed Ollama model")
     }
 }
 

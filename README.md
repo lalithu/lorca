@@ -1,7 +1,7 @@
 # lorca
 
 A compact local Ollama chat client: Rust terminal chat, plus a native macOS
-dashboard and floating Mini. Terminal conversations are session-only; GUI chats
+dashboard and floating Mini. Both interfaces use one Rust core; conversations
 and images are saved locally.
 
 See [FUNCTIONALITY.md](FUNCTIONALITY.md) for the complete feature reference.
@@ -101,8 +101,9 @@ unloading, it prints:
 
 Ollama shares loaded models across clients and does not provide per-client
 ownership information. Lorca warns before every unload because another client
-may be using that model. Its requests cannot prevent other clients or Ollama's
-scheduler from changing a model's lifetime.
+may be using that model. The shared core refuses to unload a model held by
+another active lorca session. It cannot track other applications or prevent
+Ollama’s scheduler from changing model lifetime.
 
 Loading has a 120-second timeout. Unloading has a five-second request timeout
 (with up to one additional second for status verification when needed).
@@ -127,15 +128,44 @@ unload, Ctrl+C or Esc skips waiting and reports that cleanup is unconfirmed.
 - Ctrl+C during generation stops the reply and returns to the prompt. Any
   partial reply remains visible and in the conversation context.
 - At the prompt, Ctrl+C shows the red exit warning; press it again to exit.
-- `/exit` exits. The next launch starts a fresh conversation.
+- `/exit` exits. The next terminal launch starts a fresh conversation; earlier terminal chats remain available in the dashboard.
 
-## Code structure
+## Architecture
 
-- `main`: startup and wiring.
-- `config`: saved settings and launch flag overrides.
-- `model`: Ollama HTTP requests, streamed replies, cancellation, and model operations.
-- `lifecycle`: preload/switch/unload orchestration, progress animation, and shared-model warnings.
-- `chat`: session message history.
-- `ui`: terminal rendering and keyboard input.
+- `src/lib.rs`: reusable Rust core, independent of terminal and SwiftUI rendering.
+- `core/`: conversations, generation/cancellation, and per-client model leases.
+- `storage.rs`, `types.rs`: compatible JSON, atomic saves, attachment files, and shared data.
+- `provider.rs`: Ollama requests, NDJSON streaming, and confirmed model operations.
+- `transport.rs`, `client.rs`: authenticated local commands and streamed state snapshots.
+- `model.rs`, `lifecycle.rs`, `ui.rs`, `timer.rs`: terminal adapter and presentation; `config.rs`: CLI settings.
+- `macos/`: existing SwiftUI/AppKit views; `BackendClient` connects to Rust and `ChatStore` projects its state.
 
-There are no tools, file access, or agent actions in this version.
+`lorca main` uses the backend bundled by `macos/build.sh`; the CLI uses its own
+executable in internal `serve` mode. A process lock makes them reuse one backend.
+It binds only to a random port on `127.0.0.1`; a private runtime file supplies its
+bearer token. Browser-origin requests are rejected. No service installation is needed.
+
+The backend expires disconnected sessions after 60 seconds and exits 30 seconds
+after the last session ends. Unexpected disconnects preserve partial replies and
+leave models loaded. The GUI reconnects automatically; the terminal reconnects
+before its next model operation or message. Accepted prompts are never replayed
+automatically. CLI and GUI retain separate model preferences and client sessions.
+
+Existing macOS JSON, UUIDs, Foundation timestamps, drafts, and image files remain
+compatible. Before Rust first writes, it copies original data once to
+`~/Library/Application Support/lorca/backups/pre-rust-core/`. Keep that backup until
+you have verified your history. `LORCA_DATA_DIR` overrides the data root for testing
+or an independent profile; use the same root to share a backend.
+
+## Development checks
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swift test --package-path macos
+./macos/build.sh
+```
+
+The core and transport tests use isolated storage and local test servers; they do
+not unload your real Ollama models. There are no tools or agent actions in this version.

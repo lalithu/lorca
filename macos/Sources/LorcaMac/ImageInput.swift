@@ -28,7 +28,7 @@ enum ImageInput: Sendable {
         }
     }
 
-    func store(in storage: AttachmentStore) throws -> ChatAttachment {
+    func store(in storage: AttachmentStore) throws -> PreparedImage {
         switch self {
         case .file(let url): return try storage.importFile(url)
         case .bytes(let data, let name): return try storage.importData(data, name: name)

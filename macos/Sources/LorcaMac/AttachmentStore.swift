@@ -2,13 +2,15 @@ import AppKit
 import ImageIO
 import UniformTypeIdentifiers
 
+struct PreparedImage: Sendable { let data: Data; let name: String }
+
 struct AttachmentStore: Sendable {
     static let maxImages = 4
     static let maxSourceBytes = 20 * 1024 * 1024
     static let maxStoredBytes = 8 * 1024 * 1024
     let directory: URL
 
-    func importFile(_ url: URL) throws -> ChatAttachment {
+    func importFile(_ url: URL) throws -> PreparedImage {
         let accessed = url.startAccessingSecurityScopedResource()
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
         guard url.isFileURL else { throw ImageError.invalid }
@@ -18,7 +20,7 @@ struct AttachmentStore: Sendable {
         return try importData(Data(contentsOf: url), name: url.lastPathComponent)
     }
 
-    func importData(_ data: Data, name: String) throws -> ChatAttachment {
+    func importData(_ data: Data, name: String) throws -> PreparedImage {
         guard data.count <= Self.maxSourceBytes else { throw ImageError.tooLarge }
         guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
@@ -38,10 +40,7 @@ struct AttachmentStore: Sendable {
         guard let destination = CGImageDestinationCreateWithData(encoded, UTType.jpeg.identifier as CFString, 1, nil) else { throw ImageError.invalid }
         CGImageDestinationAddImage(destination, flattened, [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
         guard CGImageDestinationFinalize(destination), encoded.length <= Self.maxStoredBytes else { throw ImageError.tooLarge }
-        let attachment = ChatAttachment(id: UUID(), name: String(name.prefix(200)), width: image.width, height: image.height)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try (encoded as Data).write(to: url(for: attachment), options: .atomic)
-        return attachment
+        return PreparedImage(data: encoded as Data, name: String(name.prefix(200)))
     }
 
     func url(for attachment: ChatAttachment) -> URL { directory.appendingPathComponent(attachment.fileName) }
@@ -59,10 +58,6 @@ struct AttachmentStore: Sendable {
         return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
     }
 
-    func remove(_ id: UUID) throws {
-        let url = directory.appendingPathComponent("\(id.uuidString).jpg")
-        if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
-    }
 }
 
 enum ImageError: LocalizedError {

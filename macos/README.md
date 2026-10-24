@@ -1,6 +1,6 @@
 # lorca for macOS
 
-- Requires macOS 14+, Xcode or Swift command-line tools, and a running Ollama server.
+- Requires macOS 14+, Rust/Cargo, Xcode or Swift command-line tools, and a running Ollama server.
 - Launch: `cd ~/Downloads/lorca/macos && ./run.sh`
 - Launch an existing build: `lorca main` (after installing the Rust command with `cargo install --path . --locked --force` from the repository root).
 - Terminal chat: `lorca`. Both commands work from any directory.
@@ -17,16 +17,16 @@
 - Both views share saved conversations and drafts. Recents in the sidebar supports create/open/rename/delete; Mini has a history menu. **New Chat**: `⌘N`; stop a reply with Escape or the stop button.
 - Both chats show a cyan context bar and response speed from Ollama; unavailable measurements display `—`.
 - The selected model preloads at startup and stays loaded (`keep_alive: -1`). A temporary loading bar and timer appear under `ctx` in both chats.
-- Model switching offers to unload the old model before loading the next, or explicitly keep both loaded. A failed replacement tries to restore the previous model. `⌘Q` offers **Quit & Unload** or **Keep Loaded & Quit**, warning that Ollama models are shared with other apps.
+- Model switching offers to unload the old model before loading the next, or explicitly keep both loaded. The core keeps any model still held by another lorca session. A failed replacement tries to restore the previous model. `⌘Q` offers **Quit & Unload** or **Keep Loaded & Quit**, warning that Ollama models are shared with other apps.
 - Settings: installed Ollama models and System/Dark/Light appearance. Defaults to `qwen3.5:9b` at `http://127.0.0.1:11434`.
 - Overview, Tasks, Pipelines, Scheduled are placeholders.
-- Rust terminal chat is preserved; `lorca main` launches this app. This prototype talks directly to Ollama; the Rust-core bridge comes later.
+- Dashboard, Mini, and terminal chat use one Rust backend. The app starts its bundled backend automatically; a lock prevents duplicate runtimes.
 
 ## Local storage and images
 
 - Chat JSON: `~/Library/Application Support/lorca/conversations/`; images: `attachments/` alongside it.
 - Streaming saves every 200 ms; stop, switching chats, and quit flush immediately. Force-killing can lose the last checkpoint interval.
-- Unreadable chats remain untouched; healthy chats still open. Keep the whole `lorca` folder when backing up or restoring.
+- Existing saved data stays compatible. Original files are backed up once to `backups/pre-rust-core/`; unreadable chats remain untouched. Keep the whole `lorca` folder when backing up or restoring.
 - Add images with `+`, drop on the composer, or paste (`⌘V`); click a preview to open the stored image.
 - Four images/message, 20 MB input/image. Images normalize to JPEG (maximum 4,096-pixel edge, 8 MB each); total request image data is limited to 24 MB.
 - A vision-capable model is required for chats containing images. Missing images or unsupported models produce a friendly error.
@@ -36,8 +36,8 @@
 
 - `App.swift`, `WindowManager.swift`: application, menus, desktop/full-screen and Mini windows.
 - `DashboardView.swift`, `MiniView.swift`, `ChatView.swift`: native views and basic Markdown.
-- `ChatStore.swift`, `ModelSession.swift`, `OllamaClient.swift`: shared chat, session model lifecycle, Ollama requests.
+- `ChatStore.swift`, `ModelSession.swift`, `BackendClient.swift`: UI state, loading presentation, authenticated Rust connection.
 - `Resources/orca.txt`: copy of the repository’s existing emoji asset.
-- `ConversationLibrary.swift`, `ConversationRepository.swift`, `Conversation.swift`: selection, atomic chat files, data types.
-- `ChatComposer.swift`, `AttachmentStrip.swift`, `ImageInput.swift`, `AttachmentStore.swift`: image input, previews, validation, and separate image files.
+- `ConversationLibrary.swift`, `Conversation.swift`: observable history projection and compatible data types. Rust owns persistence.
+- `ChatComposer.swift`, `AttachmentStrip.swift`, `ImageInput.swift`, `AttachmentStore.swift`: native image input, JPEG normalization, and read-only previews. Rust validates and stores attachments.
 - `ChatInput.swift`, `ClipboardImages.swift`: native text editing and image paste/drop handling.
