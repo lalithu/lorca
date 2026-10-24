@@ -39,6 +39,7 @@ final class ChatTests: XCTestCase {
     private var session: URLSession!
     private var client: OllamaClient!
     private var defaults: UserDefaults!
+    private var repository: ConversationRepository!
     private let suite = "dev.lorca.macos.tests"
 
     override func setUp() async throws {
@@ -46,6 +47,7 @@ final class ChatTests: XCTestCase {
         config.protocolClasses = [MockOllama.self]
         session = URLSession(configuration: config)
         client = OllamaClient(session: session)
+        repository = ConversationRepository(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
         defaults = UserDefaults(suiteName: suite)!
         defaults.removePersistentDomain(forName: suite)
         MockOllama.manage = { _ in (200, #"{"done":true,"done_reason":"unload"}"#) }
@@ -53,6 +55,7 @@ final class ChatTests: XCTestCase {
 
     override func tearDown() async throws {
         session.invalidateAndCancel()
+        try? FileManager.default.removeItem(at: repository.root)
         defaults.removePersistentDomain(forName: suite)
     }
 
@@ -64,7 +67,7 @@ final class ChatTests: XCTestCase {
             XCTAssertEqual(request.url?.path, "/api/tags")
             return (200, #"{"models":[{"name":"small:latest"},{"name":"other:latest"}]}"#)
         }
-        let store = ChatStore(client: client, defaults: defaults)
+        let store = ChatStore(client: client, defaults: defaults, repository: repository)
         await store.refreshConnection()
         XCTAssertTrue(store.isConnected)
         XCTAssertEqual(store.models, ["other:latest", "small:latest"])
@@ -87,7 +90,7 @@ final class ChatTests: XCTestCase {
             XCTAssertEqual((payload["messages"] as? [[String: String]])?.count, requests == 1 ? 1 : 3)
             return (200, "{\"message\":{\"content\":\"Hello\"},\"done\":false}\n{\"message\":{\"content\":\" there\"},\"done\":true,\"prompt_eval_count\":64,\"eval_count\":8,\"eval_duration\":400000000}\n")
         }
-        let store = ChatStore(client: client, defaults: defaults)
+        let store = ChatStore(client: client, defaults: defaults, repository: repository)
         store.draft = "Hi"
         store.send()
         try await waitForReply(store)
@@ -109,7 +112,7 @@ final class ChatTests: XCTestCase {
 
     func testUnavailableServerAndServerError() async throws {
         MockOllama.respond = { _ in throw URLError(.cannotConnectToHost) }
-        let store = ChatStore(client: client, defaults: defaults)
+        let store = ChatStore(client: client, defaults: defaults, repository: repository)
         await store.refreshConnection()
         XCTAssertFalse(store.isConnected)
         XCTAssertTrue(store.error?.contains("ollama serve") == true)
@@ -126,7 +129,7 @@ final class ChatTests: XCTestCase {
         MockOllama.respond = { _ in
             (200, "{\"message\":{\"content\":\"Late reply\"},\"done\":true}\n")
         }
-        let store = ChatStore(client: client, defaults: defaults)
+        let store = ChatStore(client: client, defaults: defaults, repository: repository)
         store.draft = "Hello"
         store.send()
         store.stop()
@@ -135,6 +138,7 @@ final class ChatTests: XCTestCase {
         XCTAssertEqual(store.messages.map(\.content), ["Hello"])
         store.newChat()
         XCTAssertTrue(store.messages.isEmpty)
+        XCTAssertEqual(store.library.conversations.count, 2)
     }
 
     func testMissingUsageAndFailedMetadataDoNotFailReply() async throws {
@@ -142,7 +146,7 @@ final class ChatTests: XCTestCase {
             if request.url?.path == "/api/ps" { throw URLError(.timedOut) }
             return (200, "{\"message\":{\"content\":\"Hello\"},\"done\":true}\n")
         }
-        let store = ChatStore(client: client, defaults: defaults)
+        let store = ChatStore(client: client, defaults: defaults, repository: repository)
         store.draft = "Hi"
         store.send()
         try await waitForReply(store)
@@ -161,7 +165,7 @@ final class ChatTests: XCTestCase {
             }
             return (200, "{\"message\":{\"content\":\"Hi\"},\"done\":true,\"prompt_eval_count\":10,\"eval_count\":2,\"eval_duration\":0}\n")
         }
-        let store = ChatStore(client: client, defaults: defaults)
+        let store = ChatStore(client: client, defaults: defaults, repository: repository)
         store.draft = "Hello"
         store.send()
         try await waitForReply(store)
@@ -172,6 +176,92 @@ final class ChatTests: XCTestCase {
         XCTAssertNil(store.usage.contextUsed)
         XCTAssertNil(store.usage.contextLimit)
         XCTAssertNil(store.usage.fraction)
+    }
+
+    func testImagesAreEncodedInHistoryAndRestoredWithTheirFiles() async throws {
+        var requests = 0
+        MockOllama.respond = { request in
+            if request.url?.path == "/api/show" { return (200, #"{"capabilities":["completion","vision"]}"#) }
+            if request.url?.path == "/api/ps" { return (200, #"{"models":[]}"#) }
+            requests += 1
+            let payload = try MockOllama.payload(request)
+            let messages = try XCTUnwrap(payload["messages"] as? [[String: Any]])
+            let images = try XCTUnwrap(messages[0]["images"] as? [String])
+            XCTAssertEqual(images.count, 2)
+            XCTAssertTrue(images.allSatisfy { Data(base64Encoded: $0)?.starts(with: [0xff, 0xd8]) == true })
+            XCTAssertEqual(messages.count, requests == 1 ? 1 : 3)
+            if messages.count > 1 { XCTAssertNil(messages[1]["images"]) }
+            return (200, "{\"message\":{\"content\":\"A red image\"},\"done\":true}\n")
+        }
+        let store = ChatStore(client: client, defaults: defaults, repository: repository)
+        let first = try repository.imageStore.importData(imageFixture(), name: "first.png")
+        let second = try repository.imageStore.importData(imageFixture(), name: "second.png")
+        store.library.addImages([first, second], to: store.library.selectedID)
+        store.draft = "Describe these"
+        store.send()
+        try await waitForReply(store)
+        let restored = ChatStore(client: client, defaults: defaults, repository: repository)
+        XCTAssertEqual(restored.messages[0].attachments, [first, second])
+        XCTAssertNoThrow(try restored.imageStore.data(for: first))
+        restored.draft = "What color?"
+        restored.send()
+        try await waitForReply(restored)
+        XCTAssertEqual(requests, 2)
+        XCTAssertNil(restored.error)
+    }
+
+    func testTextOnlyModelsKeepImagesButDoNotSendAnUnsupportedRequest() async throws {
+        var chatRequests = 0
+        MockOllama.respond = { request in
+            if request.url?.path == "/api/chat" { chatRequests += 1 }
+            return (200, #"{"capabilities":["completion"]}"#)
+        }
+        let store = ChatStore(client: client, defaults: defaults, repository: repository)
+        let image = try repository.imageStore.importData(imageFixture(), name: "photo")
+        store.library.addImages([image], to: store.library.selectedID)
+        store.send()
+        try await waitForReply(store)
+        XCTAssertEqual(chatRequests, 0)
+        XCTAssertTrue(store.error?.contains("doesn’t support images") == true)
+        XCTAssertEqual(store.messages.count, 1)
+        XCTAssertEqual(store.messages[0].attachments, [image])
+        XCTAssertNoThrow(try store.imageStore.data(for: image))
+    }
+
+    func testImageCountLimitAndRemovingDraftImage() async throws {
+        let store = ChatStore(client: client, defaults: defaults, repository: repository)
+        let image = try repository.imageStore.importData(imageFixture(), name: "photo")
+        store.library.addImages([image], to: store.library.selectedID)
+        store.attachFiles(Array(repeating: URL(fileURLWithPath: "/missing.png"), count: 4))
+        XCTAssertTrue(store.error?.contains("four images") == true)
+        XCTAssertFalse(store.isImportingImages)
+        store.library.removeDraftImage(image.id)
+        XCTAssertTrue(store.draftImages.isEmpty)
+        XCTAssertThrowsError(try store.imageStore.data(for: image))
+    }
+
+    func testSwitchingChatsDoesNotReloadTheModel() async throws {
+        var pins = 0
+        MockOllama.manage = { _ in pins += 1; return (200, #"{"done":true}"#) }
+        let store = ChatStore(client: client, defaults: defaults, repository: repository)
+        _ = await store.modelSession.prepare(store.selectedModel).value
+        let first = store.library.selectedID
+        store.newChat()
+        store.openConversation(first)
+        XCTAssertEqual(pins, 1)
+        XCTAssertEqual(store.modelSession.activeModel, store.selectedModel)
+    }
+
+    func testImagePayloadLimitCountsEveryImageSentAcrossHistory() async throws {
+        let image = ChatAttachment(id: UUID(), name: "repeated", width: 10, height: 10)
+        let message = ChatMessage(role: .user, content: "Images", attachments: Array(repeating: image, count: 4))
+        do {
+            _ = try await client.reply(model: "orca", messages: [message],
+                imageData: [image.id: Data(count: AttachmentStore.maxStoredBytes)]) { _ in }
+            XCTFail("An oversized payload must fail before being sent")
+        } catch ImageError.payloadTooLarge {
+            // Reusing one stored file still counts once for every wire occurrence.
+        }
     }
 
     private func waitForReply(_ store: ChatStore) async throws {

@@ -26,6 +26,10 @@ struct ChatView: View {
                     .background(ChatScrollObserver { followsResponse = $0 })
                 }
                 .onAppear { proxy.scrollTo("conversation-bottom", anchor: .bottom) }
+                .onChange(of: store.library.selectedID) { _, _ in
+                    followsResponse = true
+                    proxy.scrollTo("conversation-bottom", anchor: .bottom)
+                }
                 .onChange(of: store.chatTextZoom) { _, _ in
                     if followsResponse { proxy.scrollTo("conversation-bottom", anchor: .bottom) }
                 }
@@ -39,12 +43,12 @@ struct ChatView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            if let error = store.error ?? store.modelSession.error { errorBanner(error) }
+            if let error = store.error ?? store.modelSession.error ?? store.library.error { errorBanner(error) }
             ContextBar(usage: store.usage, compact: compact)
             if let model = store.modelSession.loadingModel, let started = store.modelSession.loadingStarted {
                 ModelLoadingBar(model: model, started: started, compact: compact)
             }
-            composer
+            ChatComposer(store: store, compact: compact)
             HStack {
                 ModelPicker(store: store, compact: compact)
                 Spacer(minLength: 3)
@@ -72,7 +76,10 @@ struct ChatView: View {
             Text(message.role == .user ? "YOU" : "LORCA")
                 .font(.system(size: 9, weight: .bold)).tracking(1.2)
                 .foregroundStyle(message.role == .user ? Color.secondary : .lorcaBlue)
-            if message.content.isEmpty && store.isGenerating {
+            if !message.attachments.isEmpty {
+                AttachmentStrip(attachments: message.attachments, storage: store.imageStore, compact: compact)
+            }
+            if message.role == .assistant && message.content.isEmpty && store.isGenerating {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.mini)
                     Text("Thinking…").font(.system(size: 12)).foregroundStyle(.secondary)
@@ -85,35 +92,6 @@ struct ChatView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var composer: some View {
-        HStack(alignment: .bottom, spacing: 12) {
-            TextField("Message lorca…", text: $store.draft, axis: .vertical)
-                .font(.system(size: textSize))
-                .textFieldStyle(.plain).lineLimit(1...5)
-                .onSubmit { store.send() }
-                .accessibilityIdentifier(compact ? "mini-message-input" : "dashboard-message-input")
-            if store.isGenerating {
-                Button { store.stop() } label: {
-                    Image(systemName: "stop.circle.fill").font(.system(size: 25)).foregroundStyle(Color.lorcaBlue)
-                }
-                .help("Stop response (Esc)").keyboardShortcut(.escape, modifiers: [])
-                .accessibilityLabel("Stop response")
-            } else {
-                Button { store.send() } label: {
-                    Image(systemName: "arrow.up.circle.fill").font(.system(size: 25))
-                        .foregroundStyle(store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.secondary.opacity(0.45) : .lorcaBlue)
-                }
-                .disabled(store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.modelSession.isLoading)
-                .keyboardShortcut(.return, modifiers: .command)
-                .help("Send (⌘Return)").accessibilityLabel("Send message")
-            }
-        }
-        .buttonStyle(.plain)
-        .padding(compact ? 12 : 16)
-        .background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: compact ? 12 : 16))
-        .overlay(RoundedRectangle(cornerRadius: compact ? 12 : 16).strokeBorder(.primary.opacity(0.10)))
-    }
-
     private func errorBanner(_ error: String) -> some View {
         HStack(alignment: .top, spacing: 9) {
             Image(systemName: "wifi.exclamationmark").foregroundStyle(.orange)
@@ -123,6 +101,8 @@ struct ChatView: View {
                 Image(systemName: "arrow.clockwise")
             }
             .buttonStyle(.plain).help("Reconnect").disabled(store.isChecking)
+            Button { store.library.error = nil; store.error = nil; store.modelSession.clearError() } label: { Image(systemName: "xmark") }
+                .buttonStyle(.plain).help("Dismiss error")
         }
         .padding(11)
         .background(.orange.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))

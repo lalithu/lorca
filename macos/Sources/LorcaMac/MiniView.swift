@@ -46,6 +46,7 @@ struct MiniView: View {
         VStack(spacing: 14) {
             HStack {
                 Text("lorca").font(.system(size: 14, weight: .semibold, design: .rounded))
+                ConversationMenu(store: store)
                 Spacer()
                 ConnectionBadge(store: store)
             }

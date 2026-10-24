@@ -42,7 +42,7 @@ final class ModelSessionTests: XCTestCase {
         XCTAssertEqual(requests, [-1, 0])
     }
 
-    func testSwitchLoadsReplacementBeforeConfirmedUnload() async throws {
+    func testSwitchUnloadsWithConsentBeforeLoadingReplacement() async throws {
         var actions: [String] = []
         MockOllama.manage = { request in
             let body = try MockOllama.payload(request)
@@ -54,12 +54,12 @@ final class ModelSessionTests: XCTestCase {
         let session = ModelSession(client: client)
         session.approvePreviousUnload = { model in
             XCTAssertEqual(model, "first")
-            XCTAssertEqual(session.activeModel, "second")
+            XCTAssertEqual(session.activeModel, "first")
             return true
         }
         _ = await session.prepare("first").value
         _ = await session.prepare("second").value
-        XCTAssertEqual(actions, ["first:-1", "second:-1", "first:0"])
+        XCTAssertEqual(actions, ["first:-1", "first:0", "second:-1"])
         XCTAssertEqual(session.modelsToRelease, ["second"])
         _ = await session.close(unload: false)
     }
@@ -113,4 +113,44 @@ final class ModelSessionTests: XCTestCase {
         let afterClosing = await session.prepare("orca").value
         XCTAssertFalse(afterClosing)
     }
+    func testFailedReplacementRestoresTheReleasedModel() async throws {
+        var actions: [String] = []
+        MockOllama.manage = { request in
+            let body = try MockOllama.payload(request)
+            let model = try XCTUnwrap(body["model"] as? String)
+            let keep = try XCTUnwrap(body["keep_alive"] as? Int)
+            actions.append("\(model):\(keep)")
+            if model == "broken" { return (500, #"{"error":"not enough memory"}"#) }
+            return (200, #"{"done":true,"done_reason":"unload"}"#)
+        }
+        let session = ModelSession(client: client)
+        session.approvePreviousUnload = { _ in true }
+        _ = await session.prepare("first").value
+        let loaded = await session.prepare("broken").value
+        XCTAssertFalse(loaded)
+        XCTAssertEqual(session.activeModel, "first")
+        XCTAssertEqual(actions, ["first:-1", "first:0", "broken:-1", "first:-1"])
+        XCTAssertEqual(session.error, "not enough memory")
+        XCTAssertFalse(session.isLoading)
+    }
+
+    func testReturningToActiveModelCancelsPendingSwitchWithoutReloadingIt() async throws {
+        var actions: [String] = []
+        MockOllama.manage = { request in
+            let body = try MockOllama.payload(request)
+            actions.append(try XCTUnwrap(body["model"] as? String))
+            return (200, #"{"done":true}"#)
+        }
+        let session = ModelSession(client: client)
+        _ = await session.prepare("first").value
+        let pending = session.prepare("second")
+        let returned = session.prepare("first")
+        let firstReady = await returned.value
+        let secondReady = await pending.value
+        XCTAssertTrue(firstReady)
+        XCTAssertFalse(secondReady)
+        XCTAssertEqual(session.activeModel, "first")
+        XCTAssertEqual(actions, ["first"])
+    }
+
 }

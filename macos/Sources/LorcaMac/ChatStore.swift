@@ -8,22 +8,33 @@ enum Appearance: String, CaseIterable, Identifiable {
 
 @MainActor
 final class ChatStore: ObservableObject {
-    @Published var messages: [ChatMessage] = []
-    @Published var draft = ""
+    let library: ConversationLibrary
+    var messages: [ChatMessage] {
+        get { library.current.messages }
+        set { library.edit { $0.messages = newValue } }
+    }
+    var draft: String {
+        get { library.current.draft }
+        set { library.edit { $0.draft = newValue } }
+    }
+    var draftImages: [ChatAttachment] { library.current.draftImages }
+    var imageStore: AttachmentStore { library.repository.imageStore }
+    var canSend: Bool { (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftImages.isEmpty)
+        && !isGenerating && !isImportingImages && !modelSession.isLoading && !modelSession.isClosing }
     @Published private(set) var chatTextZoom: CGFloat = 0
+    @Published var isImportingImages = false
     @Published var models: [String] = []
     @Published var selectedModel: String {
         didSet {
             defaults.set(selectedModel, forKey: "model")
+            guard oldValue != selectedModel else { return }
+            if isGenerating { stop() }
             usage = ChatUsage(contextUsed: messages.isEmpty ? 0 : nil)
-            if !isChecking && oldValue != selectedModel { loadSelectedModel() }
+            if !isChecking && !restoringModel { loadSelectedModel() }
         }
     }
     @Published var appearance: Appearance {
-        didSet {
-            defaults.set(appearance.rawValue, forKey: "appearance")
-            appearanceChanged?()
-        }
+        didSet { defaults.set(appearance.rawValue, forKey: "appearance"); appearanceChanged?() }
     }
     @Published private(set) var isConnected = false
     @Published private(set) var isChecking = false
@@ -38,16 +49,21 @@ final class ChatStore: ObservableObject {
     private let defaults: UserDefaults
     private var generation: Task<Void, Never>?
     private var generationID: UUID?
-    private var sessionUpdates: AnyCancellable?
+    private var updates: Set<AnyCancellable> = []
+    private var restoringModel = false
+    private var visionCapabilities: [String: Bool] = [:]
 
-    init(client: OllamaClient = OllamaClient(), defaults: UserDefaults = .standard) {
+    init(client: OllamaClient = OllamaClient(), defaults: UserDefaults = .standard,
+         repository: ConversationRepository = ConversationRepository()) {
         self.client = client
         self.defaults = defaults
+        library = ConversationLibrary(repository: repository)
         modelSession = ModelSession(client: client)
         selectedModel = defaults.string(forKey: "model") ?? "qwen3.5:9b"
         appearance = Appearance(rawValue: defaults.string(forKey: "appearance") ?? "Dark") ?? .dark
-        sessionUpdates = modelSession.objectWillChange.sink { [weak self] _ in
-            self?.objectWillChange.send()
+        resetUsage()
+        for source in [modelSession.objectWillChange, library.objectWillChange] {
+            source.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &updates)
         }
     }
 
@@ -66,18 +82,14 @@ final class ChatStore: ObservableObject {
         defer { isChecking = false }
         do {
             models = try await client.models()
+            visionCapabilities = [:]
             isConnected = true
             error = models.isEmpty ? "No local models yet. Run ‘ollama pull qwen3.5:9b’ to get started." : nil
             if !models.isEmpty && !models.contains(selectedModel) {
                 selectedModel = models.contains("qwen3.5:9b") ? "qwen3.5:9b" : models[0]
             }
-            if !models.isEmpty, await modelSession.prepare(selectedModel).value {
-                await refreshContextLimit()
-            }
-        } catch {
-            isConnected = false
-            self.error = friendlyError(error)
-        }
+            if !models.isEmpty, await modelSession.prepare(selectedModel).value { await refreshContextLimit() }
+        } catch { isConnected = false; self.error = friendlyError(error) }
     }
 
     private func loadSelectedModel() {
@@ -85,8 +97,13 @@ final class ChatStore: ObservableObject {
         let loading = modelSession.prepare(model)
         Task { [weak self] in
             let ready = await loading.value
-            guard let self, self.selectedModel == model, ready else { return }
-            await self.refreshContextLimit()
+            guard let self, self.selectedModel == model else { return }
+            if ready { await self.refreshContextLimit() }
+            else if let previous = self.modelSession.activeModel {
+                self.restoringModel = true
+                self.selectedModel = previous
+                self.restoringModel = false
+            }
         }
     }
 
@@ -98,14 +115,22 @@ final class ChatStore: ObservableObject {
     }
 
     func send() {
+        guard canSend else { return }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !isGenerating, !modelSession.isLoading, !modelSession.isClosing else { return }
-        draft = ""
-        error = nil
-        messages.append(ChatMessage(role: .user, content: text))
-        let history = messages.filter { !$0.content.isEmpty }
+        let images = draftImages
+        library.edit { conversation in
+            conversation.draft = ""
+            conversation.draftImages = []
+            if conversation.title == "New chat", conversation.messages.isEmpty {
+                conversation.title = String((text.isEmpty ? "Image: \(images.first?.name ?? "image")" : text).prefix(60))
+            }
+            conversation.messages.append(ChatMessage(role: .user, content: text, attachments: images))
+        }
+        let history = messages.filter { !$0.content.isEmpty || !$0.attachments.isEmpty }
         let response = ChatMessage(role: .assistant, content: "")
         messages.append(response)
+        library.flush()
+        error = nil
         let id = UUID()
         generationID = id
         isGenerating = true
@@ -113,6 +138,7 @@ final class ChatStore: ObservableObject {
         usage.contextUsed = nil
         usage.tokensPerSecond = nil
         let model = selectedModel
+        let storage = imageStore
         generation = Task { [weak self] in
             guard let self else { return }
             defer {
@@ -121,22 +147,39 @@ final class ChatStore: ObservableObject {
                     self.generationID = nil
                     self.generation = nil
                     self.removeEmptyReply(response.id)
+                    self.library.flush()
                 }
             }
             do {
-                guard await self.modelSession.prepare(model).value else { return }
+                let attachments = history.flatMap(\.attachments)
+                if !attachments.isEmpty {
+                    if self.visionCapabilities[model] == nil, let supported = try await self.client.supportsVision(model: model) {
+                        self.visionCapabilities[model] = supported
+                    }
+                    if self.visionCapabilities[model] == false { throw OllamaError.unsupportedVision(model) }
+                }
+                let imageData = try await Task.detached(priority: .userInitiated) {
+                    var result: [UUID: Data] = [:]
+                    var total = 0
+                    for attachment in attachments where result[attachment.id] == nil {
+                        let data = try storage.data(for: attachment)
+                        total += data.count
+                        guard total <= 24 * 1024 * 1024 else { throw ImageError.payloadTooLarge }
+                        result[attachment.id] = data
+                    }
+                    return result
+                }.value
+                try Task.checkCancellation()
+                guard self.generationID == id, await self.modelSession.prepare(model).value else { return }
                 guard !Task.isCancelled, self.generationID == id else { return }
-                let usage = try await self.client.reply(model: model, messages: history) { [weak self] text in
+                let usage = try await self.client.reply(model: model, messages: history, imageData: imageData) { [weak self] text in
                     guard let self, self.generationID == id,
                           let index = self.messages.firstIndex(where: { $0.id == response.id }) else { return }
                     self.messages[index].content += text
                     self.receivedText = true
                     self.isConnected = true
                 }
-                if self.generationID == id {
-                    self.isConnected = true
-                    self.usage = usage
-                }
+                if self.generationID == id { self.isConnected = true; self.usage = usage }
             } catch {
                 guard self.generationID == id, !Task.isCancelled else { return }
                 self.error = friendlyError(error)
@@ -151,20 +194,23 @@ final class ChatStore: ObservableObject {
         generation = nil
         isGenerating = false
         if let last = messages.last, last.role == .assistant { removeEmptyReply(last.id) }
+        library.flush()
     }
 
-    func resizeChatText(by amount: CGFloat) {
-        chatTextZoom = min(10, max(-4, chatTextZoom + amount))
+    func resizeChatText(by amount: CGFloat) { chatTextZoom = min(10, max(-4, chatTextZoom + amount)) }
+    func newChat() { stop(); library.create(); error = nil; resetUsage() }
+    func openConversation(_ id: UUID) {
+        guard id != library.selectedID else { return }
+        stop(); library.open(id); error = nil; resetUsage()
+    }
+    func deleteConversation(_ id: UUID) {
+        let active = id == library.selectedID
+        if active { stop() }
+        library.delete(id)
+        if active { resetUsage() }
     }
 
-    func newChat() {
-        stop()
-        messages = []
-        draft = ""
-        error = nil
-        usage = ChatUsage(contextLimit: usage.contextLimit)
-    }
-
+    private func resetUsage() { usage = ChatUsage(contextUsed: messages.isEmpty ? 0 : nil, contextLimit: usage.contextLimit) }
     private func removeEmptyReply(_ id: UUID) {
         messages.removeAll { $0.id == id && $0.role == .assistant && $0.content.isEmpty }
     }

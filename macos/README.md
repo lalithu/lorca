@@ -6,7 +6,7 @@
 - Terminal chat: `lorca`. Both commands work from any directory.
 - Build only: `./build.sh` → `build/lorca.app` (can be opened in Finder).
 - Test: `swift test`. Open `Package.swift` in Xcode to edit.
-- Dashboard opens as a normal, resizable 880 × 600 window. **Show Dashboard** (`⌘1`) restores it; **Full Screen Dashboard** (`⌃⌘F`) enters native full screen.
+- Dashboard starts at 880 × 600 and remembers your window size and position. Bringing it forward preserves full screen. **Show Dashboard** (`⌘1`) restores it; **Full Screen Dashboard** (`⌃⌘F`) enters native full screen.
 - Click the emoji to open/collapse Mini; drag it to move. **Show / Hide Mini**: `⌘2`.
 - Mini’s glass controls: new chat, open dashboard, collapse. Its chat stays anchored beside the pet.
 - Blue GUI accents; expanded Mini moves together with the pet and fits back onscreen after dragging.
@@ -14,13 +14,23 @@
 - `⌘W` closes the dashboard and shows Mini if hidden. `⌘1` restores the dashboard; `⌘Q` quits both.
 - `⌘=` / `⌘−`: increase / decrease chat text size in Dashboard and Mini.
 - Scroll back freely during replies; return to the bottom to resume following. Headings, lists, quotes, tables, and code render as Markdown.
-- Both views share one in-memory conversation. **New Chat**: `⌘N`; stop a reply with Escape or the stop button.
+- Both views share saved conversations and drafts. Recents in the sidebar supports create/open/rename/delete; Mini has a history menu. **New Chat**: `⌘N`; stop a reply with Escape or the stop button.
 - Both chats show a cyan context bar and response speed from Ollama; unavailable measurements display `—`.
 - The selected model preloads at startup and stays loaded (`keep_alive: -1`). A temporary loading bar and timer appear under `ctx` in both chats.
-- Model switching preloads the replacement, then offers to unload the previous model. `⌘Q` offers **Quit & Unload** or **Keep Loaded & Quit**, warning that Ollama models are shared with other apps.
+- Model switching offers to unload the old model before loading the next, or explicitly keep both loaded. A failed replacement tries to restore the previous model. `⌘Q` offers **Quit & Unload** or **Keep Loaded & Quit**, warning that Ollama models are shared with other apps.
 - Settings: installed Ollama models and System/Dark/Light appearance. Defaults to `qwen3.5:9b` at `http://127.0.0.1:11434`.
 - Overview, Tasks, Pipelines, Scheduled are placeholders.
 - Rust terminal chat is preserved; `lorca main` launches this app. This prototype talks directly to Ollama; the Rust-core bridge comes later.
+
+## Local storage and images
+
+- Chat JSON: `~/Library/Application Support/lorca/conversations/`; images: `attachments/` alongside it.
+- Streaming saves every 200 ms; stop, switching chats, and quit flush immediately. Force-killing can lose the last checkpoint interval.
+- Unreadable chats remain untouched; healthy chats still open. Keep the whole `lorca` folder when backing up or restoring.
+- Add images with `+`, drop on the composer, or paste (`⌘V`); click a preview to open the stored image.
+- Four images/message, 20 MB input/image. Images normalize to JPEG (maximum 4,096-pixel edge, 8 MB each); total request image data is limited to 24 MB.
+- A vision-capable model is required for chats containing images. Missing images or unsupported models produce a friendly error.
+- Deleting a chat or draft image removes only files unused by other saved chats. Cleanup pauses if any chat metadata is unreadable.
 
 ## Files
 
@@ -28,3 +38,6 @@
 - `DashboardView.swift`, `MiniView.swift`, `ChatView.swift`: native views and basic Markdown.
 - `ChatStore.swift`, `ModelSession.swift`, `OllamaClient.swift`: shared chat, session model lifecycle, Ollama requests.
 - `Resources/orca.txt`: copy of the repository’s existing emoji asset.
+- `ConversationLibrary.swift`, `ConversationRepository.swift`, `Conversation.swift`: selection, atomic chat files, data types.
+- `ChatComposer.swift`, `AttachmentStrip.swift`, `ImageInput.swift`, `AttachmentStore.swift`: image input, previews, validation, and separate image files.
+- `ChatInput.swift`, `ClipboardImages.swift`: native text editing and image paste/drop handling.

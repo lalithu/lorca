@@ -63,10 +63,14 @@ struct DashboardView: View {
                 Text("lorca").font(.system(size: 25, weight: .semibold, design: .rounded))
             }
             .padding(.bottom, 32)
-            ForEach(SidebarPage.allCases.filter { $0 != .settings }) { page in
-                navigation(page)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(SidebarPage.allCases.filter { $0 != .settings }) { page in navigation(page) }
+                    if windows.page == .chats { ConversationHistory(store: store) }
+                }
             }
-            Spacer(minLength: 30)
+            .scrollIndicators(.hidden)
+            Spacer(minLength: 12)
             navigation(.settings)
             Divider().padding(.vertical, 17)
             HStack(spacing: 8) {
@@ -165,7 +169,7 @@ struct DashboardView: View {
                     Text("Click to chat. Drag to move. Mini works even with the dashboard closed.")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                 }
-                Text("Conversations stay in memory for this app session.")
+                Text("Chats and attached images are saved locally in Application Support/lorca.")
                     .font(.system(size: 11)).foregroundStyle(.tertiary)
             }
             .frame(maxWidth: 650, alignment: .leading)

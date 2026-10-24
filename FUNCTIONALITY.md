@@ -1,8 +1,10 @@
 # lorca functionality
 
 - `lorca`: terminal chat; `lorca main`: macOS dashboard + Mini.
-
-- Local Ollama chat with streaming replies and session-only conversation memory.
+- GUI chat history: create, switch, rename, delete, and restore local conversations.
+- Images: picker, drag/drop, paste, previews, local storage, and Ollama vision.
+- Shared Dashboard/Mini chats, Markdown, manual scrolling, and `⌘=` / `⌘−` text sizing.
+- Terminal Ollama chat: streaming replies and session-only memory.
 - Automatic model preloading; animated loading bar with elapsed time.
 - Models stay loaded during the session (`keep_alive: -1`).
 - `/model NAME`: load a replacement, then unload the previous model.

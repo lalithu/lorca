@@ -43,8 +43,12 @@ final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolb
         dashboard.toolbar = toolbar
         dashboard.toolbarStyle = .unifiedCompact
         dashboard.titlebarSeparatorStyle = .none
-        dashboard.contentView = NSHostingView(rootView: DashboardView(store: store, windows: self))
-        dashboard.center()
+        let dashboardContent = NSHostingView(rootView: DashboardView(store: store, windows: self))
+        // AppKit owns window geometry; SwiftUI must not replace it with a fitting size.
+        dashboardContent.sizingOptions = []
+        dashboard.contentView = dashboardContent
+        if !dashboard.setFrameUsingName("lorca.dashboard") { dashboard.center() }
+        dashboard.setFrameAutosaveName("lorca.dashboard")
 
         mini = MiniPanel(contentRect: NSRect(x: 0, y: 0, width: 160, height: 168),
             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -95,9 +99,6 @@ final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolb
         if dashboard.isMiniaturized { dashboard.deminiaturize(nil) }
         dashboard.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        if dashboard.styleMask.contains(.fullScreen) {
-            dashboard.toggleFullScreen(nil)
-        }
     }
 
     func closeDashboard() {

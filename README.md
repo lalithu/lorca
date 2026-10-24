@@ -1,7 +1,8 @@
 # lorca
 
-A compact terminal chat client for local Ollama models. Conversations stay in
-memory for the current session.
+A compact local Ollama chat client: Rust terminal chat, plus a native macOS
+dashboard and floating Mini. Terminal conversations are session-only; GUI chats
+and images are saved locally.
 
 See [FUNCTIONALITY.md](FUNCTIONALITY.md) for the complete feature reference.
 
@@ -32,6 +33,20 @@ In the GUI, `⌘W` closes the dashboard and shows Mini, even if Mini was hidden.
 Use `⌘1` to reopen the dashboard and `⌘Q` to quit both.
 See [macOS instructions](macos/README.md). Launching either mode does not build
 or print Cargo output.
+
+## Saved chats and images (macOS)
+
+- Create and switch chats in **Chats → Recents**; use `…` to rename or delete.
+- Mini’s history menu opens the same chats; drafts and messages stay synchronized.
+- Attach images with `+`, drop them on the composer, or paste with `⌘V`.
+- Up to four images per message; vision requires a compatible installed model.
+- Stored in `~/Library/Application Support/lorca/`: chat JSON in `conversations/`,
+  optimized images in `attachments/`. Replies save during streaming and on stop/quit.
+- Images: 20 MB input maximum each; optimized to JPEG, at most 4,096 pixels on the
+  longest edge and 8 MB each. Requests allow 24 MB of image data across history.
+
+The sections below describe the Rust terminal interface. The GUI keeps its model
+and appearance preferences separately in macOS preferences.
 
 ## Configuration
 

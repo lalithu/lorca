@@ -18,19 +18,20 @@ final class ModelSession: ObservableObject {
     init(client: OllamaClient) { self.client = client }
     var isLoading: Bool { loadingModel != nil }
 
+    func clearError() { error = nil }
+
     func prepare(_ model: String) -> Task<Bool, Never> {
         guard !isClosing else { return Task { false } }
         if loadingModel == model, let loading { return loading }
-        if activeModel == model { return Task { true } }
-        loading?.cancel()
+        if activeModel == model && loading == nil { error = nil; return Task { true } }
+        let preceding = loading
+        preceding?.cancel()
         let id = UUID()
         operationID = id
-        let previous = activeModel
         loadingModel = model
         loadingStarted = Date()
         error = nil
         // Include uncertain/cancelled requests so quit can attempt cleanup too.
-        modelsToRelease.insert(model)
         let task = Task { [weak self] in
             guard let self else { return false }
             defer {
@@ -40,21 +41,40 @@ final class ModelSession: ObservableObject {
                     self.loading = nil
                 }
             }
+            if let preceding { _ = await preceding.value }
+            guard !Task.isCancelled, self.operationID == id else { return false }
+            if self.activeModel == model { return true }
+            let previous = self.activeModel
+            var releasedPrevious = false
             do {
+                // With explicit consent, release the old allocation before loading another.
+                if let previous, self.approvePreviousUnload?(previous) == true {
+                    try await self.client.setKeepAlive(model: previous, seconds: 0)
+                    self.modelsToRelease.remove(previous)
+                    self.activeModel = nil
+                    releasedPrevious = true
+                    try Task.checkCancellation()
+                }
+                self.modelsToRelease.insert(model)
                 try await self.client.setKeepAlive(model: model, seconds: -1)
                 guard !Task.isCancelled, self.operationID == id else { return false }
                 self.activeModel = model
-                if let previous, previous != model, self.approvePreviousUnload?(previous) == true {
-                    do {
-                        try await self.client.setKeepAlive(model: previous, seconds: 0)
-                        self.modelsToRelease.remove(previous)
-                    } catch {
-                        self.error = "The new model is ready, but unloading \(previous) wasn’t confirmed."
-                    }
-                }
                 return true
             } catch {
-                if self.operationID == id, !Task.isCancelled { self.error = friendlyError(error) }
+                if self.operationID == id, !Task.isCancelled {
+                    var failure = friendlyError(error)
+                    if releasedPrevious, let previous {
+                        self.modelsToRelease.insert(previous)
+                        do {
+                            try await self.client.setKeepAlive(model: previous, seconds: -1)
+                            if self.operationID == id, !Task.isCancelled {
+                                self.modelsToRelease.insert(previous)
+                                self.activeModel = previous
+                            }
+                        } catch { failure += " The previous model couldn’t be restored: \(friendlyError(error))" }
+                    }
+                    if self.operationID == id, !Task.isCancelled { self.error = failure }
+                }
                 return false
             }
         }
@@ -65,10 +85,12 @@ final class ModelSession: ObservableObject {
     func close(unload: Bool) async -> [String] {
         isClosing = true
         operationID = nil
-        loading?.cancel()
+        let pending = loading
+        pending?.cancel()
         loading = nil
         loadingModel = nil
         loadingStarted = nil
+        if let pending { _ = await pending.value }
         guard unload else { return [] }
         let client = client
         let failed = await withTaskGroup(of: String?.self, returning: [String].self) { group in

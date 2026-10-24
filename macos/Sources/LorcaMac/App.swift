@@ -24,9 +24,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windows.open()
         store.modelSession.approvePreviousUnload = { [weak self] model in
             guard let self else { return false }
-            let alert = self.sharedModelAlert("Unload the previous model?", models: [model])
+            let alert = self.sharedModelAlert("Unload \(model) before loading the next model?", models: [model])
             alert.addButton(withTitle: "Unload")
-            alert.addButton(withTitle: "Keep Loaded")
+            alert.addButton(withTitle: "Keep Both Loaded")
             return alert.runModal() == .alertFirstButtonReturn
         }
         Task { await store.refreshConnection() }

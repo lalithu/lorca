@@ -1,18 +1,5 @@
 import Foundation
 
-struct ChatMessage: Identifiable, Equatable, Codable {
-    enum Role: String, Codable { case user, assistant }
-    let id: UUID
-    let role: Role
-    var content: String
-
-    init(role: Role, content: String) {
-        self.id = UUID()
-        self.role = role
-        self.content = content
-    }
-}
-
 struct ChatUsage {
     var contextUsed: Int? = 0
     var contextLimit: Int?
@@ -39,6 +26,19 @@ struct OllamaClient {
         let (data, response) = try await session.data(for: request)
         try validate(response)
         return try JSONDecoder().decode(ModelList.self, from: data).models.map(\.name).sorted()
+    }
+
+    func supportsVision(model: String) async throws -> Bool? {
+        var request = URLRequest(url: baseURL.appendingPathComponent("api/show"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 5
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["model": model])
+        let (data, response) = try await session.data(for: request)
+        // Older servers may not expose capabilities; let /api/chat validate in that case.
+        if (response as? HTTPURLResponse)?.statusCode == 404 { return nil }
+        try validate(response)
+        return try JSONDecoder().decode(ModelCapabilities.self, from: data).capabilities.map { $0.contains("vision") }
     }
 
     func contextLimit(model: String) async throws -> Int? {
@@ -80,14 +80,23 @@ struct OllamaClient {
         }
     }
 
-    func reply(model: String, messages: [ChatMessage], onText: @MainActor (String) -> Void) async throws -> ChatUsage {
+    func reply(model: String, messages: [ChatMessage], imageData: [UUID: Data] = [:], onText: @MainActor (String) -> Void) async throws -> ChatUsage {
         var request = URLRequest(url: baseURL.appendingPathComponent("api/chat"))
         request.httpMethod = "POST"
         request.timeoutInterval = 120
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var totalImageBytes = 0
         request.httpBody = try JSONEncoder().encode(ChatRequest(
             model: model,
-            messages: messages.map { WireMessage(role: $0.role.rawValue, content: $0.content) }
+            messages: try messages.map { message in
+                let images = try message.attachments.map { attachment in
+                    guard let data = imageData[attachment.id] else { throw ImageError.missing }
+                    totalImageBytes += data.count
+                    guard totalImageBytes <= 24 * 1024 * 1024 else { throw ImageError.payloadTooLarge }
+                    return data.base64EncodedString()
+                }
+                return WireMessage(role: message.role.rawValue, content: message.content, images: images.isEmpty ? nil : images)
+            }
         ))
         let (bytes, response) = try await session.bytes(for: request)
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
@@ -140,9 +149,12 @@ private struct RunningModels: Decodable {
     let models: [Model]
 }
 
+private struct ModelCapabilities: Decodable { let capabilities: [String]? }
+
 private struct WireMessage: Encodable {
     let role: String
     let content: String
+    let images: [String]?
 }
 
 private struct ChatRequest: Encodable {
@@ -172,8 +184,12 @@ private struct StreamFrame: Decodable {
 
 enum OllamaError: LocalizedError {
     case server(String)
+    case unsupportedVision(String)
     var errorDescription: String? {
-        switch self { case .server(let message): return message }
+        switch self {
+        case .server(let message): return message
+        case .unsupportedVision(let model): return "\(model) doesn’t support images. Choose a vision-capable model to continue this chat, or start a text-only chat. Your images are saved."
+        }
     }
 }
 
