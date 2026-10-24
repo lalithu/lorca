@@ -17,3 +17,5 @@ base64 = "0.22"
 axum = "0.8"
 fs2 = "0.4"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
+cap-std = "4"
+libc = "0.2"

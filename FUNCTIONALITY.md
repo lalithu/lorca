@@ -21,3 +21,5 @@
 - Launch overrides: `--model`, `--host`, `--config`; help: `--help`.
 - Error recovery, cancellable loading/unloading, and terminal-state restoration.
 - Confirmed `● model unloaded`, followed by red `● session closed`.
+
+- `lorca agent --workspace PATH "TASK"`: native tool loop, explicit action approvals, cancellation, and live events ([details](AGENT.md)).

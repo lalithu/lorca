@@ -1,0 +1,216 @@
+use axum::{
+    Json, Router,
+    extract::State,
+    routing::{get, post},
+};
+use lorca::{
+    agent::{Status, TaskView},
+    core::Core,
+    storage::Repository,
+};
+use serde_json::{Value, json};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+struct Temp(PathBuf);
+impl Temp {
+    fn new() -> Self {
+        let p = std::env::temp_dir().join(format!("lorca-agent-core-{}", lorca::types::id()));
+        std::fs::create_dir(&p).unwrap();
+        Self(p)
+    }
+}
+impl Drop for Temp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+#[derive(Default)]
+struct Server {
+    requests: Mutex<Vec<Value>>,
+    slow: bool,
+}
+async fn chat(State(s): State<Arc<Server>>, Json(v): Json<Value>) -> Json<Value> {
+    s.requests.lock().unwrap().push(v.clone());
+    let message = if v["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v["role"] == "tool")
+    {
+        json!({"role":"assistant","content":"Verified file creation from the tool result."})
+    } else {
+        json!({"role":"assistant","content":"","tool_calls":[{"id":"read","function":{"name":"list_directory","arguments":{"path":"."}}},{"id":"patch","function":{"name":"apply_patch","arguments":{"path":"created.txt","old_text":"","new_text":"verified"}}}]})
+    };
+    Json(json!({"message":message,"done":true}))
+}
+async fn setup(
+    slow: bool,
+) -> (
+    Temp,
+    Temp,
+    Arc<Core>,
+    String,
+    Arc<Server>,
+    tokio::task::JoinHandle<()>,
+) {
+    let store = Temp::new();
+    let workspace = Temp::new();
+    let core = Core::new(Repository::new(store.0.clone()).unwrap()).unwrap();
+    let server = Arc::new(Server {
+        slow,
+        ..Default::default()
+    });
+    let app = Router::new()
+        .route(
+            "/api/generate",
+            post(
+                |State(s): State<Arc<Server>>, Json(v): Json<Value>| async move {
+                    s.requests.lock().unwrap().push(v.clone());
+                    if s.slow {
+                        tokio::time::sleep(Duration::from_secs(20)).await;
+                    }
+                    Json(json!({"model":v["model"],"done":true,"done_reason":"load"}))
+                },
+            ),
+        )
+        .route("/api/chat", post(chat))
+        .route("/api/ps", get(|| async { Json(json!({"models":[]})) }))
+        .with_state(server.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let host = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let session = core
+        .command(json!({"op":"connect","host":host,"model":"qwen3.5:9b"}))
+        .await
+        .unwrap()["session"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    (store, workspace, core, session, server, task)
+}
+async fn wait(core: &Core, p: impl Fn(&TaskView) -> bool) -> TaskView {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(v) = core.agent().snapshot()
+                && p(&v)
+            {
+                return v;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap()
+}
+#[tokio::test]
+async fn unified_core_native_ollama_tools_permissions_and_model_lease() {
+    let (_store, w, core, session, server, http) = setup(false).await;
+    let task=core.command(json!({"op":"agent_start","session":session,"task":"Create a verified file","workspace":w.0})).await.unwrap()["taskId"].as_str().unwrap().to_string();
+    let approval = wait(&core, |v| v.approval.is_some())
+        .await
+        .approval
+        .unwrap();
+    let other = core
+        .command(json!({"op":"connect","model":"qwen3.5:9b"}))
+        .await
+        .unwrap()["session"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(core.command(json!({"op":"agent_decide","session":other,"taskId":task,"approvalId":approval.id,"decision":"allow_once"})).await.is_err());
+    core.command(json!({"op":"agent_decide","session":session,"taskId":task,"approvalId":approval.id,"decision":"allow_once"})).await.unwrap();
+    let view = wait(&core, |v| !v.status.active()).await;
+    assert_eq!(view.status, Status::Completed);
+    assert_eq!(
+        std::fs::read_to_string(w.0.join("created.txt")).unwrap(),
+        "verified"
+    );
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(
+        requests.iter().filter(|v| v.get("tools").is_none()).count(),
+        1
+    );
+    let chats: Vec<_> = requests
+        .iter()
+        .filter(|v| v.get("tools").is_some())
+        .collect();
+    assert_eq!(chats.len(), 2);
+    assert_eq!(chats[0]["stream"], false);
+    assert_eq!(chats[0]["keep_alive"], -1);
+    assert_eq!(chats[0]["tools"].as_array().unwrap().len(), 6);
+    let messages = chats[1]["messages"].as_array().unwrap();
+    assert_eq!(messages[2]["tool_calls"][1]["id"], "patch");
+    assert_eq!(messages[4]["tool_call_id"], "patch");
+    assert!(
+        messages[4]["content"]
+            .as_str()
+            .unwrap()
+            .contains("verified")
+    );
+    assert!(
+        core.snapshot()
+            .sessions
+            .iter()
+            .find(|v| v.id == session)
+            .unwrap()
+            .models_to_release
+            .contains(&"qwen3.5:9b".to_string())
+    );
+    http.abort();
+}
+#[tokio::test]
+async fn closing_owner_cancels_agent_and_cleans_loading_state() {
+    let (_store, w, core, session, server, http) = setup(true).await;
+    core.command(json!({"op":"agent_start","session":session,"task":"Inspect","workspace":w.0}))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while server.requests.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    core.command(json!({"op":"close","session":session,"unload":false}))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait(&core, |v| !v.status.active()).await.status,
+        Status::Cancelled
+    );
+    assert!(core.snapshot().sessions.iter().all(|v| v.id != session));
+    assert!(!w.0.join("created.txt").exists());
+    http.abort();
+}
+
+#[tokio::test]
+async fn model_timeout_clears_preparation_without_closing_the_session() {
+    let (_store, w, core, session, _server, http) = setup(true).await;
+    core.command(json!({"op":"agent_start","session":session,"task":"Inspect","workspace":w.0,"limits":{"modelSeconds":1}})).await.unwrap();
+    assert_eq!(
+        wait(&core, |v| !v.status.active()).await.status,
+        Status::Failed
+    );
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let view = core.snapshot();
+            let client = view.sessions.iter().find(|s| s.id == session).unwrap();
+            if client.loading_model.is_none() {
+                assert!(client.active_model.is_none());
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    core.command(json!({"op":"close","session":session}))
+        .await
+        .unwrap();
+    http.abort();
+}

@@ -1,3 +1,4 @@
+mod agent_cli;
 mod config;
 mod launcher;
 mod lifecycle;
@@ -19,6 +20,9 @@ fn main() -> ExitCode {
 
 fn run() -> io::Result<()> {
     let mut args = std::env::args_os().skip(1);
+    if std::env::args().nth(1).as_deref() == Some("agent") {
+        return agent_cli::run();
+    }
     if std::env::args().nth(1).as_deref() == Some("serve") {
         return lorca::transport::run();
     }

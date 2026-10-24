@@ -141,3 +141,114 @@ fn deleting_chat_removes_only_unreferenced_images_and_skips_corrupt_chats() {
     assert!(repo.image_path(&a.id).unwrap().exists());
     fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn agent_activity_stream_is_authenticated_and_reconnectable() {
+    use futures_util::StreamExt;
+    let root = std::env::temp_dir().join(format!("lorca-agent-transport-{}", id()));
+    let server = tokio::spawn(transport::serve(root.clone()));
+    let endpoint = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Ok(bytes) = fs::read(root.join("runtime/endpoint.json")) {
+                break serde_json::from_slice::<Endpoint>(&bytes).unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let http = reqwest::Client::new();
+    let url = format!("{}/agent/events", endpoint.url);
+    assert_eq!(http.get(&url).send().await.unwrap().status(), 401);
+    assert_eq!(
+        http.get(&url)
+            .bearer_auth(&endpoint.token)
+            .header("x-lorca-session", "expired")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    let command = |value: Value| {
+        http.post(format!("{}/command", endpoint.url))
+            .bearer_auth(&endpoint.token)
+            .json(&value)
+            .send()
+    };
+    // An intentionally unavailable mock address; never contact the real Ollama instance.
+    let v: Value = command(json!({"op":"connect","host":"http://127.0.0.1:1","model":"mock"}))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let session = v["session"].as_str().unwrap();
+    assert_eq!(
+        http.get(&url)
+            .bearer_auth(&endpoint.token)
+            .header("Origin", "http://evil.example")
+            .header("x-lorca-session", session)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    let mut stream = http
+        .get(&url)
+        .bearer_auth(&endpoint.token)
+        .header("x-lorca-session", session)
+        .send()
+        .await
+        .unwrap()
+        .bytes_stream();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&stream.next().await.unwrap().unwrap()).unwrap(),
+        Value::Null
+    );
+    let started: Value =
+        command(json!({"op":"agent_start","session":session,"task":"Inspect","workspace":root}))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    let task = started["taskId"].as_str().unwrap();
+    let failed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let bytes = stream.next().await.unwrap().unwrap();
+            let v: Value = serde_json::from_slice(&bytes).unwrap();
+            if v["status"] == "failed" {
+                break v;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(failed["id"], task);
+    assert_eq!(failed["events"][0]["kind"], "task_started");
+    assert_eq!(
+        failed["events"].as_array().unwrap().last().unwrap()["kind"],
+        "task_failed"
+    );
+    drop(stream);
+    let mut reconnected = http
+        .get(&url)
+        .bearer_auth(&endpoint.token)
+        .header("x-lorca-session", session)
+        .send()
+        .await
+        .unwrap()
+        .bytes_stream();
+    let snapshot: Value =
+        serde_json::from_slice(&reconnected.next().await.unwrap().unwrap()).unwrap();
+    assert_eq!(snapshot, failed);
+    drop(reconnected);
+    command(json!({"op":"close","session":session}))
+        .await
+        .unwrap();
+    server.abort();
+    let _ = server.await;
+    fs::remove_dir_all(root).unwrap();
+}

@@ -48,12 +48,19 @@ impl Client {
                 }
             }
             if !spawned {
-                Command::new(executable)
+                let mut backend = Command::new(executable);
+                backend
                     .arg("serve")
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()?;
+                    .stderr(Stdio::null());
+                // A terminal SIGINT belongs to its frontend, not the shared backend.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::CommandExt;
+                    backend.process_group(0);
+                }
+                backend.spawn()?;
                 spawned = true;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;

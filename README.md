@@ -26,6 +26,7 @@ lorca
 ```sh
 lorca        # Terminal chat (TUI)
 lorca main   # macOS dashboard + Mini
+lorca agent --workspace "$PWD" "Inspect this repository"  # Agent testing CLI
 ```
 
 Build the macOS app once with `./macos/build.sh` before using `lorca main`.
@@ -168,4 +169,4 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swift test --pack
 ```
 
 The core and transport tests use isolated storage and local test servers; they do
-not unload your real Ollama models. There are no tools or agent actions in this version.
+not unload your real Ollama models. Agent tests use temporary workspaces and explicit mock approvals; real subprocess tests verify the macOS sandbox. See [AGENT.md](AGENT.md) for the v0.4A runtime, limits, commands, and future Tasks API.

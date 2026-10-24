@@ -221,6 +221,7 @@ impl Core {
         Ok(())
     }
     pub(super) async fn close(&self, session: &str, unload: bool) -> Result<Value> {
+        self.agent.cancel_owner(session);
         let names = {
             let mut s = self.state.lock().unwrap();
             let i = Self::session_index(&s, session)?;

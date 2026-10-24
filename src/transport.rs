@@ -96,6 +96,48 @@ async fn events(State(service): State<Service>, headers: HeaderMap) -> Response 
     )
         .into_response()
 }
+async fn agent_events(State(service): State<Service>, headers: HeaderMap) -> Response {
+    if !authorized(&headers, &service.token) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(session) = headers
+        .get("x-lorca-session")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
+    else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if service.core.touch(&session).is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let receiver = service.core.agent().subscribe();
+    let stream = futures_util::stream::unfold(
+        (receiver, true, service.core, session),
+        |(mut receiver, first, core, session)| async move {
+            if !first {
+                let _ = tokio::time::timeout(Duration::from_secs(10), receiver.changed()).await;
+            }
+            receiver.borrow_and_update();
+            if core.touch(&session).is_err() {
+                return None;
+            }
+            let mut bytes = serde_json::to_vec(&core.agent().snapshot()).ok()?;
+            bytes.push(b'\n');
+            Some((
+                Ok::<_, io::Error>(Bytes::from(bytes)),
+                (receiver, false, core, session),
+            ))
+        },
+    );
+    (
+        [
+            ("content-type", "application/x-ndjson"),
+            ("cache-control", "no-store"),
+        ],
+        Body::from_stream(stream),
+    )
+        .into_response()
+}
 pub async fn serve(root: PathBuf) -> io::Result<()> {
     let runtime = root.join("runtime");
     fs::create_dir_all(&runtime)?;
@@ -145,6 +187,7 @@ pub async fn serve(root: PathBuf) -> io::Result<()> {
         .route("/health", get(health))
         .route("/command", post(command))
         .route("/events", get(events))
+        .route("/agent/events", get(agent_events))
         .layer(DefaultBodyLimit::max(14 * 1024 * 1024))
         .with_state(service);
     let shutdown = async move {

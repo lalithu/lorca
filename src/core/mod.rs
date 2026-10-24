@@ -1,3 +1,4 @@
+mod agent;
 mod conversations;
 mod generation;
 mod models;
@@ -28,6 +29,7 @@ struct State {
     loads: HashMap<String, watch::Sender<bool>>,
 }
 pub struct Core {
+    agent: Arc<crate::agent::Agent>,
     pub repository: Repository,
     state: Mutex<State>,
     changes: watch::Sender<Snapshot>,
@@ -50,6 +52,7 @@ impl Core {
         };
         let (changes, _) = watch::channel(view.clone());
         Ok(Arc::new(Self {
+            agent: Arc::new(crate::agent::Agent::default()),
             repository,
             state: Mutex::new(State {
                 view,
@@ -98,6 +101,7 @@ impl Core {
             .collect();
         let changed = !stale.is_empty() || !s.dirty.is_empty();
         for id in stale {
+            self.agent.cancel_owner(&id);
             Self::cancel_session(&mut s, &id);
             s.clients.remove(&id);
             s.view.sessions.retain(|v| v.id != id);
@@ -206,6 +210,9 @@ impl Core {
         }
         let session = text(&v, "session")?;
         self.touch(session)?;
+        if op.starts_with("agent_") {
+            return self.agent_command(session, op, &v);
+        }
         match op {
             "snapshot" | "heartbeat" => Ok(json!(self.snapshot())),
             "refresh" => self.refresh(session).await,
