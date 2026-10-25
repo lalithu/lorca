@@ -53,7 +53,7 @@ async fn health(State(service): State<Service>, headers: HeaderMap) -> Response 
     if !authorized(&headers, &service.token) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    Json(json!({"protocol":1})).into_response()
+    Json(json!({"protocol":2})).into_response()
 }
 async fn events(State(service): State<Service>, headers: HeaderMap) -> Response {
     if !authorized(&headers, &service.token) {
@@ -166,7 +166,7 @@ pub async fn serve(root: PathBuf) -> io::Result<()> {
     let endpoint = Endpoint {
         url: format!("http://{}", listener.local_addr()?),
         token: token.clone(),
-        protocol: 1,
+        protocol: 2,
     };
     atomic(
         &runtime.join("endpoint.json"),

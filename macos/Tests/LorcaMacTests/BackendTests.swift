@@ -22,7 +22,7 @@ final class BackendTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root.appendingPathComponent("runtime"), withIntermediateDirectories: true)
-        try Data(#"{"url":"http://127.0.0.1:43210","token":"test-secret","protocol":1}"#.utf8).write(to: root.appendingPathComponent("runtime/endpoint.json"))
+        try Data(#"{"url":"http://127.0.0.1:43210","token":"test-secret","protocol":2}"#.utf8).write(to: root.appendingPathComponent("runtime/endpoint.json"))
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [BackendProtocol.self]
         let network = URLSession(configuration: config)
@@ -34,7 +34,7 @@ final class BackendTests: XCTestCase {
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-secret")
             let path = request.url!.path
             paths.append(path)
-            if path == "/health" { return (200, Data(#"{"protocol":1}"#.utf8)) }
+            if path == "/health" { return (200, Data(#"{"protocol":2}"#.utf8)) }
             if path == "/events" {
                 XCTAssertEqual(request.value(forHTTPHeaderField: "X-Lorca-Session"), "test-session")
                 return (200, snapshot + Data("\n".utf8))
@@ -61,7 +61,7 @@ final class AgentBackendTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: root.appendingPathComponent("runtime"), withIntermediateDirectories: true)
-        try Data(#"{"url":"http://127.0.0.1:43210","token":"agent-secret","protocol":1}"#.utf8).write(to: root.appendingPathComponent("runtime/endpoint.json"))
+        try Data(#"{"url":"http://127.0.0.1:43210","token":"agent-secret","protocol":2}"#.utf8).write(to: root.appendingPathComponent("runtime/endpoint.json"))
         let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [BackendProtocol.self]
         let network = URLSession(configuration: configuration); defer { network.invalidateAndCancel() }
         let state = try JSONEncoder().encode(MockBackend().snapshot())
@@ -71,7 +71,7 @@ final class AgentBackendTests: XCTestCase {
         BackendProtocol.reply = { request in
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer agent-secret")
             switch request.url!.path {
-            case "/health": return (200, Data(#"{"protocol":1}"#.utf8))
+            case "/health": return (200, Data(#"{"protocol":2}"#.utf8))
             case "/agent/events":
                 streams += 1
                 XCTAssertEqual(request.value(forHTTPHeaderField: "X-Lorca-Session"), "test-session")

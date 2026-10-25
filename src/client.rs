@@ -28,7 +28,7 @@ impl Client {
             if let Ok(bytes) = std::fs::read(&path)
                 && let Ok(endpoint) = serde_json::from_slice::<Endpoint>(&bytes)
             {
-                if endpoint.protocol != 1 {
+                if endpoint.protocol != 2 {
                     return Err(io::Error::other(
                         "Incompatible lorca backend. Quit lorca clients and relaunch.",
                     ));

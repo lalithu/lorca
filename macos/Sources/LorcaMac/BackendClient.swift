@@ -30,6 +30,7 @@ struct BackendTurn: Codable {
 }
 struct BackendError: LocalizedError {
     let message: String
+    var submissionRejected = false
     var errorDescription: String? { message }
 }
 
@@ -72,7 +73,7 @@ final class BackendClient: BackendTransport {
         for _ in 0..<100 {
             if Date() > deadline { break }
             if let data = try? Data(contentsOf: path), let candidate = try? JSONDecoder().decode(Endpoint.self, from: data) {
-                guard candidate.protocol == 1, candidate.url.scheme == "http", candidate.url.host == "127.0.0.1" else {
+                guard candidate.protocol == 2, candidate.url.scheme == "http", candidate.url.host == "127.0.0.1" else {
                     throw BackendError(message: "Incompatible lorca backend. Quit lorca clients and relaunch.")
                 }
                 var request = URLRequest(url: candidate.url.appendingPathComponent("health"))
@@ -130,7 +131,7 @@ final class BackendClient: BackendTransport {
         let (data, response) = try await network.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {
             let detail = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["error"] as? String
-            throw BackendError(message: detail ?? "lorca’s backend session ended. Reconnect to continue.")
+            throw BackendError(message: detail ?? "lorca’s backend session ended. Reconnect to continue.", submissionRejected: true)
         }
         return data
     }

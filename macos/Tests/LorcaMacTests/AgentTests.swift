@@ -6,11 +6,13 @@ final class AgentMockBackend: MockBackend {
     var agentState: AgentTaskSnapshot?
     var agentReceive: (@MainActor (AgentTaskSnapshot?) -> Void)?
     var failAgent = false
+    var rejectAgent = false
     var disconnectAgentOnce = false
     override func command(_ fields: [String: Any]) async throws -> Data {
         guard let op = fields["op"] as? String, op.hasPrefix("agent_") else { return try await super.command(fields) }
         requests.append(fields)
         if failAgent { throw BackendError(message: "Agent disconnected") }
+        if rejectAgent && op=="agent_start" {throw BackendError(message:"Rejected before acceptance",submissionRejected:true)}
         switch op {
         case "agent_snapshot": return try JSONEncoder().encode(agentState)
         case "agent_start":
@@ -192,6 +194,16 @@ final class AgentTests: XCTestCase {
         XCTAssertEqual(store.latest?.approval?.id,"approval")
         XCTAssertEqual(store.latest?.id,"run")
         XCTAssertNotNil(store.runs["past"])
+    }
+
+    func testRejectedSubmissionDoesNotPermanentlyDisableComposer() async throws {
+        let backend=AgentMockBackend();backend.rejectAgent=true
+        let store=AgentStore(backend:backend)
+        XCTAssertTrue(store.reserveSubmission())
+        let accepted=await store.submit(task:"hi",workspace:nil,conversation:UUID(),request:UUID(),model:"qwen")
+        XCTAssertFalse(accepted);XCTAssertFalse(store.busy);XCTAssertFalse(store.submitting)
+        XCTAssertEqual(store.error,"Rejected before acceptance")
+        XCTAssertTrue(store.reserveSubmission())
     }
 
 }

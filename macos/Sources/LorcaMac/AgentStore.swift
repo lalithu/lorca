@@ -57,7 +57,7 @@ final class AgentStore: ObservableObject {
         flush = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(100))
             guard !Task.isCancelled, let self else { return }
-            self.apply(self.buffered); self.connected = true; self.error = nil; self.flush = nil
+            self.apply(self.buffered); self.connected = true; self.flush = nil
         }
     }
     func apply(_ snapshot: AgentTaskSnapshot?) {
@@ -111,8 +111,13 @@ final class AgentStore: ObservableObject {
             try await restore()
             return true
         } catch {
-            self.error = "Couldn’t confirm the task submission. Reconnect to check its state; lorca will not resend it. \(friendlyError(error))"
-            unconfirmedSubmission = true
+            if let rejection=error as? BackendError,rejection.submissionRejected {
+                self.error=friendlyError(error)
+                unconfirmedSubmission=false
+            }else{
+                self.error = "Couldn’t confirm the task submission. Reconnect to check its state; lorca will not resend it. \(friendlyError(error))"
+                unconfirmedSubmission = true
+            }
             return false
         }
     }
