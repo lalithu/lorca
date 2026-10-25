@@ -184,7 +184,12 @@ impl Core {
             && chat.messages[index]
                 .extra
                 .get("agentStatus")
-                .is_some_and(|v| v == "completed" || v == "cancelled" || v == "failed")
+                .is_some_and(|v| {
+                    matches!(
+                        v.as_str(),
+                        Some("completed" | "cancelled" | "failed" | "incomplete" | "denied")
+                    )
+                })
         {
             return;
         }
@@ -256,7 +261,16 @@ impl Core {
                         m.role == "assistant"
                             && m.extra.get("agentTaskId").and_then(Value::as_str) == Some(id)
                             && m.extra.get("agentStatus").is_some_and(|s| {
-                                s == "completed" || s == "cancelled" || s == "failed"
+                                matches!(
+                                    s.as_str(),
+                                    Some(
+                                        "completed"
+                                            | "cancelled"
+                                            | "failed"
+                                            | "incomplete"
+                                            | "denied"
+                                    )
+                                )
                             })
                     })
                 })

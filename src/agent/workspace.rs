@@ -4,7 +4,7 @@ use cap_std::{
     fs::{Dir, OpenOptions},
 };
 use std::{
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -26,17 +26,40 @@ impl Workspace {
             dir,
             verified: Default::default(),
         };
-        // Bounded actual root discovery makes common top-level files immediately usable.
-        for entry in workspace
-            .dir
-            .entries()
-            .map_err(|e| e.to_string())?
-            .take(200)
-            .flatten()
-        {
-            if entry.file_type().is_ok_and(|t| !t.is_symlink()) {
+        // A small real inventory supplies useful paths without another inference call.
+        let mut queue = std::collections::VecDeque::from([(String::from("."), 0)]);
+        let started = std::time::Instant::now();
+        let mut scanned = 0;
+        while let Some((path, depth)) = queue.pop_front() {
+            let Ok(dir) = workspace.directory(&path) else {
+                continue;
+            };
+            let Ok(entries) = dir.entries() else { continue };
+            let mut entries = entries.take(200).flatten().collect::<Vec<_>>();
+            entries.sort_by_key(|e| e.file_name());
+            for entry in entries {
+                scanned += 1;
+                if scanned > 200 || started.elapsed() > std::time::Duration::from_millis(100) {
+                    return Ok(workspace);
+                }
                 let name = entry.file_name().to_string_lossy().to_string();
-                let _ = workspace.remember(&name);
+                if name.starts_with('.')
+                    || ["target", "node_modules", "build", "vendor"].contains(&name.as_str())
+                {
+                    continue;
+                }
+                let Ok(ty) = entry.file_type() else { continue };
+                if ty.is_symlink() {
+                    continue;
+                }
+                let reference = if path == "." {
+                    name
+                } else {
+                    format!("{path}/{name}")
+                };
+                if workspace.remember(&reference).is_ok() && ty.is_dir() && depth < 2 {
+                    queue.push_back((reference, depth + 1));
+                }
             }
         }
         Ok(workspace)
@@ -95,7 +118,14 @@ impl Workspace {
             .join("/");
         if !self.verified.lock().unwrap().contains(&normalized) {
             return Err(format!(
-                "Unverified file reference: {path}. Discover its actual location with list_directory or search_files, then reuse the returned path."
+                "Unverified file reference: {path}. Relevant verified paths: {}. Discover the actual location with list_directory or search_files and reuse its returned path.",
+                self.references()
+                    .into_iter()
+                    .filter(|p| p.rsplit('/').next() == normalized.rsplit('/').next()
+                        || p.starts_with(normalized.split('/').next().unwrap_or("")))
+                    .take(8)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         // Revalidate on every use; cached discovery never replaces filesystem checks.
@@ -144,6 +174,45 @@ impl Workspace {
             return Err("File exceeds 128 KiB; use search_files or a smaller source file".into());
         }
         String::from_utf8(bytes).map_err(|_| "File is not UTF-8 text".into())
+    }
+    pub fn excerpt(&self, path: &str, offset: usize, length: usize) -> Result<serde_json::Value> {
+        let mut file = self
+            .dir
+            .open(Self::path(path)?)
+            .map_err(|e| format!("Read {path}: {e}"))?;
+        let metadata = file.metadata().map_err(|e| e.to_string())?;
+        if !metadata.is_file() {
+            return Err("Expected a regular file".into());
+        }
+        let total = metadata.len();
+        if offset as u64 > total {
+            return Err("Read offset exceeds file length; use nextOffset".into());
+        }
+        file.seek(SeekFrom::Start(offset as u64))
+            .map_err(|e| e.to_string())?;
+        let mut bytes = Vec::new();
+        file.take(length as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        let content = match std::str::from_utf8(&bytes) {
+            Ok(text) => text,
+            Err(error)
+                if error.error_len().is_none() && offset as u64 + (bytes.len() as u64) < total =>
+            {
+                std::str::from_utf8(&bytes[..error.valid_up_to()])
+                    .map_err(|_| "File is not UTF-8 text")?
+            }
+            Err(_) => {
+                return Err(
+                    "Read requires UTF-8 text and a valid byte boundary; use nextOffset".into(),
+                );
+            }
+        };
+        let end = offset as u64 + content.len() as u64;
+        Ok(
+            serde_json::json!({"ok":true,"path":path,"offset":offset,"content":content,
+            "truncated":end<total,"nextOffset":if end<total {Some(end)} else {None},"totalBytes":total}),
+        )
     }
     /// Hold the parent directory capability during validation and replacement. Reject write
     /// symlinks (including parents); an approval cannot be redirected by retargeting a link.

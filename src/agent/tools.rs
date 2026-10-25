@@ -61,6 +61,9 @@ impl Registry {
     }
 }
 struct Native(&'static str);
+fn read_length() -> usize {
+    8192
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PathArgs {
@@ -72,6 +75,8 @@ struct ReadArgs {
     path: String,
     #[serde(default)]
     offset: usize,
+    #[serde(default = "read_length")]
+    length: usize,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -116,8 +121,8 @@ impl Tool for Native {
                 vec!["path"],
             ),
             "read_file" => (
-                "Read a verified UTF-8 file (128 KiB maximum; returns 8 KiB). Use nextOffset from a previous result to read a later excerpt when needed; don't repeat unchanged reads.",
-                json!({"path":{"type":"string"},"offset":{"type":"integer","minimum":0,"description":"Optional UTF-8 byte offset; reuse nextOffset from the previous excerpt."}}),
+                "Read a verified UTF-8 file in bounded excerpts (up to 8 KiB per call). Use nextOffset from a previous result to read a later excerpt when needed; don't repeat unchanged reads.",
+                json!({"path":{"type":"string"},"offset":{"type":"integer","minimum":0,"description":"Optional UTF-8 byte offset; reuse nextOffset from the previous excerpt."},"length":{"type":"integer","minimum":4,"maximum":8192,"description":"Optional excerpt byte length, default 8192."}}),
                 vec!["path"],
             ),
             "search_files" => (
@@ -162,6 +167,9 @@ impl Tool for Native {
             "read_file" => {
                 let a: ReadArgs = parse(payload.clone())?;
                 w.require_reference(&a.path)?;
+                if !(4..=8192).contains(&a.length) {
+                    return Err("Read length must be 4–8192 bytes".into());
+                }
             }
             "search_files" => {
                 let a: SearchArgs = parse(payload.clone())?;
@@ -257,18 +265,7 @@ impl Tool for Native {
                 }
                 "read_file" => {
                     let a: ReadArgs = parse(p.payload.clone())?;
-                    let text = w.read(&a.path)?;
-                    if a.offset > text.len() || !text.is_char_boundary(a.offset) {
-                        return Err("Read offset must be an existing UTF-8 boundary; use nextOffset from the previous excerpt".into());
-                    }
-                    let mut end = (a.offset + 8192).min(text.len());
-                    while !text.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    Ok(
-                        json!({"ok":true,"path":a.path,"offset":a.offset,"content":&text[a.offset..end],
-                        "truncated":end<text.len(),"nextOffset":if end<text.len(){Some(end)}else{None},"totalBytes":text.len()}),
-                    )
+                    w.excerpt(&a.path, a.offset, a.length)
                 }
                 "search_files" => {
                     let a: SearchArgs = parse(p.payload.clone())?;

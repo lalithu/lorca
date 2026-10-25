@@ -47,13 +47,15 @@ struct AgentApproval: Codable, Equatable, Identifiable, Sendable {
 }
 struct AgentTaskSnapshot: Codable, Equatable, Identifiable, Sendable {
     enum Status: String, Codable, Sendable {
-        case running, awaitingApproval = "awaiting_approval", completed, cancelled, failed
+        case running, awaitingApproval = "awaiting_approval", completed, incomplete, denied, cancelled, failed
         var active: Bool { self == .running || self == .awaitingApproval }
         var label: String {
             switch self {
             case .running: "Working"
             case .awaitingApproval: "Approval required"
             case .completed: "Completed"
+            case .incomplete: "Incomplete"
+            case .denied: "Denied"
             case .cancelled: "Cancelled"
             case .failed: "Failed"
             }

@@ -73,13 +73,16 @@ final class BackendClient: BackendTransport {
         for _ in 0..<100 {
             if Date() > deadline { break }
             if let data = try? Data(contentsOf: path), let candidate = try? JSONDecoder().decode(Endpoint.self, from: data) {
-                guard candidate.protocol == 2, candidate.url.scheme == "http", candidate.url.host == "127.0.0.1" else {
+                guard candidate.url.scheme == "http", candidate.url.host == "127.0.0.1" else {
                     throw BackendError(message: "Incompatible lorca backend. Quit lorca clients and relaunch.")
                 }
                 var request = URLRequest(url: candidate.url.appendingPathComponent("health"))
                 request.timeoutInterval = 0.3
                 request.setValue("Bearer \(candidate.token)", forHTTPHeaderField: "Authorization")
                 if let (_, response) = try? await network.data(for: request), (response as? HTTPURLResponse)?.statusCode == 200 {
+                    guard candidate.protocol == 3 else {
+                        throw BackendError(message: "Incompatible lorca backend. Quit lorca clients and relaunch.")
+                    }
                     endpoint = candidate
                     return
                 }

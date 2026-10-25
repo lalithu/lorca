@@ -23,7 +23,7 @@ cargo build
 ## Tools and boundaries
 
 - `list_directory`: immediate entries, maximum 200.
-- `read_file`: verified UTF-8 file, maximum 128 KiB; returns 8 KiB plus `nextOffset` for focused expansion.
+- `read_file`: verified UTF-8 file, read in bounded 4–8192 byte excerpts using `offset`, optional `length`, and `nextOffset`. Reads can exceed 128 KiB in total; patches retain the 128 KiB limit.
 - `search_files`: literal filename/content search, maximum 800 entries / 30 matches / 2 seconds; skips hidden/build folders and symlinks.
 - `apply_patch`: one file per call; exact unique `old_text` replacement, or new file when `old_text` is empty. Shows the entire before/after diff. Rechecks source bytes, writes a temporary file, and atomically replaces the target. No deletions; stale files and write symlinks are rejected.
 - `run_command`: explicit approval; only Cargo `test` / `check` with limited flags, `fmt --check`, or `clippy --all-targets -- -D warnings`. No shell, arbitrary executable, aliases, privileged commands, downloads, or destructive Git actions.
@@ -61,8 +61,8 @@ Use the existing authenticated local backend (`Endpoint`, bearer token, no brows
 - `GET /agent/events` + `X-Lorca-Session`: NDJSON `TaskView` snapshots, including current approval and bounded event history. Reconnect with `agent_snapshot`; deduplicate by task ID + event sequence. A sequence gap means older activity rolled off.
 - `agent_decide` + `session`, `taskId`, `approvalId`, `decision` (`allow_once`, `deny`, `cancel`). Tokens are exact-action, owner-session, single-use; never send edited action arguments.
 - `agent_cancel` + `session`, `taskId`. Closing/expiring the owner session cancels too.
-- Status: `running`, `awaiting_approval`, `completed`, `cancelled`, `failed`.
-- Events: `task_started`, `model_generating`, `assistant_message`, `context_compacted`, `tool_requested`, `approval_required`, `tool_started`, `tool_completed`, `tool_failed`, `file_changes`, `terminal_output`, `task_completed`, `task_cancelled`, `task_failed`.
+- Status: `running`, `awaiting_approval`, `completed`, `incomplete`, `denied`, `cancelled`, `failed`.
+- Events: `task_started`, `model_generating`, `assistant_message`, `context_compacted`, `tool_requested`, `approval_required`, `tool_started`, `tool_completed`, `tool_failed`, `file_changes`, `terminal_output`, `task_completed`, `task_incomplete`, `task_denied`, `task_cancelled`, `task_failed`, `task_continued`, `finalization_requested`.
 - Each event has `id`, `taskId`, monotonic `sequence`, `kind`, and structured `data`. Calls have stable `callId`; approvals contain complete immutable `action` details. Terminal output identifies stdout/stderr.
 - `TaskView` includes optional `conversationId` / `requestId`, the model name, a monotonic revision, cumulative public `assistantText`, a `generating` flag, and confirmed `usage`. `assistant_message` contains only public assistant content, never private thinking. SwiftUI projects these events in Chats; all execution and permission enforcement stays in Rust. Automatic restart/resume is not implemented. Saved execution history does not authorize or replay operations.
 
@@ -129,3 +129,43 @@ Use the existing authenticated local backend (`Endpoint`, bearer token, no brows
   objective and discovered references, and executes its approved patch exactly once.
 - After updating, relaunch app/CLI clients to load the rebuilt core. No commits,
   pushes, merges, release tags, or additional agent frameworks are created.
+
+## Reliability stop checks
+
+- Explicit action requirements are checked against this request's real results.
+  Named read/edit targets stay separate; requested Cargo commands need an execution
+  record after the latest actual edit. A nonzero exit proves execution, not success.
+  Generic greetings, explanations and contextual result questions need no tools.
+- A model-only promise cannot complete an edit. At most two consecutive corrective
+  continuations are inserted into the same task, with unverified outcomes and tool
+  guidance. Newly verified work resets this counter; global limits stay unchanged.
+- Empty replies after satisfied, settled tools get one tool-free finalization.
+  Any calls returned during that phase are rejected without execution. If work is
+  still missing, bounded continuation retains the original tool registry instead.
+- Denial ends the task as Denied immediately. Failed operations remain Failed;
+  unmet goals or exhausted continuation become Incomplete. All terminal states
+  persist without automatic replay or being relabeled interrupted on restart.
+- Workspace initialization discovers up to 200 real entries through depth two,
+  bounded to 100 ms, excluding hidden/build/vendor folders and symlinks. The initial
+  prompt inventory is capped at 6000 bytes. Unknown paths receive bounded relevant
+  suggestions, and existing capability, traversal, symlink and stale-source checks remain.
+- Completion evidence and executed-action identities live outside compacted model
+  messages. Operational checkpoints deduplicate unchanged reads; the complete saved
+  transcript/audit retains every call. Pending approvals settle before compaction.
+- Command observations preserve exit/error metadata when output is shortened.
+  Source-derived prose remains model output: execution evidence does not certify
+  every semantic claim in generated documentation or arbitrary code.
+
+### Reproduce native acceptance
+
+See `macos/Acceptance/README.md` and `python3 macos/Acceptance/run.py --help`.
+The runner uses the real Dashboard/Mini, composer, stores and local backend in an
+isolated fixture. It does not replace the XCTest suite or manual user acceptance.
+
+Reference mechanisms: [Codex turn-stop continuation](https://github.com/openai/codex/blob/main/codex-rs/core/src/session/turn.rs),
+[Hermes intent acknowledgment recovery](https://github.com/NousResearch/hermes-agent),
+[OpenClaw settled-tool finalization](https://github.com/openclaw/openclaw), and
+[Aider's bounded repository context](https://aider.chat/docs/repomap.html).
+No agent framework, dependency, model router or second verifier was added.
+
+The local transport protocol is now 3 because Incomplete/Denied extend the native outcome contract. Relaunch app/CLI clients after rebuilding; older backends are rejected before accepting a task.

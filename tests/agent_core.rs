@@ -449,3 +449,44 @@ fn restart_keeps_a_tool_only_checkpoint_and_marks_it_interrupted() {
     assert!(restored.messages[1].content.contains("interrupted"));
     assert!(core.agent().snapshot().is_none());
 }
+
+#[test]
+fn incomplete_and_denied_saved_results_remain_terminal_on_restart() {
+    use lorca::types::{Conversation, Message};
+    for status in ["incomplete", "denied"] {
+        let temp = Temp::new();
+        let repository = Repository::new(temp.0.clone()).unwrap();
+        let mut chat = Conversation::default();
+        let mut request = Message::new("user", "Update README.md".into());
+        request.extra.extend([
+            ("agentKind".into(), json!("request")),
+            ("agentTaskId".into(), json!("settled")),
+        ]);
+        let mut response = Message::new("assistant", format!("Task {status}: original reason"));
+        response.extra.extend([
+            ("agentKind".into(), json!("result")),
+            ("agentTaskId".into(), json!("settled")),
+            ("agentStatus".into(), json!(status)),
+            (
+                "agentHistory".into(),
+                json!([{"role":"assistant","content":"Let me update it."}]),
+            ),
+        ]);
+        chat.messages = vec![request, response];
+        repository.save(&chat).unwrap();
+        let core = Core::new(repository).unwrap();
+        let snapshot = core.snapshot();
+        let restored = snapshot
+            .conversations
+            .iter()
+            .find(|c| c.id == chat.id)
+            .unwrap();
+        assert_eq!(restored.messages.len(), 2);
+        assert_eq!(restored.messages[1].extra["agentStatus"], status);
+        assert_eq!(
+            restored.messages[1].content,
+            format!("Task {status}: original reason")
+        );
+        assert!(core.agent().snapshot().is_none());
+    }
+}

@@ -123,7 +123,7 @@ async fn run_task(
                 for event in view.events.iter().filter(|e|e.sequence>sequence){display(&event.kind,&event.data);}
                 sequence=view.events.last().map_or(sequence,|e|e.sequence);
                 pending=view.approval.map(|a|a.id);
-                if !view.status.active(){println!("\n{}",safe(view.result.as_deref().unwrap_or("No result")));return if view.status==Status::Failed{Err("Agent task failed".into())}else{Ok(())};}
+                if !view.status.active(){println!("\n{}",safe(view.result.as_deref().unwrap_or("No result")));return if matches!(view.status,Status::Failed|Status::Incomplete|Status::Denied){Err("Agent task failed".into())}else{Ok(())};}
             }
         }
     }

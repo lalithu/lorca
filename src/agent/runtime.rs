@@ -147,6 +147,10 @@ impl Agent {
             } else {
                 match result {
                     Ok(text) => (Status::Completed, "task_completed", text),
+                    Err(e) if e.starts_with("Task incomplete:") => {
+                        (Status::Incomplete, "task_incomplete", e)
+                    }
+                    Err(e) if e.starts_with("Task denied:") => (Status::Denied, "task_denied", e),
                     Err(e) => (Status::Failed, "task_failed", e),
                 }
             };
@@ -250,7 +254,21 @@ impl Agent {
         decision
     }
 }
-fn append_event(v: &mut TaskView, kind: &str, data: Value) {
+// Presentation metadata only: offsets refer to the existing streamed UTF-8 text.
+// It rides the existing audit/event persistence, including bounded-buffer snapshots.
+fn append_event(v: &mut TaskView, kind: &str, mut data: Value) {
+    let now = presentation_time_ns();
+    let started = v
+        .audit
+        .first()
+        .and_then(|e| e.data["presentation"]["startedNanos"].as_u64())
+        .unwrap_or(now);
+    data["presentation"] = json!({
+        "textBytes": v.assistant_text.len(),
+        "startedNanos": started,
+        "elapsedMillis": now.saturating_sub(started) / 1_000_000,
+        "clock": if cfg!(target_os = "macos") { "mac_continuous" } else { "unix" }
+    });
     let sequence = v.events.last().map_or(1, |e| e.sequence + 1);
     let event = Event {
         id: format!("{}:{sequence}", v.id),
@@ -271,4 +289,33 @@ fn append_event(v: &mut TaskView, kind: &str, data: Value) {
     {
         v.events.remove(0);
     }
+}
+
+// macOS's continuous clock advances during sleep and is shared across processes,
+// so a reconnect can restore elapsed time without trusting a wall-clock estimate.
+#[cfg(target_os = "macos")]
+fn presentation_time_ns() -> u64 {
+    #[repr(C)]
+    struct Timebase {
+        numer: u32,
+        denom: u32,
+    }
+    unsafe extern "C" {
+        fn mach_continuous_time() -> u64;
+        fn mach_timebase_info(info: *mut Timebase) -> i32;
+    }
+    let mut scale = Timebase { numer: 0, denom: 0 };
+    // SAFETY: the system fills this valid timebase struct; neither call owns memory.
+    unsafe {
+        mach_timebase_info(&mut scale);
+        (u128::from(mach_continuous_time()) * u128::from(scale.numer)
+            / u128::from(scale.denom.max(1))) as u64
+    }
+}
+#[cfg(not(target_os = "macos"))]
+fn presentation_time_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64
 }

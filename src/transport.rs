@@ -20,6 +20,8 @@ use std::{
     time::Duration,
 };
 
+pub const PROTOCOL: u32 = 3;
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Endpoint {
     pub url: String,
@@ -53,7 +55,7 @@ async fn health(State(service): State<Service>, headers: HeaderMap) -> Response 
     if !authorized(&headers, &service.token) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    Json(json!({"protocol":2})).into_response()
+    Json(json!({"protocol":PROTOCOL})).into_response()
 }
 async fn events(State(service): State<Service>, headers: HeaderMap) -> Response {
     if !authorized(&headers, &service.token) {
@@ -166,7 +168,7 @@ pub async fn serve(root: PathBuf) -> io::Result<()> {
     let endpoint = Endpoint {
         url: format!("http://{}", listener.local_addr()?),
         token: token.clone(),
-        protocol: 2,
+        protocol: PROTOCOL,
     };
     atomic(
         &runtime.join("endpoint.json"),

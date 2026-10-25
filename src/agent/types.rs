@@ -70,6 +70,8 @@ pub enum Status {
     Running,
     AwaitingApproval,
     Completed,
+    Incomplete,
+    Denied,
     Cancelled,
     Failed,
 }

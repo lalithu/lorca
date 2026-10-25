@@ -18,14 +18,20 @@ struct ChatView: View {
                         } else {
                             LazyVStack(alignment: .leading, spacing: compact ? 20 : 27) {
                                 ForEach(store.messages) { message in
-                                    messageView(message)
                                     if !compact, message.agentKind == "result", let task = message.agentTaskId {
-                                        AgentActivityView(store: store.agent, taskID: task,savedMessage:message)
-                                    }
+                                        VStack(alignment: .leading, spacing: 12) {
+                                            if !message.attachments.isEmpty {
+                                                AttachmentStrip(attachments: message.attachments, storage: store.imageStore, compact: false)
+                                            }
+                                            AgentActivityView(store: store.agent, taskID: task, savedMessage: message, textSize: textSize)
+                                        }
+                                    } else { messageView(message) }
                                 }
                                 Color.clear.frame(height: 1).id("conversation-bottom")
                             }
                             .padding(.vertical, compact ? 8 : 14)
+                            .frame(maxWidth: compact ? .infinity : 760)
+                            .frame(maxWidth: .infinity)
                         }
                     }
                     .background(ChatScrollObserver { followsResponse = $0 })
@@ -38,8 +44,8 @@ struct ChatView: View {
                 .onChange(of: store.chatTextZoom) { _, _ in
                     if followsResponse { proxy.scrollTo("conversation-bottom", anchor: .bottom) }
                 }
-                .onChange(of: store.agent.latest) { _, _ in
-                    if followsResponse { proxy.scrollTo("conversation-bottom", anchor: .bottom) }
+                .onChange(of: store.agent.latest) { _, current in
+                    if current?.conversationId == store.library.selectedID, followsResponse { proxy.scrollTo("conversation-bottom", anchor: .bottom) }
                 }
                 .onChange(of: store.messages) { previous, current in
                     // A submitted prompt starts following again; streamed tokens respect manual scrolling.
@@ -61,7 +67,7 @@ struct ChatView: View {
                     store.openConversation(id)
                 }.buttonStyle(.plain).font(.caption).foregroundStyle(Color.lorcaBlue)
             }
-            if !compact, let active=store.agent.active,let approval=active.approval {
+            if !compact, let active=store.agent.active, active.conversationId != store.library.selectedID, let approval=active.approval {
                 DisclosureGroup("Approval required · Review action", isExpanded:$reviewApproval) {
                     ScrollView {AgentApprovalView(store:store.agent,task:active,approval:approval)}
                         .frame(maxHeight:220)
@@ -91,11 +97,26 @@ struct ChatView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func messageView(_ message: ChatMessage) -> some View {
+    @ViewBuilder private func messageView(_ message: ChatMessage) -> some View {
+        if !compact && message.role == .user {
+            HStack(alignment: .top, spacing: 0) {
+                Spacer(minLength: 28)
+                UserMessageLayout {
+                    messageContent(message)
+                        .padding(.horizontal, 14).padding(.vertical, 11)
+                        .background(.primary.opacity(0.065), in: RoundedRectangle(cornerRadius: 16))
+                }
+            }.frame(maxWidth: .infinity, alignment: .trailing)
+        } else { messageContent(message).frame(maxWidth: .infinity, alignment: .leading) }
+    }
+
+    private func messageContent(_ message: ChatMessage) -> some View {
         VStack(alignment: .leading, spacing: compact ? 7 : 10) {
-            Text(message.role == .user ? "YOU" : "LORCA")
-                .font(.system(size: 9, weight: .bold)).tracking(1.2)
-                .foregroundStyle(message.role == .user ? Color.secondary : .lorcaBlue)
+            if compact {
+                Text(message.role == .user ? "YOU" : "LORCA")
+                    .font(.system(size: 9, weight: .bold)).tracking(1.2)
+                    .foregroundStyle(message.role == .user ? Color.secondary : .lorcaBlue)
+            }
             if !message.attachments.isEmpty {
                 AttachmentStrip(attachments: message.attachments, storage: store.imageStore, compact: compact)
             }
@@ -105,11 +126,9 @@ struct ChatView: View {
                     Text("Thinking…").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
             } else {
-                MarkdownText(text: message.content, size: textSize)
-                    .textSelection(.enabled)
+                MarkdownText(text: message.content, size: textSize).textSelection(.enabled)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func errorBanner(_ error: String) -> some View {
@@ -141,5 +160,19 @@ struct ConnectionBadge: View {
             Text(store.status).font(.system(size: 11))
         }
         .foregroundStyle(.secondary)
+    }
+}
+
+// Measure the existing Markdown/attachment content at its ideal width, then wrap
+// within a readable maximum. Short prompts keep their natural bubble width.
+private struct UserMessageLayout: Layout {
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let content = subviews.first else { return .zero }
+        let limit = min(560, max(1, proposal.width ?? 560))
+        let ideal = content.sizeThatFits(.unspecified).width
+        return content.sizeThatFits(ProposedViewSize(width: min(limit, ideal), height: nil))
+    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: bounds.origin, proposal: ProposedViewSize(bounds.size))
     }
 }

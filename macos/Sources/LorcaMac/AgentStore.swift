@@ -72,7 +72,9 @@ final class AgentStore: ObservableObject {
         if let previous = runs[snapshot.id], (previous.events.last?.sequence ?? 0) > (snapshot.events.last?.sequence ?? 0) { return }
         guard runs[snapshot.id] != snapshot else { return }
         let known = runs[snapshot.id] != nil
-        activities[snapshot.id] = AgentActivity.make(from: snapshot.events)
+        if runs[snapshot.id]?.events != snapshot.events {
+            activities[snapshot.id] = AgentActivity.make(from: snapshot.events)
+        }
         runs[snapshot.id] = snapshot
         if !known { order.append(snapshot.id) }
         while order.count > 8 {

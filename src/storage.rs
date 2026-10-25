@@ -217,11 +217,12 @@ impl Repository {
             }
             if let Some(history) = message.extra.get("agentHistory").and_then(Value::as_array) {
                 messages.extend(history.iter().cloned());
-                if message
-                    .extra
-                    .get("agentStatus")
-                    .is_some_and(|s| s == "failed" || s == "cancelled")
-                {
+                if message.extra.get("agentStatus").is_some_and(|s| {
+                    matches!(
+                        s.as_str(),
+                        Some("failed" | "cancelled" | "incomplete" | "denied")
+                    )
+                }) {
                     messages.push(json!({"role":"assistant","content":message.content}));
                 }
                 continue;

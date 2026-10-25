@@ -68,7 +68,7 @@ fn start(agent: &Arc<Agent>, root: &Path, mock: Arc<Mock>) -> String {
     agent
         .start(
             "test",
-            "Inspect and verify",
+            "Perform the requested tool operations",
             root,
             Limits::default(),
             mock,
@@ -486,15 +486,18 @@ async fn a_text_claim_does_not_replace_verified_execution() {
 async fn discovery_resolves_guessed_paths_and_revalidates_references() {
     let root = Temp::new();
     std::fs::create_dir(root.0.join("src")).unwrap();
-    std::fs::create_dir(root.0.join("src/core")).unwrap();
-    std::fs::write(root.0.join("src/core/mod.rs"), "pub fn actual() {}").unwrap();
+    std::fs::create_dir_all(root.0.join("src/deeper/core")).unwrap();
+    std::fs::write(root.0.join("src/deeper/core/mod.rs"), "pub fn actual() {}").unwrap();
     let model = Mock::new(vec![
         calls(vec![("read_file", json!({"path":"src/core.rs"}))]),
         calls(vec![(
             "search_files",
             json!({"query":"mod.rs","path":"src"}),
         )]),
-        calls(vec![("read_file", json!({"path":"src/core/mod.rs"}))]),
+        calls(vec![(
+            "read_file",
+            json!({"path":"src/deeper/core/mod.rs"}),
+        )]),
         finish(),
     ]);
     let agent = Arc::new(Agent::default());
@@ -515,11 +518,11 @@ async fn discovery_resolves_guessed_paths_and_revalidates_references() {
             .contains("pub fn actual")
     }));
     let w = Workspace::new(&root.0).unwrap();
-    assert!(w.require_reference("src/core/mod.rs").is_err());
-    w.remember("src/core/mod.rs").unwrap();
-    assert!(w.require_reference("src/core/mod.rs").is_ok());
-    std::fs::remove_file(root.0.join("src/core/mod.rs")).unwrap();
-    assert!(w.require_reference("src/core/mod.rs").is_err());
+    assert!(w.require_reference("src/deeper/core/mod.rs").is_err());
+    w.remember("src/deeper/core/mod.rs").unwrap();
+    assert!(w.require_reference("src/deeper/core/mod.rs").is_ok());
+    std::fs::remove_file(root.0.join("src/deeper/core/mod.rs")).unwrap();
+    assert!(w.require_reference("src/deeper/core/mod.rs").is_err());
 }
 
 struct LowContextMock {
@@ -583,6 +586,31 @@ async fn long_task_compacts_repeatedly_and_never_repeats_an_approved_write() {
         .filter(|e| e.kind == "context_compacted")
         .count();
     assert!(compactions >= 2, "compactions: {compactions}");
+    // Presentation metadata follows the real event stream and survives audit
+    // persistence without modifying the compaction or execution decisions.
+    let start = done.audit[0].data["presentation"]["startedNanos"]
+        .as_u64()
+        .unwrap();
+    let mut previous_elapsed = 0;
+    let mut previous_offset = 0;
+    for event in &done.audit {
+        let presentation = &event.data["presentation"];
+        assert_eq!(presentation["startedNanos"].as_u64(), Some(start));
+        let elapsed = presentation["elapsedMillis"].as_u64().unwrap();
+        let offset = presentation["textBytes"].as_u64().unwrap() as usize;
+        assert!(elapsed >= previous_elapsed);
+        assert!(offset >= previous_offset && offset <= done.assistant_text.len());
+        assert!(done.assistant_text.is_char_boundary(offset));
+        previous_elapsed = elapsed;
+        previous_offset = offset;
+    }
+    let elapsed = done.events.last().unwrap().data["presentation"]["elapsedMillis"].clone();
+    tokio::time::sleep(Duration::from_millis(15)).await;
+    assert_eq!(
+        agent.snapshot().unwrap().events.last().unwrap().data["presentation"]["elapsedMillis"],
+        elapsed
+    );
+
     assert_eq!(
         done.events
             .iter()

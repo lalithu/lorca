@@ -3,52 +3,110 @@ import SwiftUI
 struct AgentActivityView: View {
     @ObservedObject var store: AgentStore
     let taskID: String
-    var savedMessage:ChatMessage? = nil
-    private var snapshot:AgentTaskSnapshot? {
-        if let current=store.runs[taskID]{return current}
-        guard let message=savedMessage,let events=message.agentEvents,
-            let status=AgentTaskSnapshot.Status(rawValue:message.agentStatus ?? ""),!status.active else{return nil}
-        return AgentTaskSnapshot(id:taskID,owner:"",conversationId:nil,requestId:nil,task:"",workspace:message.agentWorkspace ?? "",
-            status:status,events:events,approval:nil,result:message.content,usage:message.agentUsage)
+    var savedMessage: ChatMessage? = nil
+    var textSize: CGFloat = 14
+    private var snapshot: AgentTaskSnapshot? {
+        if let current = store.runs[taskID] { return current }
+        guard let message = savedMessage,
+              let status = AgentTaskSnapshot.Status(rawValue: message.agentStatus ?? "") else { return nil }
+        return AgentTaskSnapshot(id: taskID, owner: "", conversationId: nil, requestId: nil, task: "",
+            workspace: message.agentWorkspace ?? "", status: status, events: message.agentEvents ?? [],
+            approval: nil, result: message.content, usage: message.agentUsage)
+    }
+    private func response(_ task: AgentTaskSnapshot) -> String {
+        guard let streamed = task.assistantText else { return savedMessage?.content ?? task.result ?? "" }
+        var text = streamed.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !task.status.active && task.status != .completed, let result = task.result {
+            text += (text.isEmpty ? "" : "\n\n") + result
+        } else if text.isEmpty && !task.status.active { text = task.result ?? "" }
+        return text
     }
     var body: some View {
-        if let task = snapshot, task.events.contains(where:{$0.kind=="tool_requested"}) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 9) {
-                    if task.status.active { ProgressView().controlSize(.mini) }
-                    else { Image(systemName: task.status == .completed ? "checkmark.circle" : "circle.dashed").foregroundStyle(.secondary) }
-                    Text(task.presentationStatus).font(.system(size: 12, weight: .medium))
-                    Text(URL(fileURLWithPath: task.workspace).lastPathComponent).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                    Spacer()
-                    if task.status.active {
-                        Button("Cancel") { Task { await store.cancel() } }.buttonStyle(.borderless).controlSize(.small)
-                            .disabled(store.cancelling || task.owner != store.sessionID || !store.connected)
-                            .accessibilityLabel("Cancel agent task")
+        if let task = snapshot {
+            let text = response(task)
+            let events = (savedMessage?.agentEvents?.count ?? 0) > task.events.count ? savedMessage!.agentEvents! : task.events
+            let activities = events == task.events ? (store.activities[task.id] ?? AgentActivity.make(from: events)) : AgentActivity.make(from: events)
+            VStack(alignment: .leading, spacing: 16) {
+                AgentRunHeader(store: store, task: task, text: text)
+                if events.first?.sequence ?? 0 > 1 {
+                    Text("Earlier activity is unavailable.").font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(AgentTimelineItem.make(text: text, events: events, activities: activities)) { row in
+                    switch row.content {
+                    case .text(let text): MarkdownText(text: text, size: textSize).textSelection(.enabled)
+                    case .tools(let items): AgentActivityGroup(store: store, task: task, items: items)
+                    case .compaction:
+                        Label("Context automatically compacted", systemImage: "arrow.down.right.and.arrow.up.left")
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
                     }
                 }
-                if task.events.first?.sequence ?? 0 > 1 {
-                    Text("Earlier activity is no longer in the backend’s bounded event buffer.").font(.caption).foregroundStyle(.secondary)
+                if task.status.active && task.generating == true {
+                    Text(text.isEmpty ? "Thinking…" : "Working…").font(.caption).foregroundStyle(.secondary)
                 }
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(store.activities[task.id] ?? AgentActivity.make(from:task.events)) { item in
-                        if let note = item.note { MarkdownText(text: note, size: 13).textSelection(.enabled) }
-                        else { AgentToolRow(store: store, task: task, item: item) }
-                    }
-                }
-                if task.status == .running, task.events.last?.kind == "model_generating" {
-                    Text("Model processing…").font(.system(size: 11)).foregroundStyle(.secondary)
-                }
-                if let error = store.error, task.status.active { agentError(error) }
-            }
-            .padding(14).background(.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.primary.opacity(0.07)))
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        } else if let message = savedMessage {
+            MarkdownText(text: message.content, size: textSize).textSelection(.enabled)
         }
     }
-    private func agentError(_ error: String) -> some View {
-        HStack(alignment: .top) {
-            Text(error).font(.caption).foregroundStyle(.secondary)
-            Spacer()
-            Button("Reconnect") { Task { try? await store.restore() } }.controlSize(.small)
+}
+
+private struct AgentRunHeader: View {
+    @ObservedObject var store: AgentStore
+    let task: AgentTaskSnapshot
+    let text: String
+    private var interrupted: Bool {
+        task.status == .cancelled && text.contains("Agent task interrupted when the Rust backend stopped.")
+    }
+    var body: some View {
+        // Only this small view ticks. It owns no timer and never republishes ChatStore.
+        if task.status.active {
+            TimelineView(.periodic(from: .now, by: 1)) { _ in header }
+        } else { header }
+    }
+    private var header: some View {
+            HStack(spacing: 7) {
+                if task.status.active { ProgressView().controlSize(.mini) }
+                else { Image(systemName: task.status == .completed ? "checkmark" : "circle.dashed").font(.system(size: 10)) }
+                let status = interrupted ? "Interrupted" : task.status == .awaitingApproval ? "Awaiting Approval" : task.status.label
+                if let elapsed = AgentElapsed(events: task.events) {
+                    let duration = AgentElapsed.label(elapsed.seconds(active: task.status.active))
+                    Text(task.status == .running ? "Working for \(duration)" : "\(status) · \(interrupted ? "at least " : "")\(duration)")
+                        .monospacedDigit()
+                } else { Text(status) }
+                Spacer(minLength: 0)
+                if task.status.active {
+                    Button("Cancel") { Task { await store.cancel() } }.buttonStyle(.borderless)
+                        .disabled(store.cancelling || task.owner != store.sessionID || !store.connected)
+                        .accessibilityLabel("Cancel agent task")
+                }
+            }.font(.system(size: 11)).foregroundStyle(.secondary)
+    }
+}
+
+private struct AgentActivityGroup: View {
+    @ObservedObject var store: AgentStore
+    let task: AgentTaskSnapshot
+    let items: [AgentActivity]
+    @State private var expanded = false
+    private var pending: Bool { items.contains { $0.id == task.approval?.callId } }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button { expanded.toggle() } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.system(size: 9))
+                    Image(systemName: "terminal").font(.system(size: 11))
+                    Text(AgentActivity.summary(items)).multilineTextAlignment(.leading)
+                    if pending { Text("· Awaiting approval").foregroundStyle(Color.lorcaBlue) }
+                }.font(.system(size: 12)).foregroundStyle(.secondary).contentShape(Rectangle())
+            }.buttonStyle(.plain).accessibilityLabel("Tool activity: \(AgentActivity.summary(items))")
+            if expanded {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(items) { item in AgentToolRow(store: store, task: task, item: item) }
+                }.padding(12).background(.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
+            } else if pending, let approval = task.approval {
+                // Keep the actual approval actionable even while details are collapsed.
+                AgentApprovalView(store: store, task: task, approval: approval)
+            }
         }
     }
 }
@@ -56,7 +114,7 @@ private struct AgentToolRow: View {
     @ObservedObject var store: AgentStore
     let task: AgentTaskSnapshot
     let item: AgentActivity
-    @State private var expanded = false
+    @State private var expanded = true
     private var pending: Bool { task.approval?.callId == item.id }
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -70,7 +128,7 @@ private struct AgentToolRow: View {
                     if item.approval != nil { Text(pending ? "Review" : item.failed ? "Not executed / failed" : item.started ? "Allowed once" : "Approval ended").font(.system(size: 10)).foregroundStyle(.secondary) }
                 }.contentShape(Rectangle())
             }.buttonStyle(.plain)
-            if expanded || pending || (item.running && task.status.active) {
+            if expanded || pending {
                 VStack(alignment: .leading, spacing: 9) {
                     if let approval = item.approval { AgentApprovalView(store: store, task: task, approval: approval) }
                     else if item.arguments != .null { AgentOutputView(text: item.arguments.pretty) }

@@ -176,3 +176,41 @@ async fn terminal_sigint_does_not_kill_the_automatically_started_backend() {
     );
     mock.abort();
 }
+
+#[tokio::test]
+async fn incompatible_backend_is_rejected_before_sending_a_task() {
+    let root =
+        Temp(std::env::temp_dir().join(format!("lorca-stale-client-{}", lorca::types::id())));
+    std::fs::create_dir_all(root.0.join("runtime")).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let health = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route("/health", get(|| async { Json(json!({"protocol":2})) })),
+        )
+        .await
+        .unwrap();
+    });
+    std::fs::write(
+        root.0.join("runtime/endpoint.json"),
+        json!({"url":url,"token":"fixture-only","protocol":2}).to_string(),
+    )
+    .unwrap();
+    let output = tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::process::Command::new(env!("CARGO_BIN_EXE_lorca"))
+            .args(["agent", "--workspace"])
+            .arg(&root.0)
+            .arg("Hi")
+            .env("LORCA_DATA_DIR", &root.0)
+            .stdin(Stdio::null())
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    health.abort();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Incompatible lorca backend"));
+}

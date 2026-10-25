@@ -28,11 +28,6 @@ impl Client {
             if let Ok(bytes) = std::fs::read(&path)
                 && let Ok(endpoint) = serde_json::from_slice::<Endpoint>(&bytes)
             {
-                if endpoint.protocol != 2 {
-                    return Err(io::Error::other(
-                        "Incompatible lorca backend. Quit lorca clients and relaunch.",
-                    ));
-                }
                 if !endpoint.url.starts_with("http://127.0.0.1:") {
                     return Err(io::Error::other("Invalid backend address"));
                 }
@@ -44,6 +39,11 @@ impl Client {
                     .await
                     .is_ok_and(|r| r.status().is_success())
                 {
+                    if endpoint.protocol != crate::transport::PROTOCOL {
+                        return Err(io::Error::other(
+                            "Incompatible lorca backend. Quit lorca clients and relaunch.",
+                        ));
+                    }
                     return Ok(Self { endpoint, http });
                 }
             }

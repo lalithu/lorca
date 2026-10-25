@@ -54,6 +54,15 @@ func agentFixture(conversation: UUID = UUID(), request: UUID = UUID(), status: S
 
 @MainActor
 final class AgentTests: XCTestCase {
+    func testIncompleteAndDeniedAreTerminalAndNeverSuccessful() throws {
+        for (value, label) in [("incomplete", "Incomplete"), ("denied", "Denied")] {
+            let task = try agentFixture(status: value)
+            XCTAssertFalse(task.status.active)
+            XCTAssertNotEqual(task.status, .completed)
+            XCTAssertEqual(task.presentationStatus, label)
+        }
+    }
+
     func testDecodingOrderingDeduplicationAndAuthoritativeApprovalState() throws {
         let backend = AgentMockBackend(), store = AgentStore(backend: AgentMockBackend())
         var snapshot = try agentFixture()

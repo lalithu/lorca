@@ -17,6 +17,7 @@ async fn authenticated_stream_singleton_and_reconnection_preserve_state() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
+    assert_eq!(endpoint.protocol, transport::PROTOCOL);
     let http = reqwest::Client::new();
     assert_eq!(
         http.post(format!("{}/command", endpoint.url))
