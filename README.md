@@ -194,3 +194,6 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swift test --pack
 
 The core and transport tests use isolated storage and local test servers; they do
 not unload your real Ollama models. Agent tests use temporary workspaces and explicit mock approvals; real subprocess tests verify the macOS sandbox. See [AGENT.md](AGENT.md) for the runtime, limits, commands, and Chats integration.
+
+---
+Copyright © 2026 Lalith Uriti
