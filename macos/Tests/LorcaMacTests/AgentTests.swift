@@ -73,7 +73,7 @@ final class AgentTests: XCTestCase {
         let shared = ChatStore(backend: backend)
         await shared.refreshConnection()
         let origin = shared.library.selectedID
-        shared.agentMode = true; shared.agent.workspaces[origin] = URL(fileURLWithPath: "/workspace")
+        shared.agent.workspaces[origin] = URL(fileURLWithPath: "/workspace")
         shared.draft = "Inspect and test"; shared.send(); shared.send()
         try await Task.sleep(for: .milliseconds(100))
         let starts = backend.requests.filter { $0["op"] as? String == "agent_start" }
@@ -85,8 +85,8 @@ final class AgentTests: XCTestCase {
         XCTAssertNotEqual(shared.library.selectedID, origin)
         XCTAssertEqual(shared.agent.active?.conversationId, origin)
         XCTAssertTrue(backend.requests.allSatisfy { $0["op"] as? String != "agent_cancel" })
-        XCTAssertFalse(shared.canSendAgent)
-        shared.agentMode = false; shared.draft = "Normal chat"; XCTAssertTrue(shared.canSendChat)
+        XCTAssertFalse(shared.canSend)
+        shared.draft = "Normal chat"; XCTAssertTrue(shared.canSendChat)
         _ = await shared.modelSession.close(unload: false)
     }
     func testApprovalAllowAndDenyAreSingleSubmissionAndStaleActionsAreBlocked() async throws {
@@ -165,4 +165,33 @@ final class AgentTests: XCTestCase {
         message.agentTaskId = "run"; message.agentKind = "request"; message.agentWorkspace = "/workspace"
         XCTAssertEqual(try JSONDecoder().decode(ChatMessage.self, from: JSONEncoder().encode(message)), message)
     }
+    func testUnifiedConversationWithoutWorkspaceAndWithImagesUsesOneSubmission() async throws {
+        let backend=AgentMockBackend(),store=ChatStore(backend:AgentMockBackend())
+        _=backend
+        await store.refreshConnection()
+        XCTAssertNil(store.agentWorkspace)
+        store.draft="hi";XCTAssertTrue(store.canSend);store.send();store.send()
+        try await Task.sleep(for:.milliseconds(80))
+        let transport=store.backend as! AgentMockBackend
+        XCTAssertEqual(transport.requests.filter{$0["op"] as? String=="agent_start"}.count,1)
+        XCTAssertEqual(transport.requests.first{$0["op"] as? String=="agent_start"}?["workspace"] as? String,"")
+        _=await store.modelSession.close(unload:false)
+    }
+    func testUsageStreamingAndArchivedActivityCannotReplaceActiveApproval() throws {
+        let backend=AgentMockBackend(),store=AgentStore(backend:AgentMockBackend())
+        _=backend
+        var active=try agentFixture();active.assistantText="Real partial";active.generating=true
+        active.usage=ChatUsage(contextUsed:100,contextLimit:8192,tokensPerSecond:20)
+        store.apply(active);store.apply(active)
+        XCTAssertEqual(store.latest?.assistantText,"Real partial")
+        XCTAssertEqual(store.latest?.usage?.contextUsed,100)
+        var archived=ChatMessage(role:.assistant,content:"Past result")
+        archived.agentTaskId="past";archived.agentStatus="completed";archived.agentEvents=[]
+        var chat=Conversation();chat.messages=[archived]
+        store.restoreArchived([chat],selected:chat.id)
+        XCTAssertEqual(store.latest?.approval?.id,"approval")
+        XCTAssertEqual(store.latest?.id,"run")
+        XCTAssertNotNil(store.runs["past"])
+    }
+
 }

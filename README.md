@@ -46,19 +46,25 @@ or print Cargo output.
 - Images: 20 MB input maximum each; optimized to JPEG, at most 4,096 pixels on the
   longest edge and 8 MB each. Requests allow 24 MB of image data across history.
 
-## Coding tasks in Chats
+## One conversation, with optional workspace tools
 
-- Choose **Agent** in the existing composer, select a workspace, and send a task.
-- Expand live activity to inspect tools, file contents, diffs, commands, and output.
-- Review each exact command or patch with **Allow Once**, **Deny**, or **Cancel Task**.
+- Send ordinary questions, images, or coding requests in the same composer.
+- Select a workspace to make native tools available; the model chooses when to use them.
+- Text streams directly from Ollama, including turns that also contain structured tools.
+- Expand activity for actual file reads, diffs, commands, exit codes, and outputs.
+- Approve each exact edit/command with **Allow Once**, **Deny**, or **Cancel Task**.
+  A pending approval also remains accessible above the composer.
+- Discover unknown paths first; Rust rejects unverified existing-file references.
+- Follow-ups retain conversation, images, and structured tool results. Completed
+  operations and partial responses are saved locally with the original conversation.
+- Working context compacts automatically near 78% of the allocated window. Full
+  saved history remains intact; Rust keeps execution evidence and pending permissions.
+- Context metrics use confirmed Ollama prompt/generated tokens and actual allocated
+  capacity. During generation, **ctx · last** means the last confirmed measurement.
+- Dashboard and Mini share messages, cancellation, model selection, and status.
 - Scroll upward to read freely; return to the bottom to resume following.
-- Mini shows shared agent status and opens Chats for detailed activity and approvals.
-- Requests and final results stay in the originating saved chat. Execution activity is
-  temporary; reconnect restores only the Rust backend’s latest bounded snapshot.
-- One agent task runs at a time. Select **Chat** to continue a normal conversation
-  after it finishes. Image attachments remain available in Chat mode.
-- Work is limited to the selected workspace and existing Rust tools. Cancellation
-  stops execution; it does not undo approved changes. See [AGENT.md](AGENT.md).
+- One active tool/conversation run at a time. Cancellation stops future execution
+  without undoing already approved changes. See [AGENT.md](AGENT.md).
 
 The sections below describe the Rust terminal interface. The GUI keeps its model
 and appearance preferences separately in macOS preferences.

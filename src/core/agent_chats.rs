@@ -45,11 +45,15 @@ impl Core {
             Limits::default()
         };
         limits.validate()?;
-        let task = text(v, "task")?.trim();
-        if task.is_empty() || task.len() > 8000 {
+        let task = v["task"].as_str().unwrap_or("").trim();
+        if (task.is_empty() && v["conversationId"].is_null()) || task.len() > 8000 {
             return Err("Task must contain 1–8000 bytes".into());
         }
-        let workspace = Workspace::new(std::path::Path::new(text(v, "workspace")?))?;
+        let workspace = v["workspace"]
+            .as_str()
+            .filter(|p| !p.is_empty())
+            .map(|p| Workspace::new(std::path::Path::new(p)))
+            .transpose()?;
         let ci = if let Some(id) = v["conversationId"].as_str() {
             Some(Self::chat_index(&s, id)?)
         } else {
@@ -65,9 +69,6 @@ impl Core {
                 m.extra.get("agentRequestId").and_then(Value::as_str) == request.as_deref()
             }) {
                 return Ok(json!({"taskId":message.extra["agentTaskId"],"alreadyAccepted":true}));
-            }
-            if !s.view.conversations[ci].draft_images.is_empty() {
-                return Err("Agent tasks are text-only. Switch to Chat to send these images; attachments have been kept.".into());
             }
             if s.view
                 .turns
@@ -95,35 +96,61 @@ impl Core {
                 return Err("The previous agent result could not be saved. Reconnect before starting another task.".into());
             }
         }
+        let mut submitted_chat = ci.map(|i| s.view.conversations[i].clone());
+        let mut history = vec![];
+        if let Some(chat) = &mut submitted_chat {
+            if task.is_empty() && chat.draft_images.is_empty() {
+                return Err("Write a message or attach an image.".into());
+            }
+            let mut message = Message::new("user", task.into());
+            message.attachments = std::mem::take(&mut chat.draft_images);
+            chat.messages.push(message);
+            history = self.repository.wire_messages(chat)?;
+        }
         let id = self.agent.submit(
             Submission {
                 owner: session.into(),
-                task: task.into(),
-                workspace: workspace.root.clone(),
+                model: Some(model.clone()),
+                task: if task.is_empty() {
+                    "Describe the attached images.".into()
+                } else {
+                    task.into()
+                },
+                workspace: workspace
+                    .as_ref()
+                    .map(|w| w.root.clone())
+                    .unwrap_or_default(),
                 limits,
                 conversation_id: ci.map(|i| s.view.conversations[i].id.clone()),
                 request_id: request.clone(),
+                history,
             },
             Arc::new(CoreInference {
                 core: self.clone(),
                 session: session.into(),
                 model,
             }),
-            Registry::default(),
+            if workspace.is_some() {
+                Registry::default()
+            } else {
+                Registry::empty()
+            },
         )?;
         if let Some(ci) = ci {
-            let mut chat = s.view.conversations[ci].clone();
-            let mut message = Message::new("user", task.into());
+            let mut chat = submitted_chat.take().unwrap();
+            let message = chat.messages.last_mut().unwrap();
             message.extra.extend([
                 ("agentTaskId".into(), json!(id)),
                 ("agentRequestId".into(), json!(request)),
                 ("agentKind".into(), json!("request")),
-                ("agentWorkspace".into(), json!(workspace.root)),
+                (
+                    "agentWorkspace".into(),
+                    json!(workspace.as_ref().map(|w| &w.root)),
+                ),
             ]);
-            if chat.messages.is_empty() && chat.title == "New chat" {
+            if chat.messages.len() == 1 && chat.title == "New chat" {
                 chat.title = task.chars().take(60).collect();
             }
-            chat.messages.push(message);
             if chat.draft.trim() == task {
                 chat.draft.clear();
             }
@@ -141,9 +168,6 @@ impl Core {
         let Some(task) = self.agent.snapshot() else {
             return;
         };
-        if task.status.active() {
-            return;
-        }
         let Some(chat_id) = task.conversation_id else {
             return;
         };
@@ -152,10 +176,16 @@ impl Core {
             return;
         };
         let mut chat = s.view.conversations[ci].clone();
-        if chat.messages.iter().any(|m| {
+        let existing = chat.messages.iter().position(|m| {
             m.role == "assistant"
                 && m.extra.get("agentTaskId").and_then(Value::as_str) == Some(&task.id)
-        }) {
+        });
+        if let Some(index) = existing
+            && chat.messages[index]
+                .extra
+                .get("agentStatus")
+                .is_some_and(|v| v == "completed" || v == "cancelled" || v == "failed")
+        {
             return;
         }
         if !chat.messages.iter().any(|m| {
@@ -163,17 +193,41 @@ impl Core {
         }) {
             return;
         }
-        let mut response = Message::new(
-            "assistant",
-            task.result
-                .unwrap_or_else(|| "Agent ended without a result.".into()),
-        );
+        let mut content = task.assistant_text.trim_end().to_string();
+        if !task.status.active() && task.status != Status::Completed {
+            if !content.is_empty() {
+                content.push_str("\n\n");
+            }
+            content.push_str(task.result.as_deref().unwrap_or("Interaction interrupted."));
+        } else if content.is_empty() && !task.status.active() {
+            content = task.result.clone().unwrap_or_default();
+        }
+        let mut response = existing
+            .map(|i| chat.messages[i].clone())
+            .unwrap_or_else(|| Message::new("assistant", String::new()));
+        response.content = content;
         response.extra.extend([
             ("agentTaskId".into(), json!(task.id)),
             ("agentKind".into(), json!("result")),
             ("agentStatus".into(), json!(task.status)),
+            ("agentHistory".into(), json!(task.transcript)),
+            ("agentEvents".into(), json!(task.audit)),
+            ("agentUsage".into(), json!(task.usage)),
+            ("agentModel".into(), json!(task.model)),
         ]);
-        chat.messages.push(response);
+        if existing.is_some_and(|i| {
+            chat.messages[i].content == response.content && chat.messages[i].extra == response.extra
+        }) {
+            return;
+        }
+        if let Some(i) = existing {
+            chat.messages[i] = response;
+        } else {
+            chat.messages.push(response);
+        }
+        if let Ok(si) = Self::session_index(&s, &task.owner) {
+            s.view.sessions[si].usage = task.usage.clone();
+        }
         chat.updated_at = now();
         match self.repository.save(&chat) {
             Ok(()) => {
@@ -201,6 +255,9 @@ impl Core {
                     !chat.messages.iter().any(|m| {
                         m.role == "assistant"
                             && m.extra.get("agentTaskId").and_then(Value::as_str) == Some(id)
+                            && m.extra.get("agentStatus").is_some_and(|s| {
+                                s == "completed" || s == "cancelled" || s == "failed"
+                            })
                     })
                 })
                 .map(String::from)
@@ -212,7 +269,18 @@ impl Core {
                     ("agentKind".into(), json!("result")),
                     ("agentStatus".into(), json!(Status::Cancelled)),
                 ]);
-                chat.messages.push(response);
+                if let Some(existing) = chat.messages.iter_mut().find(|m| {
+                    m.role == "assistant"
+                        && m.extra.get("agentTaskId").and_then(Value::as_str) == Some(id)
+                }) {
+                    existing.content.push_str("\n\n");
+                    existing.content.push_str(&response.content);
+                    existing
+                        .extra
+                        .insert("agentStatus".into(), json!(Status::Cancelled));
+                } else {
+                    chat.messages.push(response);
+                }
             }
             if !unfinished.is_empty() {
                 chat.updated_at = now();

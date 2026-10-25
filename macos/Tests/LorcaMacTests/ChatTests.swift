@@ -13,6 +13,7 @@ class MockBackend: BackendTransport {
     var breakNextStream = false
     var failNextCommand = false
     var connects = 0
+    var conversationTask: AgentTaskSnapshot?
     var turn: [String: Any]?
     var receive: (@MainActor (BackendSnapshot) -> Void)?
     var revision = 1
@@ -45,7 +46,17 @@ class MockBackend: BackendTransport {
             turn = ["id": fields["requestId"]!, "conversationId": selected.uuidString, "sessionId": sessionID!, "model": model, "running": true, "usage": [:]]
             emit()
             return try JSONSerialization.data(withJSONObject: turn!)
-        case "agent_snapshot": return Data("null".utf8)
+        case "agent_start":
+            conversationTask=try agentFixture(conversation:selected,request:UUID(uuidString:fields["requestId"] as! String)!,status:"running",sequence:1)
+            var user=ChatMessage(role:.user,content:fields["task"] as! String,attachments:chats[index].draftImages)
+            user.agentTaskId=conversationTask!.id;user.agentKind="request"
+            chats[index].messages.append(user)
+            var response=ChatMessage(role:.assistant,content:"");response.agentTaskId=conversationTask!.id;response.agentKind="result"
+            chats[index].messages.append(response);chats[index].draft="";chats[index].draftImages=[]
+            emit()
+            return try JSONSerialization.data(withJSONObject:["taskId":conversationTask!.id])
+        case "agent_snapshot": return try JSONEncoder().encode(conversationTask)
+        case "agent_cancel": conversationTask?.status = .cancelled
         case "cancel": turn?["running"] = false
         case "close": return Data(#"{"failures":[]}"#.utf8)
         default: break
@@ -59,7 +70,7 @@ class MockBackend: BackendTransport {
         try await Task.sleep(for: .seconds(600))
     }
     func agentEvents(_ receive: @escaping @MainActor (AgentTaskSnapshot?) -> Void) async throws {
-        receive(nil)
+        receive(conversationTask)
         try await Task.sleep(for: .seconds(600))
     }
     func emit() { if let state = try? snapshot() { receive?(state) } }
@@ -73,10 +84,10 @@ final class ChatTests: XCTestCase {
         store.draft = "Hello"
         store.send()
         try await Task.sleep(for: .milliseconds(50))
-        XCTAssertEqual(backend.requests.filter { $0["op"] as? String == "send" }.count, 1)
+        XCTAssertEqual(backend.requests.filter { $0["op"] as? String == "agent_start" }.count, 1)
         XCTAssertEqual(store.messages.first?.content, "Hello")
         XCTAssertEqual(store.draft, "")
-        XCTAssertTrue(store.isGenerating)
+        XCTAssertTrue(store.isGenerating || store.currentAgentActive)
         store.stop()
         try await Task.sleep(for: .milliseconds(30))
         XCTAssertFalse(store.isGenerating)
@@ -124,7 +135,7 @@ final class ChatTests: XCTestCase {
         backend.emit()
         XCTAssertEqual(store.messages.count, 2)
         XCTAssertEqual(store.messages.last?.content, "Partial reply")
-        XCTAssertTrue(store.receivedText)
+        XCTAssertEqual(store.messages.last?.content,"Partial reply")
         _ = await store.modelSession.close(unload: false)
     }
     func testBackendRestartReconnectsWithoutReplayingPrompt() async throws {

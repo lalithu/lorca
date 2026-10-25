@@ -7,8 +7,8 @@ struct ChatComposer: View {
     @State private var choosingImages = false
     @State private var dropTarget = false
 
-    private var canSend: Bool { compact ? store.canSendChat : store.canSend }
-    private func send() { if compact { store.sendChat() } else { store.send() } }
+    private var canSend: Bool { store.canSend }
+    private func send() { store.send() }
 
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 14 : 20) {

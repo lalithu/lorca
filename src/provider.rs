@@ -9,7 +9,7 @@ pub enum Update {
     Done(Usage),
 }
 impl Usage {
-    fn from_response(value: &Value) -> Self {
+    pub(crate) fn from_response(value: &Value) -> Self {
         let generated = value["eval_count"].as_u64();
         let duration = value["eval_duration"].as_u64().filter(|v| *v > 0);
         Self {
@@ -18,6 +18,9 @@ impl Usage {
                 .zip(generated)
                 .map(|(p, r)| p.saturating_add(r)),
             context_limit: None,
+            prompt_tokens: value["prompt_eval_count"].as_u64(),
+            generated_tokens: generated,
+            generation_duration_ns: duration,
             tokens_per_second: generated
                 .zip(duration)
                 .map(|(t, n)| t as f64 * 1e9 / n as f64),

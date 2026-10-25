@@ -28,9 +28,6 @@ struct AgentActivity: Identifiable, Equatable {
     static func make(from events: [AgentEvent]) -> [Self] {
         var items: [Self] = []; var indices: [String: Int] = [:]
         for event in events {
-            if event.kind == "assistant_message", let text = event.data["content"].string {
-                items.append(Self(id: event.id, note: text)); continue
-            }
             guard let id = event.data["callId"].string else { continue }
             if indices[id] == nil { indices[id] = items.count; items.append(Self(id: id)) }
             let index = indices[id]!

@@ -427,3 +427,391 @@ async fn a_fresh_approved_patch_can_recover_from_a_stale_proposal() {
         "verified replacement"
     );
 }
+
+#[tokio::test]
+async fn text_only_interactions_complete_with_and_without_workspace() {
+    for workspace in [false, true] {
+        for text in ["Hi!", "Rust ownership gives each value an owner."] {
+            let temp = Temp::new();
+            let agent = Arc::new(Agent::default());
+            let model = Mock::new(vec![json!({"role":"assistant","content":text})]);
+            agent
+                .submit(
+                    Submission {
+                        owner: "test".into(),
+                        model: None,
+                        task: "hi".into(),
+                        workspace: if workspace {
+                            temp.0.clone()
+                        } else {
+                            Default::default()
+                        },
+                        limits: Limits::default(),
+                        conversation_id: None,
+                        request_id: None,
+                        history: vec![],
+                    },
+                    model.clone(),
+                    if workspace {
+                        Registry::default()
+                    } else {
+                        Registry::empty()
+                    },
+                )
+                .unwrap();
+            let done = wait(&agent, |v| !v.status.active()).await;
+            assert_eq!(done.status, Status::Completed);
+            assert_eq!(done.result.as_deref(), Some(text));
+            assert!(!done.events.iter().any(|e| e.kind == "tool_requested"));
+            assert_eq!(model.seen.lock().unwrap().len(), 1);
+        }
+    }
+}
+#[tokio::test]
+async fn a_text_claim_does_not_replace_verified_execution() {
+    let root = Temp::new();
+    let agent = Arc::new(Agent::default());
+    start(
+        &agent,
+        &root.0,
+        Mock::new(vec![
+            json!({"role":"assistant","content":"I changed the file and tests passed."}),
+        ]),
+    );
+    let done = wait(&agent, |v| !v.status.active()).await;
+    assert_eq!(done.status, Status::Failed);
+    assert!(done.result.unwrap().contains("Unverified"));
+}
+#[tokio::test]
+async fn discovery_resolves_guessed_paths_and_revalidates_references() {
+    let root = Temp::new();
+    std::fs::create_dir(root.0.join("src")).unwrap();
+    std::fs::create_dir(root.0.join("src/core")).unwrap();
+    std::fs::write(root.0.join("src/core/mod.rs"), "pub fn actual() {}").unwrap();
+    let model = Mock::new(vec![
+        calls(vec![("read_file", json!({"path":"src/core.rs"}))]),
+        calls(vec![(
+            "search_files",
+            json!({"query":"mod.rs","path":"src"}),
+        )]),
+        calls(vec![("read_file", json!({"path":"src/core/mod.rs"}))]),
+        finish(),
+    ]);
+    let agent = Arc::new(Agent::default());
+    start(&agent, &root.0, model.clone());
+    let done = wait(&agent, |v| !v.status.active()).await;
+    assert_eq!(done.status, Status::Completed);
+    assert!(done.events.iter().any(|e| {
+        e.kind == "tool_failed"
+            && e.data["result"]["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Unverified file")
+    }));
+    assert!(model.seen.lock().unwrap()[3].iter().any(|m| {
+        m["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("pub fn actual")
+    }));
+    let w = Workspace::new(&root.0).unwrap();
+    assert!(w.require_reference("src/core/mod.rs").is_err());
+    w.remember("src/core/mod.rs").unwrap();
+    assert!(w.require_reference("src/core/mod.rs").is_ok());
+    std::fs::remove_file(root.0.join("src/core/mod.rs")).unwrap();
+    assert!(w.require_reference("src/core/mod.rs").is_err());
+}
+
+struct LowContextMock {
+    model: Arc<Mock>,
+}
+impl Inference for LowContextMock {
+    fn capacity(&self) -> FutureResult<'_, Option<u64>> {
+        Box::pin(async { Ok(Some(12_000)) })
+    }
+    fn generate<'a>(&'a self, messages: &'a [Value], tools: &'a [Value]) -> FutureResult<'a, Turn> {
+        self.model.generate(messages, tools)
+    }
+}
+#[tokio::test]
+async fn long_task_compacts_repeatedly_and_never_repeats_an_approved_write() {
+    let root = Temp::new();
+    std::fs::write(
+        root.0.join("large.rs"),
+        "verified repository finding\n".repeat(600),
+    )
+    .unwrap();
+    let patch = calls(vec![(
+        "apply_patch",
+        json!({"path":"created.rs","old_text":"","new_text":"verified once"}),
+    )]);
+    let mut turns = vec![patch.clone()];
+    for _ in 0..22 {
+        turns.push(calls(vec![("read_file", json!({"path":"large.rs"}))]));
+    }
+    turns.push(patch);
+    turns.push(finish());
+    let model = Mock::new(turns);
+    let agent = Arc::new(Agent::default());
+    let id = agent
+        .start(
+            "test",
+            "Create the file, inspect findings, preserve my goal",
+            &root.0,
+            Limits {
+                iterations: 30,
+                ..Default::default()
+            },
+            Arc::new(LowContextMock {
+                model: model.clone(),
+            }),
+            Registry::default(),
+        )
+        .unwrap();
+    let approval = wait(&agent, |v| v.approval.is_some())
+        .await
+        .approval
+        .unwrap();
+    agent
+        .decide("test", &id, &approval.id, Decision::AllowOnce)
+        .unwrap();
+    let done = wait(&agent, |v| !v.status.active()).await;
+    assert_eq!(done.status, Status::Completed, "{:?}", done.result);
+    let compactions = done
+        .events
+        .iter()
+        .filter(|e| e.kind == "context_compacted")
+        .count();
+    assert!(compactions >= 2, "compactions: {compactions}");
+    assert_eq!(
+        done.events
+            .iter()
+            .filter(|e| e.kind == "file_changes")
+            .count(),
+        1
+    );
+    assert_eq!(
+        done.events
+            .iter()
+            .filter(|e| e.kind == "approval_required")
+            .count(),
+        1
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.0.join("created.rs")).unwrap(),
+        "verified once"
+    );
+    assert!(done.transcript.len() > 40);
+    assert!(done.audit.len() >= done.events.len());
+    let seen = model.seen.lock().unwrap();
+    for context in seen.iter().filter(|m| {
+        m.iter().any(|v| {
+            v["content"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Working checkpoint")
+        })
+    }) {
+        let text = serde_json::to_string(context).unwrap();
+        assert!(text.contains("preserve my goal"));
+        assert!(text.contains("created.rs"));
+        assert!(text.contains("verifiedFiles"));
+        assert_tool_groups(context);
+    }
+}
+fn assert_tool_groups(messages: &[Value]) {
+    let mut pending = std::collections::HashSet::<String>::new();
+    for message in messages {
+        if message["role"] == "tool" {
+            assert!(pending.remove(message["tool_call_id"].as_str().unwrap()));
+        } else {
+            assert!(pending.is_empty());
+        }
+        if let Some(calls) = message["tool_calls"].as_array() {
+            for call in calls {
+                pending.insert(call["id"].as_str().unwrap().into());
+            }
+        }
+    }
+    assert!(pending.is_empty());
+}
+struct StreamingMock;
+impl Inference for StreamingMock {
+    fn generate<'a>(&'a self, _: &'a [Value], _: &'a [Value]) -> FutureResult<'a, Turn> {
+        unreachable!()
+    }
+    fn generate_stream<'a>(
+        &'a self,
+        _: &'a [Value],
+        _: &'a [Value],
+        updates: &'a (dyn Fn(ModelUpdate) + Send + Sync),
+    ) -> FutureResult<'a, Turn> {
+        Box::pin(async move {
+            updates(ModelUpdate::Text("Actual partial".into()));
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            unreachable!()
+        })
+    }
+}
+#[tokio::test]
+async fn cancellation_keeps_actual_streamed_text_and_stops_future_work() {
+    let root = Temp::new();
+    let agent = Arc::new(Agent::default());
+    let id = agent
+        .start(
+            "test",
+            "hi",
+            &root.0,
+            Limits::default(),
+            Arc::new(StreamingMock),
+            Registry::default(),
+        )
+        .unwrap();
+    let partial = wait(&agent, |v| !v.assistant_text.is_empty()).await;
+    assert!(partial.generating);
+    assert_eq!(partial.assistant_text, "Actual partial");
+    agent.cancel("test", &id).unwrap();
+    let done = wait(&agent, |v| !v.status.active()).await;
+    assert_eq!(done.status, Status::Cancelled);
+    assert_eq!(done.assistant_text, "Actual partial");
+    assert!(!done.events.iter().any(|e| e.kind == "tool_started"));
+}
+
+#[tokio::test]
+async fn discovery_references_survive_saved_followups_and_utf8_excerpts_can_expand() {
+    let root = Temp::new();
+    std::fs::create_dir(root.0.join("src")).unwrap();
+    std::fs::write(
+        root.0.join("src/large.rs"),
+        format!("{}tail", "🐋".repeat(3000)),
+    )
+    .unwrap();
+    let workspace = Workspace::new(&root.0).unwrap();
+    workspace.restore_references(&[json!({"role":"tool","tool_name":"search_files","content":json!({"ok":true,"matches":[{"path":"src/large.rs"},{"path":"../escape"}]}).to_string()})]);
+    assert!(workspace.require_reference("src/large.rs").is_ok());
+    assert!(workspace.require_reference("../escape").is_err());
+    let tool = Registry::default().get("read_file").unwrap();
+    let (_, cancel) = tokio::sync::watch::channel(false);
+    let first = tool
+        .prepare(
+            &workspace,
+            json!({"path":"src/large.rs"}),
+            &Limits::default(),
+        )
+        .unwrap();
+    let first = tool
+        .execute(
+            &workspace,
+            &first,
+            &Limits::default(),
+            cancel.clone(),
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
+    assert_eq!(first["nextOffset"], 8192);
+    assert!(first["truncated"].as_bool().unwrap());
+    let second = tool
+        .prepare(
+            &workspace,
+            json!({"path":"src/large.rs","offset":8192}),
+            &Limits::default(),
+        )
+        .unwrap();
+    let second = tool
+        .execute(&workspace, &second, &Limits::default(), cancel, &mut |_| {})
+        .await
+        .unwrap();
+    assert!(second["content"].as_str().unwrap().ends_with("tail"));
+    assert_eq!(second["truncated"], false);
+}
+
+struct RecoveringCommand(std::sync::atomic::AtomicUsize);
+impl Tool for RecoveringCommand {
+    fn schema(&self) -> Value {
+        json!({"type":"function","function":{"name":"run_command"}})
+    }
+    fn prepare(
+        &self,
+        _: &Workspace,
+        arguments: Value,
+        _: &Limits,
+    ) -> lorca::agent::Result<Prepared> {
+        Ok(Prepared {
+            action: arguments.clone(),
+            approval: true,
+            payload: arguments,
+        })
+    }
+    fn execute<'a>(
+        &'a self,
+        _: &'a Workspace,
+        _: &'a Prepared,
+        _: &'a Limits,
+        _: tokio::sync::watch::Receiver<bool>,
+        _: &'a mut (dyn FnMut(Value) + Send),
+    ) -> FutureResult<'a, Value> {
+        Box::pin(async move {
+            let successful = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0;
+            Ok(
+                json!({"ok":successful,"exitCode":if successful{0}else{1},"output":if successful{"test passed"}else{"test failed"}}),
+            )
+        })
+    }
+}
+#[tokio::test]
+async fn failed_command_can_run_again_after_a_verified_fix() {
+    let root = Temp::new();
+    std::fs::write(root.0.join("a.rs"), "broken").unwrap();
+    let command = calls(vec![(
+        "run_command",
+        json!({"executable":"cargo","arguments":["test"]}),
+    )]);
+    let model = Mock::new(vec![
+        command.clone(),
+        calls(vec![(
+            "apply_patch",
+            json!({"path":"a.rs","old_text":"broken","new_text":"fixed"}),
+        )]),
+        command,
+        finish(),
+    ]);
+    let counter = Arc::new(RecoveringCommand(std::sync::atomic::AtomicUsize::new(0)));
+    let mut registry = Registry::default();
+    registry.add("run_command", counter.clone());
+    let agent = Arc::new(Agent::default());
+    let id = agent
+        .start(
+            "test",
+            "Run tests, fix, rerun tests",
+            &root.0,
+            Limits::default(),
+            model,
+            registry,
+        )
+        .unwrap();
+    let mut previous = String::new();
+    let mut approvals = 0;
+    loop {
+        let view = wait(&agent, |v| {
+            !v.status.active() || v.approval.as_ref().is_some_and(|a| a.id != previous)
+        })
+        .await;
+        if !view.status.active() {
+            assert_eq!(view.status, Status::Completed, "{:?}", view.result);
+            break;
+        }
+        let approval = view.approval.unwrap();
+        previous = approval.id.clone();
+        approvals += 1;
+        agent
+            .decide("test", &id, &approval.id, Decision::AllowOnce)
+            .unwrap();
+    }
+    assert_eq!(approvals, 3);
+    assert_eq!(counter.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(
+        std::fs::read_to_string(root.0.join("a.rs")).unwrap(),
+        "fixed"
+    );
+}

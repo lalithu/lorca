@@ -102,7 +102,11 @@ impl Repository {
                         continue;
                     }
                     chat.messages.retain(|m| {
-                        m.role != "assistant" || !m.content.is_empty() || !m.attachments.is_empty()
+                        m.role != "assistant"
+                            || !m.content.is_empty()
+                            || !m.attachments.is_empty()
+                            || m.extra.contains_key("agentHistory")
+                            || m.extra.contains_key("agentEvents")
                     });
                     chats.push(chat);
                 }
@@ -211,6 +215,17 @@ impl Repository {
             if message.content.is_empty() && message.attachments.is_empty() {
                 continue;
             }
+            if let Some(history) = message.extra.get("agentHistory").and_then(Value::as_array) {
+                messages.extend(history.iter().cloned());
+                if message
+                    .extra
+                    .get("agentStatus")
+                    .is_some_and(|s| s == "failed" || s == "cancelled")
+                {
+                    messages.push(json!({"role":"assistant","content":message.content}));
+                }
+                continue;
+            }
             let mut wire = json!({"role":message.role,"content":message.content});
             if !message.attachments.is_empty() {
                 let mut images = vec![];
@@ -227,6 +242,6 @@ impl Repository {
             }
             messages.push(wire);
         }
-        Ok(messages)
+        Ok(crate::context::complete_groups(messages))
     }
 }

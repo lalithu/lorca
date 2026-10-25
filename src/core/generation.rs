@@ -69,6 +69,7 @@ impl Core {
                 context_used: None,
                 context_limit: s.view.sessions[si].usage.context_limit,
                 tokens_per_second: None,
+                ..Default::default()
             },
         };
         // Retain one completed turn per chat, enough to reconnect without replaying prompts.
@@ -137,7 +138,24 @@ impl Core {
                     }
                 }
             }
-            let messages = self.repository.wire_messages(&chat)?;
+            let mut messages = self.repository.wire_messages(&chat)?;
+            let capacity = self
+                .context_limit(&host, &model)
+                .await
+                .unwrap_or(crate::context::DEFAULT_CAPACITY);
+            let objective = chat
+                .messages
+                .iter()
+                .find(|m| m.role == "user")
+                .map(|m| m.content.as_str())
+                .unwrap_or("");
+            crate::context::Context::default().fit(
+                &mut messages,
+                &[],
+                capacity,
+                objective,
+                &json!({}),
+            )?;
             provider::stream_reply(
                 self.client.clone(),
                 &host,

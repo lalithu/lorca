@@ -116,6 +116,7 @@ async fn agent_events(State(service): State<Service>, headers: HeaderMap) -> Res
         |(mut receiver, first, core, session)| async move {
             if !first {
                 let _ = tokio::time::timeout(Duration::from_secs(10), receiver.changed()).await;
+                tokio::time::sleep(Duration::from_millis(45)).await;
             }
             receiver.borrow_and_update();
             if core.touch(&session).is_err() {

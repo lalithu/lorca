@@ -83,6 +83,12 @@ pub struct Usage {
     pub context_used: Option<u64>,
     pub context_limit: Option<u64>,
     pub tokens_per_second: Option<f64>,
+    #[serde(default)]
+    pub prompt_tokens: Option<u64>,
+    #[serde(default)]
+    pub generated_tokens: Option<u64>,
+    #[serde(default)]
+    pub generation_duration_ns: Option<u64>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -489,6 +489,7 @@ mod tests {
             context_used: Some(2048),
             context_limit: Some(4096),
             tokens_per_second: Some(42.25),
+            ..Default::default()
         };
         let line = status_line(&usage, 80);
         assert!(line.contains("█████░░░░░"));

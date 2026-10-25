@@ -12,15 +12,13 @@ final class ChatStore: ObservableObject {
     let modelSession = ModelSession()
     let backend: BackendTransport
     let agent: AgentStore
-    @Published var agentMode = false
     var agentWorkspace: URL? { agent.workspaces[library.selectedID] }
     var currentAgentActive: Bool { agent.active?.conversationId == library.selectedID }
     var messages: [ChatMessage] { library.current.messages }
     var draft: String { get { library.current.draft } set { library.setDraft(newValue) } }
     var draftImages: [ChatAttachment] { library.current.draftImages }
     var imageStore: AttachmentStore { AttachmentStore(directory: backend.root.appendingPathComponent("attachments")) }
-    var canSend: Bool { agentMode ? canSendAgent : canSendChat }
-    var canSendAgent: Bool { canSendChat && agentWorkspace != nil && draftImages.isEmpty && !agent.busy && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    var canSend: Bool { canSendChat && !agent.busy }
     var canSendChat: Bool { ready && !isReloadingModel && !agent.submitting && !currentAgentActive && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftImages.isEmpty)
         && !isGenerating && !isImportingImages && !modelSession.isLoading && !modelSession.isClosing }
     @Published private(set) var chatTextZoom: CGFloat = 0
@@ -46,6 +44,10 @@ final class ChatStore: ObservableObject {
     @Published private(set) var receivedText = false
     @Published var error: String?
     @Published private(set) var usage = ChatUsage()
+    var displayUsage: ChatUsage {
+        if let task=agent.latest,task.conversationId==library.selectedID,task.model==nil || task.model==selectedModel {return task.usage ?? ChatUsage(contextUsed:nil)}
+        return usage
+    }
     var appearanceChanged: (() -> Void)?
     private let defaults: UserDefaults
     private var updates: Set<AnyCancellable> = []
@@ -92,7 +94,7 @@ final class ChatStore: ObservableObject {
         if modelSession.isClosing { return "Closing session" }
         if isReloadingModel { return "Reloading model" }
         if modelSession.isLoading { return "Loading model" }
-        if let task = agent.active { return "Agent · \(task.status.label)" }
+        if let task = agent.active { return task.presentationStatus }
         if isGenerating { return receivedText ? "Responding" : "Thinking" }
         if isChecking { return "Connecting" }
         return isConnected && ready ? "Connected" : "Offline"
@@ -179,6 +181,7 @@ final class ChatStore: ObservableObject {
         guard snapshot.revision >= revision, let session = snapshot.sessions.first(where: { $0.id == backend.sessionID }) else { return }
         revision = snapshot.revision
         library.apply(snapshot, selected: session.selectedId)
+        agent.restoreArchived(snapshot.conversations,selected:session.selectedId)
         for chat in snapshot.conversations where agent.workspaces[chat.id] == nil {
             if let path = chat.messages.last(where: { $0.agentWorkspace != nil })?.agentWorkspace {
                 agent.workspaces[chat.id] = URL(fileURLWithPath: path)
@@ -199,20 +202,9 @@ final class ChatStore: ObservableObject {
         } else { usage = session.usage }
     }
     func send() {
-        if agentMode { sendAgent(); return }
-        sendChat()
-    }
-    func sendChat() {
-        guard canSendChat else { return }
-        let id = UUID()
-        pendingTurn = id
-        isGenerating = true
-        error = nil
-        enqueue(["op": "send", "conversationId": library.selectedID.uuidString, "requestId": id.uuidString])
-    }
-    private func sendAgent() {
-        guard canSendAgent, let workspace = agentWorkspace, agent.reserveSubmission() else { return }
+        guard canSend, agent.reserveSubmission() else { return }
         let conversation = library.selectedID, request = UUID(), text = draft, model = selectedModel
+        let workspace=agentWorkspace
         let preceding = pending
         pending = Task { [weak self] in
             await preceding?.value
@@ -221,6 +213,7 @@ final class ChatStore: ObservableObject {
             _ = await self.perform(["op": "snapshot"])
         }
     }
+    func sendChat() { send() }
     // Called only after the UI's shared-model warning is accepted. Rust release
     // enforces other-session leases; prepare reuses the existing loading UI.
     func reloadModel() async {

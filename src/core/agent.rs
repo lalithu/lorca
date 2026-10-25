@@ -1,5 +1,5 @@
 use super::*;
-use crate::agent::{Agent, Decision, FutureResult, Inference, Turn};
+use crate::agent::{Agent, Decision, FutureResult, Inference, ModelUpdate, Turn};
 
 pub(super) struct CoreInference {
     pub(super) core: Arc<Core>,
@@ -14,15 +14,14 @@ impl Drop for LoadGuard {
         self.0.send_replace(true);
     }
 }
-impl Inference for CoreInference {
-    fn generate<'a>(&'a self, messages: &'a [Value], tools: &'a [Value]) -> FutureResult<'a, Turn> {
-        Box::pin(async move {
-            let core = self.core.clone();
-            let session = self.session.clone();
-            let model = self.model.clone();
-            let (tx, mut cancel) = watch::channel(false);
-            let _guard = LoadGuard(tx);
-            let prepared=tokio::spawn(async move {
+impl CoreInference {
+    async fn ready(&self) -> Result<()> {
+        let core = self.core.clone();
+        let session = self.session.clone();
+        let model = self.model.clone();
+        let (tx, mut cancel) = watch::channel(false);
+        let _guard = LoadGuard(tx);
+        let prepared=tokio::spawn(async move {
                 let operation=core.prepare(&session,&model,false);tokio::pin!(operation);
                 tokio::select! {biased;
                     _=cancel.changed()=>{
@@ -32,19 +31,43 @@ impl Inference for CoreInference {
                     result=&mut operation=>result,
                 }
             }).await.map_err(|e|format!("Model preparation: {e}"))??;
-            if let Some(error) = prepared["sessions"]
-                .as_array()
-                .and_then(|s| s.iter().find(|v| v["id"] == self.session))
-                .and_then(|v| v["error"].as_str())
-            {
-                return Err(error.into());
-            }
+        if let Some(error) = prepared["sessions"]
+            .as_array()
+            .and_then(|s| s.iter().find(|v| v["id"] == self.session))
+            .and_then(|v| v["error"].as_str())
+        {
+            return Err(error.into());
+        }
+        Ok(())
+    }
+}
+impl Inference for CoreInference {
+    fn generate<'a>(&'a self, messages: &'a [Value], tools: &'a [Value]) -> FutureResult<'a, Turn> {
+        self.generate_stream(messages, tools, &|_| {})
+    }
+    fn capacity(&self) -> FutureResult<'_, Option<u64>> {
+        Box::pin(async {
+            self.ready().await?;
+            Ok(self
+                .core
+                .context_limit(&self.core.host(&self.session)?, &self.model)
+                .await)
+        })
+    }
+    fn generate_stream<'a>(
+        &'a self,
+        messages: &'a [Value],
+        tools: &'a [Value],
+        updates: &'a (dyn Fn(ModelUpdate) + Send + Sync),
+    ) -> FutureResult<'a, Turn> {
+        Box::pin(async move {
+            self.ready().await?;
             let provider = provider::agent::OllamaAgent {
                 client: self.core.client.clone(),
                 host: self.core.host(&self.session)?,
                 model: self.model.clone(),
             };
-            provider.generate(messages, tools).await
+            provider.generate_stream(messages, tools, updates).await
         })
     }
 }

@@ -34,7 +34,9 @@ struct Server {
 }
 async fn chat(State(s): State<Arc<Server>>, Json(v): Json<Value>) -> Json<Value> {
     s.requests.lock().unwrap().push(v.clone());
-    let message = if v["messages"]
+    let message = if v.get("tools").is_none() {
+        json!({"role":"assistant","content":"Hello. I remember our conversation."})
+    } else if v["messages"]
         .as_array()
         .unwrap()
         .iter()
@@ -140,7 +142,7 @@ async fn unified_core_native_ollama_tools_permissions_and_model_lease() {
         .filter(|v| v.get("tools").is_some())
         .collect();
     assert_eq!(chats.len(), 2);
-    assert_eq!(chats[0]["stream"], false);
+    assert_eq!(chats[0]["stream"], true);
     assert_eq!(chats[0]["keep_alive"], -1);
     assert_eq!(chats[0]["tools"].as_array().unwrap().len(), 6);
     let messages = chats[1]["messages"].as_array().unwrap();
@@ -232,7 +234,13 @@ async fn chat_agents_are_idempotent_follow_the_origin_and_persist_only_request_a
     let pending = wait(&core, |v| v.approval.is_some()).await;
     assert_eq!(pending.conversation_id.as_deref(), Some(chat.as_str()));
     assert_eq!(pending.request_id.as_deref(), Some(request.as_str()));
-    assert_eq!(core.repository.load().unwrap().0[0].messages.len(), 1);
+    core.maintenance();
+    let checkpoint = core.repository.load().unwrap().0;
+    assert_eq!(checkpoint[0].messages.len(), 2);
+    assert_eq!(
+        checkpoint[0].messages[1].extra["agentStatus"],
+        "awaiting_approval"
+    );
     assert!(
         core.command(json!({"op":"delete","session":session,"conversationId":chat}))
             .await
@@ -317,4 +325,127 @@ async fn cancelled_and_interrupted_chat_agents_preserve_requests_without_restart
         "cancelled"
     );
     http.abort();
+}
+
+#[tokio::test]
+async fn unified_greetings_followups_and_images_preserve_history_without_workspace() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let (store, _workspace, core, session, server, http) = setup(false).await;
+    let chat = core
+        .snapshot()
+        .sessions
+        .iter()
+        .find(|s| s.id == session)
+        .unwrap()
+        .selected_id
+        .clone();
+    for prompt in ["hi", "Explain Rust ownership", "What did I ask earlier?"] {
+        let request = lorca::types::id();
+        let command = json!({"op":"agent_start","session":session,"conversationId":chat,"requestId":request,"task":prompt});
+        let accepted = core.command(command.clone()).await.unwrap();
+        let task = wait(&core, |t| !t.status.active()).await;
+        assert_eq!(task.status, Status::Completed);
+        core.maintenance();
+        assert_eq!(
+            core.command(command).await.unwrap()["taskId"],
+            accepted["taskId"]
+        );
+    }
+    let mut data = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut data)
+        .encode(&[255, 0, 0], 1, 1, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    core.command(json!({"op":"importImage","session":session,"conversationId":chat,"name":"red.jpg","data":STANDARD.encode(data)})).await.unwrap();
+    core.command(json!({"op":"agent_start","session":session,"conversationId":chat,"requestId":lorca::types::id(),"task":"Explain this image"})).await.unwrap();
+    assert_eq!(
+        wait(&core, |t| !t.status.active()).await.status,
+        Status::Completed
+    );
+    core.maintenance();
+    {
+        let requests = server.requests.lock().unwrap();
+        let models = requests
+            .iter()
+            .filter(|r| r["messages"].is_array())
+            .collect::<Vec<_>>();
+        assert_eq!(models.len(), 4);
+        assert!(models.iter().all(|r| r.get("tools").is_none()));
+        assert!(
+            models[2]["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["content"] == "hi")
+        );
+        assert!(
+            models[2]["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["content"] == "Hello. I remember our conversation.")
+        );
+        assert!(
+            models[3]["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["images"].is_array())
+        );
+    }
+    let restored = Core::new(Repository::new(store.0.clone()).unwrap()).unwrap();
+    let snapshot = restored.snapshot();
+    let chat = snapshot
+        .conversations
+        .iter()
+        .find(|c| c.id == chat)
+        .unwrap();
+    assert_eq!(chat.messages.len(), 8);
+    assert_eq!(chat.messages[6].attachments.len(), 1);
+    assert!(
+        chat.messages[7]
+            .extra
+            .get("agentHistory")
+            .unwrap()
+            .is_array()
+    );
+    http.abort();
+}
+
+#[test]
+fn restart_keeps_a_tool_only_checkpoint_and_marks_it_interrupted() {
+    use lorca::types::{Conversation, Message};
+    let temp = Temp::new();
+    let repository = Repository::new(temp.0.clone()).unwrap();
+    let mut chat = Conversation::default();
+    let mut request = Message::new("user", "Edit file".into());
+    request.extra.insert("agentKind".into(), json!("request"));
+    request
+        .extra
+        .insert("agentTaskId".into(), json!("interrupted"));
+    let mut response = Message::new("assistant", String::new());
+    response.extra.insert("agentKind".into(), json!("result"));
+    response
+        .extra
+        .insert("agentTaskId".into(), json!("interrupted"));
+    response
+        .extra
+        .insert("agentStatus".into(), json!("running"));
+    let history = json!([{"role":"assistant","tool_calls":[{"id":"patch","function":{"name":"apply_patch","arguments":{"path":"a"}}}]},{"role":"tool","tool_name":"apply_patch","tool_call_id":"patch","content":"{\"ok\":true,\"path\":\"a\"}"}]);
+    response
+        .extra
+        .insert("agentHistory".into(), history.clone());
+    chat.messages = vec![request, response];
+    repository.save(&chat).unwrap();
+    let core = Core::new(repository).unwrap();
+    let snapshot = core.snapshot();
+    let restored = snapshot
+        .conversations
+        .iter()
+        .find(|c| c.id == chat.id)
+        .unwrap();
+    assert_eq!(restored.messages.len(), 2);
+    assert_eq!(restored.messages[1].extra["agentHistory"], history);
+    assert_eq!(restored.messages[1].extra["agentStatus"], "cancelled");
+    assert!(restored.messages[1].content.contains("interrupted"));
+    assert!(core.agent().snapshot().is_none());
 }

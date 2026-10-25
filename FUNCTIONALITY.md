@@ -22,8 +22,10 @@
 - Error recovery, cancellable loading/unloading, and terminal-state restoration.
 - Confirmed `● model unloaded`, followed by red `● session closed`.
 
-- Chats Agent mode: workspace tasks, live tools/diffs/output, Allow Once/Deny, and cancellation.
-- Agent requests/results saved in the same chat; Mini shares status; reconnect never replays tasks.
+- One Chats composer: conversations, images, optional workspace tools, streamed text, live diffs/output, exact-action approvals, and cancellation.
+- Requests, partial replies, structured tools/results, and activity saved in the same chat; Mini shares status; reconnect never replays tasks.
+- Automatic model-context compaction; confirmed per-turn usage and actual allocated capacity.
+- Discovery-backed file references, revalidated across follow-ups; bounded read excerpts can expand via nextOffset.
 - `lorca agent --workspace PATH "TASK"`: native tool loop, explicit action approvals, cancellation, and live events ([details](AGENT.md)).
 
 - Model menu → **Reload model…**: unload/reload a stalled model after a shared-model warning. Stop active work first; Rust protects other lorca sessions.

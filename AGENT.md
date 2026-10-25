@@ -1,4 +1,4 @@
-# Agent runtime and Chats (v0.4B)
+# Unified conversation runtime (v0.4)
 
 - One Rust core, one active task; agent execution is embedded in existing Chats.
 - Tasks stays untouched. No MCP, subagents, or background service installation.
@@ -23,7 +23,7 @@ cargo build
 ## Tools and boundaries
 
 - `list_directory`: immediate entries, maximum 200.
-- `read_file`: UTF-8, maximum 128 KiB; returns an 8 KiB excerpt.
+- `read_file`: verified UTF-8 file, maximum 128 KiB; returns 8 KiB plus `nextOffset` for focused expansion.
 - `search_files`: literal filename/content search, maximum 800 entries / 30 matches / 2 seconds; skips hidden/build folders and symlinks.
 - `apply_patch`: one file per call; exact unique `old_text` replacement, or new file when `old_text` is empty. Shows the entire before/after diff. Rechecks source bytes, writes a temporary file, and atomically replaces the target. No deletions; stale files and write symlinks are rejected.
 - `run_command`: explicit approval; only Cargo `test` / `check` with limited flags, `fmt --check`, or `clippy --all-targets -- -D warnings`. No shell, arbitrary executable, aliases, privileged commands, downloads, or destructive Git actions.
@@ -36,35 +36,35 @@ cargo build
 
 - Defaults: 20 model turns, 120 seconds per model request, 30 seconds per command. CLI overrides: `--max-iterations`, `--model-timeout`, `--command-timeout`.
 - Maximums: 32 turns, 180 / 120 seconds; 8 calls per turn. Stops after 3 identical failures or 6 total failures.
-- Tool output is bounded; commands capture 16 KiB. Model history stops at 64 KiB rather than silently dropping messages. No context compaction.
+- Tool output is bounded; commands capture 16 KiB. The shared Rust context manager estimates model input, includes schemas and generation headroom, and compacts near 78% of allocated capacity. There is no unconditional 64 KiB working-history failure.
 - Uses Ollama native structured calls, full assistant call messages, and correlated tool results. No parsing executable actions from prose or exposing private thinking.
-- Completion requires successful tool evidence and no unresolved failed/denied command or edit. The final explanation is model generated; actual tool results and command exit codes remain the evidence.
-- Task state/events are in memory: only the latest task is retained, with up to 300 events / 2 MiB. Restarting the backend discards agent tasks; saved chats/images are unaffected.
+- Ordinary text answers complete without tools. Common unsupported action claims are rejected; unresolved failed/denied edits and commands remain incomplete. Model prose never supplies permission or execution evidence.
+- Only the latest task runs in memory. Live UI events remain bounded to 300 / 2 MiB; full structured turns and execution events are saved on the conversation response. Interrupted work is not resumed or replayed after restart.
 
 ## Chats
 
-- Choose Agent in the composer, select a workspace, and send. Chat mode preserves normal chat/images.
+- One composer handles text, images, and optional workspace tools. No Chat/Agent selector or routing inference request.
 - Expand tool activity for arguments/results; commands and patches require exact-action inline approval.
 - Scroll up to pause following; return to the bottom to resume. Mini shows basic status and opens Chats.
-- Requests/final results are saved in the originating conversation; drafts, images, and IDs remain compatible.
-- Only latest bounded execution activity is recoverable from the backend. The UI caches up to eight runs in memory, not on disk.
+- Requests, streamed partial text, final results, structured calls/results, and execution activity save in the originating conversation. Drafts, images, and IDs remain compatible.
+- The live backend snapshot is bounded; saved activity can be restored from conversation metadata. Swift keeps an eight-run presentation cache and batches updates every 100 ms.
 - Backend restarts mark unfinished saved requests interrupted; they are never resumed or resubmitted automatically.
 - Model menu → Reload model unloads/reloads after a shared-model warning; active work must be stopped first. It reuses Rust leases and loading UI; no automatic reload.
-- GUI limits: 24 model turns, 120 seconds per model request, 120 seconds per command. Broad tasks can hit context/time limits; failures remain visible and saved.
+- GUI safeguards remain 24 model turns, 120 seconds per inference request, 120 seconds per command. Context compacts between complete turns; actual time/iteration limits remain explicit.
 
 ## v0.4B interface contract
 
 Use the existing authenticated local backend (`Endpoint`, bearer token, no browser Origin):
 
-- `POST /command`: `{"op":"agent_start","session":"…","task":"…","workspace":"/absolute/path","model":"qwen3.5:9b","limits":{"iterations":20,"modelSeconds":120,"commandSeconds":30}}` → `{"taskId":"…"}`. Model/limits are optional. Chats also sends `conversationId` and a unique `requestId`; the saved request ID prevents duplicate execution after an uncertain acknowledgement.
+- `POST /command`: `{"op":"agent_start","session":"…","task":"…","workspace":"/absolute/path","model":"qwen3.5:9b","limits":{"iterations":20,"modelSeconds":120,"commandSeconds":30}}` → `{"taskId":"…"}`. Workspace/model/limits are optional. Without a workspace the tool registry is empty. Chats also sends `conversationId` and a unique `requestId`; the saved request ID prevents duplicate execution after an uncertain acknowledgement.
 - `agent_snapshot` + `session` → latest `TaskView` or `null`.
 - `GET /agent/events` + `X-Lorca-Session`: NDJSON `TaskView` snapshots, including current approval and bounded event history. Reconnect with `agent_snapshot`; deduplicate by task ID + event sequence. A sequence gap means older activity rolled off.
 - `agent_decide` + `session`, `taskId`, `approvalId`, `decision` (`allow_once`, `deny`, `cancel`). Tokens are exact-action, owner-session, single-use; never send edited action arguments.
 - `agent_cancel` + `session`, `taskId`. Closing/expiring the owner session cancels too.
 - Status: `running`, `awaiting_approval`, `completed`, `cancelled`, `failed`.
-- Events: `task_started`, `model_generating`, `assistant_message`, `tool_requested`, `approval_required`, `tool_started`, `tool_completed`, `tool_failed`, `file_changes`, `terminal_output`, `task_completed`, `task_cancelled`, `task_failed`.
+- Events: `task_started`, `model_generating`, `assistant_message`, `context_compacted`, `tool_requested`, `approval_required`, `tool_started`, `tool_completed`, `tool_failed`, `file_changes`, `terminal_output`, `task_completed`, `task_cancelled`, `task_failed`.
 - Each event has `id`, `taskId`, monotonic `sequence`, `kind`, and structured `data`. Calls have stable `callId`; approvals contain complete immutable `action` details. Terminal output identifies stdout/stderr.
-- `TaskView` includes optional `conversationId` / `requestId`. `assistant_message` contains only public assistant content, never private thinking. SwiftUI projects these events in Chats; all execution and permission enforcement stays in Rust. Pause/resume and durable execution history are not implemented.
+- `TaskView` includes optional `conversationId` / `requestId`, the model name, a monotonic revision, cumulative public `assistantText`, a `generating` flag, and confirmed `usage`. `assistant_message` contains only public assistant content, never private thinking. SwiftUI projects these events in Chats; all execution and permission enforcement stays in Rust. Automatic restart/resume is not implemented. Saved execution history does not authorize or replay operations.
 
 ## Layout
 
@@ -82,9 +82,50 @@ Use the existing authenticated local backend (`Endpoint`, bearer token, no brows
 - Tests: new `macos/Tests/LorcaMacTests/AgentTests.swift`; updated `BackendTests.swift`, `ChatTests.swift`, `ChatScrollTests.swift`, and `tests/agent_core.rs`.
 - Docs: `README.md`, `macos/README.md`, `FUNCTIONALITY.md`, and this contract.
 
-## Verification
+## v0.4 context, streaming, and grounding
 
-- All 44 Rust tests and 34 Swift tests passed, along with formatting, strict Clippy, and the macOS build. Tests cover association, persistence, ordering/deduplication, decisions, cancellation, reconnect, and presentation.
-- Live checks used a separate app identity/data directory: Qwen inspection/final response, user-approved cargo test (exit 0), command denial, cancellation, restart without replay, free scrolling/follow, normal chat, Mini status, manual reload, and an approved temporary-file diff. No application source was edited by the live agent.
-- The broad acceptance request hit the existing context limit on its first attempt and timed out on its final summary after cargo test succeeded on its second. A narrower inspection completed. Model-generated summaries can still hit these limits; actual command output/exit codes remain authoritative.
-- After updating, quit existing lorca clients once and relaunch the rebuilt app/CLI so the shared backend includes the updated API. `./macos/build.sh` bundles the new core; the installed terminal command updates with `cargo install --path . --locked --force`.
+- `src/context.rs` is shared by the existing terminal conversation path and the
+  unified tool loop. Token estimates use Unicode text heuristics (not serialized
+  byte length), schema overhead, image allowance, and confirmed prompt calibration.
+- The allocated window comes from Ollama `/api/ps`; an unavailable allocation uses
+  a conservative 16,384-token request budget without presenting it as confirmed UI data.
+- Compaction keeps recent complete tool groups and images, builds a deterministic
+  structured checkpoint, and retains Rust-owned objective, references, operation
+  outcomes, denials, and unresolved errors. It makes no extra model requests.
+- Checkpoints are user-role historical data, never elevated system instructions.
+  Oversized observations shrink only in working memory; original results stay saved.
+- Incomplete tool groups from interrupted requests receive explicit unconfirmed
+  results when forming later context. No side effects are replayed by this repair.
+- `src/provider/agent.rs` assembles fragmented NDJSON/UTF-8, public deltas, and native
+  indexed/ID-correlated calls. Missing completion acknowledgement fails without
+  executing calls; already streamed text stays visible and saved.
+- Confirmed usage includes prompt tokens, generated tokens, generation duration,
+  and tokens/second. Compaction clears obsolete metrics until a new confirmed turn.
+- `Workspace` has a bounded verified reference set populated from real root listing,
+  directory/search results, and saved successful discovery. Paths are resolved again
+  inside the capability before reuse; edits keep existing symlink/stale-source checks.
+- Successful duplicate actions in an active run reuse their recorded result. A file
+  mutation invalidates command-result reuse, allowing tests to run again after a fix.
+  Repeated unchanged failures stop early; denials remain task scoped.
+
+## Verification on this machine
+
+- The original 44 Rust tests passed before changes. The expanded suite passes,
+  including genuine streaming, UTF-8/tool fragments, no-workspace conversation,
+  saved follow-ups/images, discovery recovery, partial cancellation, interrupted
+  tool groups, metrics, and repeated automatic compaction without duplicate writes.
+- `cargo fmt --check`, `cargo test`, and strict Clippy are the required Rust checks.
+- Native macOS builds pass using the installed macOS 26.5 SDK. With this machine's
+  command-line tools, set `SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk`
+  before `./macos/build.sh`: its newer SDK references a missing SwiftUI macro plugin.
+- The existing Swift XCTest suite was attempted before and after the change. This
+  command-line-tools installation does not contain XCTest; the suite cannot run here.
+  A full Xcode installation is needed for that check. No test pass is claimed for it.
+- Real local `qwen3.5:9b-q4_K_M` completed greeting → source discovery/architecture →
+  an approved fix → approved sandboxed `cargo test` (exit 0) → a tool-free contextual
+  explanation in an isolated Rust fixture. All four answers streamed before completion;
+  allocated capacity was 32,768 and usage/speed came from actual Ollama measurements.
+- The deterministic long-task regression forces multiple compactions, keeps the
+  objective and discovered references, and executes its approved patch exactly once.
+- After updating, relaunch app/CLI clients to load the rebuilt core. No commits,
+  pushes, merges, release tags, or additional agent frameworks are created.

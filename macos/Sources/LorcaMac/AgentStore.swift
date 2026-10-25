@@ -66,6 +66,7 @@ final class AgentStore: ObservableObject {
             latest = nil
             return
         }
+        if let previous=runs[snapshot.id],let before=previous.revision,let after=snapshot.revision,after<before {return}
         var sequences = Set<UInt64>()
         snapshot.events = snapshot.events.filter { $0.taskId == snapshot.id && sequences.insert($0.sequence).inserted }.sorted { $0.sequence < $1.sequence }
         if let previous = runs[snapshot.id], (previous.events.last?.sequence ?? 0) > (snapshot.events.last?.sequence ?? 0) { return }
@@ -79,12 +80,31 @@ final class AgentStore: ObservableObject {
         }
         if latest == nil || latest?.id == snapshot.id || !known { latest = snapshot }
     }
+    func restoreArchived(_ chats:[Conversation], selected:UUID) {
+        for chat in chats where chat.id==selected {
+            for message in chat.messages.filter({$0.role == .assistant}).suffix(7) {
+                guard let id=message.agentTaskId,runs[id]==nil,let events=message.agentEvents,
+                    let status=AgentTaskSnapshot.Status(rawValue:message.agentStatus ?? ""),!status.active else{continue}
+                let request=chat.messages.first{$0.agentTaskId==id && $0.role == .user}
+                let snapshot=AgentTaskSnapshot(id:id,owner:"",conversationId:chat.id,requestId:request?.agentRequestId,
+                    task:request?.content ?? "",workspace:request?.agentWorkspace ?? "",status:status,
+                    events:events,approval:nil,result:message.content,usage:message.agentUsage)
+                activities[id]=AgentActivity.make(from:events)
+                runs[id]=snapshot;order.append(id)
+                while order.count>8 {
+                    let old=order.removeFirst()
+                    if old==latest?.id {order.append(old);continue}
+                    runs.removeValue(forKey:old);activities.removeValue(forKey:old)
+                }
+            }
+        }
+    }
     func reserveSubmission() -> Bool {
         guard !busy else { return false }
         submitting = true; error = nil
         return true
     }
-    func submit(task: String, workspace: URL, conversation: UUID, request: UUID, model: String) async -> Bool {
+    func submit(task: String, workspace: URL?, conversation: UUID, request: UUID, model: String) async -> Bool {
         defer { submitting = false }
         do {
             _ = try await client.start(task: task, workspace: workspace, conversation: conversation, request: request, model: model)

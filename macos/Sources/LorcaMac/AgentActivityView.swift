@@ -3,13 +3,21 @@ import SwiftUI
 struct AgentActivityView: View {
     @ObservedObject var store: AgentStore
     let taskID: String
+    var savedMessage:ChatMessage? = nil
+    private var snapshot:AgentTaskSnapshot? {
+        if let current=store.runs[taskID]{return current}
+        guard let message=savedMessage,let events=message.agentEvents,
+            let status=AgentTaskSnapshot.Status(rawValue:message.agentStatus ?? ""),!status.active else{return nil}
+        return AgentTaskSnapshot(id:taskID,owner:"",conversationId:nil,requestId:nil,task:"",workspace:message.agentWorkspace ?? "",
+            status:status,events:events,approval:nil,result:message.content,usage:message.agentUsage)
+    }
     var body: some View {
-        if let task = store.runs[taskID] {
+        if let task = snapshot, task.events.contains(where:{$0.kind=="tool_requested"}) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 9) {
                     if task.status.active { ProgressView().controlSize(.mini) }
                     else { Image(systemName: task.status == .completed ? "checkmark.circle" : "circle.dashed").foregroundStyle(.secondary) }
-                    Text(task.status.label).font(.system(size: 12, weight: .medium))
+                    Text(task.presentationStatus).font(.system(size: 12, weight: .medium))
                     Text(URL(fileURLWithPath: task.workspace).lastPathComponent).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                     Spacer()
                     if task.status.active {
@@ -22,7 +30,7 @@ struct AgentActivityView: View {
                     Text("Earlier activity is no longer in the backend’s bounded event buffer.").font(.caption).foregroundStyle(.secondary)
                 }
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(store.activities[task.id] ?? []) { item in
+                    ForEach(store.activities[task.id] ?? AgentActivity.make(from:task.events)) { item in
                         if let note = item.note { MarkdownText(text: note, size: 13).textSelection(.enabled) }
                         else { AgentToolRow(store: store, task: task, item: item) }
                     }
@@ -96,7 +104,7 @@ struct AgentMiniStatus: View {
             Button(action: open) {
                 HStack(spacing: 8) {
                     Image(systemName: task.status == .awaitingApproval ? "hand.raised" : "terminal")
-                    Text(task.status == .awaitingApproval ? "Review agent action in Chats" : "Agent working · Open Chats")
+                    Text(task.status == .awaitingApproval ? "Review action in Chats" : "Working · Open Chats")
                     Spacer(minLength: 0)
                     Image(systemName: "arrow.up.right")
                 }.font(.system(size: 11)).foregroundStyle(Color.lorcaBlue).padding(9)

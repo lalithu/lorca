@@ -1,4 +1,6 @@
 mod command;
+mod completion;
+mod execution;
 mod permissions;
 mod runtime;
 mod tools;

@@ -3,6 +3,7 @@ import SwiftUI
 struct ContextBar: View {
     let usage: ChatUsage
     var compact = false
+    var processing = false
 
     private var used: String { usage.contextUsed.map { $0.formatted() } ?? "—" }
     private var limit: String { usage.contextLimit.map { $0.formatted() } ?? "—" }
@@ -10,7 +11,7 @@ struct ContextBar: View {
 
     var body: some View {
         HStack(spacing: compact ? 7 : 9) {
-            Text("ctx").fontWeight(.semibold)
+            Text(processing ? "ctx · last" : "ctx").fontWeight(.semibold)
             GeometryReader { geometry in
                 Capsule().fill(Color.cyan.opacity(0.15))
                     .overlay(alignment: .leading) {
@@ -31,6 +32,6 @@ struct ContextBar: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Context: \(percent), \(used) of \(limit) tokens")
         .accessibilityValue(usage.tokensPerSecond.map { String(format: "%.1f tokens per second", $0) } ?? "")
-        .help("Prompt and reply tokens from the last completed response. — means Ollama hasn’t reported a value yet.")
+        .help("Confirmed prompt and reply tokens from the most recent model turn, including tool execution. During generation these are the last confirmed measurements; compaction clears them. — means Ollama hasn’t reported a value yet.")
     }
 }

@@ -44,6 +44,9 @@ impl Default for Registry {
     }
 }
 impl Registry {
+    pub fn empty() -> Self {
+        Self(BTreeMap::new())
+    }
     pub fn add(&mut self, name: &str, tool: Arc<dyn Tool>) {
         self.0.insert(name.into(), tool);
     }
@@ -62,6 +65,13 @@ struct Native(&'static str);
 #[serde(deny_unknown_fields)]
 struct PathArgs {
     path: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadArgs {
+    path: String,
+    #[serde(default)]
+    offset: usize,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -106,8 +116,8 @@ impl Tool for Native {
                 vec!["path"],
             ),
             "read_file" => (
-                "Read a UTF-8 file (128 KiB maximum; returned text bounded to 8 KiB).",
-                json!({"path":{"type":"string"}}),
+                "Read a verified UTF-8 file (128 KiB maximum; returns 8 KiB). Use nextOffset from a previous result to read a later excerpt when needed; don't repeat unchanged reads.",
+                json!({"path":{"type":"string"},"offset":{"type":"integer","minimum":0,"description":"Optional UTF-8 byte offset; reuse nextOffset from the previous excerpt."}}),
                 vec!["path"],
             ),
             "search_files" => (
@@ -145,9 +155,13 @@ impl Tool for Native {
         let mut payload = arguments;
         let approval = matches!(self.0, "apply_patch" | "run_command");
         match self.0 {
-            "list_directory" | "read_file" => {
+            "list_directory" => {
                 let a: PathArgs = parse(payload.clone())?;
                 Workspace::path(&a.path)?;
+            }
+            "read_file" => {
+                let a: ReadArgs = parse(payload.clone())?;
+                w.require_reference(&a.path)?;
             }
             "search_files" => {
                 let a: SearchArgs = parse(payload.clone())?;
@@ -159,6 +173,17 @@ impl Tool for Native {
             "apply_patch" => {
                 let a: PatchArgs = parse(payload)?;
                 let old = w.patch_source(&a.path)?;
+                if old.is_some() {
+                    w.require_reference(&a.path)?;
+                } else {
+                    let parent = std::path::Path::new(&a.path)
+                        .parent()
+                        .filter(|p| !p.as_os_str().is_empty())
+                        .unwrap_or(std::path::Path::new("."));
+                    if parent != std::path::Path::new(".") {
+                        w.require_reference(&parent.to_string_lossy())?;
+                    }
+                }
                 let new=match &old {
                     None if a.old_text.is_empty() => a.new_text,
                     Some(s) if !a.old_text.is_empty() && s.matches(&a.old_text).count()==1 => s.replacen(&a.old_text,&a.new_text,1),
@@ -214,16 +239,35 @@ impl Tool for Native {
                         }
                         let e = entry.map_err(|e| e.to_string())?;
                         let ty = e.file_type().map_err(|e| e.to_string())?;
-                        entries.push(json!({"name":e.file_name().to_string_lossy(),"kind":if ty.is_dir(){"directory"}else if ty.is_symlink(){"symlink"}else{"file"}}));
+                        let name = e.file_name().to_string_lossy().to_string();
+                        let path = if a.path == "." {
+                            name.clone()
+                        } else {
+                            format!("{}/{name}", a.path)
+                        };
+                        let reference = if ty.is_symlink() {
+                            None
+                        } else {
+                            w.remember(&path).ok()
+                        };
+                        entries.push(json!({"name":name,"path":reference,"kind":if ty.is_dir(){"directory"}else if ty.is_symlink(){"symlink"}else{"file"}}));
                     }
                     entries.sort_by_key(|e| e["name"].as_str().unwrap_or("").to_string());
                     Ok(json!({"ok":true,"entries":entries,"truncated":truncated}))
                 }
                 "read_file" => {
-                    let a: PathArgs = parse(p.payload.clone())?;
-                    let s = w.read(&a.path)?;
+                    let a: ReadArgs = parse(p.payload.clone())?;
+                    let text = w.read(&a.path)?;
+                    if a.offset > text.len() || !text.is_char_boundary(a.offset) {
+                        return Err("Read offset must be an existing UTF-8 boundary; use nextOffset from the previous excerpt".into());
+                    }
+                    let mut end = (a.offset + 8192).min(text.len());
+                    while !text.is_char_boundary(end) {
+                        end -= 1;
+                    }
                     Ok(
-                        json!({"ok":true,"path":a.path,"content":bounded(&s,8192),"truncated":s.len()>8192}),
+                        json!({"ok":true,"path":a.path,"offset":a.offset,"content":&text[a.offset..end],
+                        "truncated":end<text.len(),"nextOffset":if end<text.len(){Some(end)}else{None},"totalBytes":text.len()}),
                     )
                 }
                 "search_files" => {
@@ -235,6 +279,7 @@ impl Tool for Native {
                     let replacement = string(&p.payload, "replacement")?;
                     let expected: Option<String> = parse(p.payload["expected"].clone())?;
                     w.replace(&path, &expected, &replacement)?;
+                    w.remember(&path)?;
                     Ok(json!({"ok":true,"verified":true,"path":path,"bytes":replacement.len()}))
                 }
                 "run_command" => {
@@ -298,8 +343,10 @@ fn search(w: &Workspace, a: &SearchArgs, cancel: &watch::Receiver<bool>) -> Resu
             if ty.is_symlink() {
                 continue;
             }
-            if name.contains(&a.query) {
-                matches.push(json!({"path":p}));
+            if name.contains(&a.query)
+                && let Ok(reference) = w.remember(&p)
+            {
+                matches.push(json!({"path":reference}));
             }
             if ty.is_dir() {
                 pending.push(p);
@@ -308,7 +355,8 @@ fn search(w: &Workspace, a: &SearchArgs, cancel: &watch::Receiver<bool>) -> Resu
             {
                 for (i, line) in text.lines().enumerate() {
                     if line.contains(&a.query) {
-                        matches.push(json!({"path":p,"line":i+1,"text":bounded(line,240)}));
+                        let reference = w.remember(&p)?;
+                        matches.push(json!({"path":reference,"line":i+1,"text":bounded(line,240)}));
                         if matches.len() >= 30 {
                             truncated = true;
                             break 'scan;

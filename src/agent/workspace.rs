@@ -12,6 +12,7 @@ pub const FILE_LIMIT: usize = 128 * 1024;
 pub struct Workspace {
     pub root: PathBuf,
     dir: Dir,
+    verified: std::sync::Mutex<std::collections::BTreeSet<String>>,
 }
 impl Workspace {
     pub fn new(path: &Path) -> Result<Self> {
@@ -20,7 +21,92 @@ impl Workspace {
             return Err("Select a workspace directory, not the filesystem root".into());
         }
         let dir = Dir::open_ambient_dir(&root, ambient_authority()).map_err(|e| e.to_string())?;
-        Ok(Self { root, dir })
+        let workspace = Self {
+            root,
+            dir,
+            verified: Default::default(),
+        };
+        // Bounded actual root discovery makes common top-level files immediately usable.
+        for entry in workspace
+            .dir
+            .entries()
+            .map_err(|e| e.to_string())?
+            .take(200)
+            .flatten()
+        {
+            if entry.file_type().is_ok_and(|t| !t.is_symlink()) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let _ = workspace.remember(&name);
+            }
+        }
+        Ok(workspace)
+    }
+    /// Rehydrate only references backed by saved discovery/read results. Every
+    /// candidate is resolved again inside the current capability before reuse.
+    pub fn restore_references(&self, history: &[serde_json::Value]) {
+        for message in history.iter().filter(|m| m["role"] == "tool") {
+            let Ok(result) = serde_json::from_str::<serde_json::Value>(
+                message["content"].as_str().unwrap_or(""),
+            ) else {
+                continue;
+            };
+            if result["ok"] != true {
+                continue;
+            }
+            if let Some(path) = result["path"].as_str() {
+                let _ = self.remember(path);
+            }
+            for key in ["entries", "matches"] {
+                if let Some(entries) = result[key].as_array() {
+                    for entry in entries {
+                        if let Some(path) = entry["path"].as_str() {
+                            let _ = self.remember(path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    pub fn references(&self) -> Vec<String> {
+        self.verified.lock().unwrap().iter().cloned().collect()
+    }
+    pub fn remember(&self, path: &str) -> Result<String> {
+        let path = Self::path(path)?;
+        let canonical = self
+            .dir
+            .canonicalize(path)
+            .map_err(|e| format!("Discovery: {e}"))?;
+        let relative = canonical.to_string_lossy().to_string();
+        Self::path(&relative)?;
+        let mut verified = self.verified.lock().unwrap();
+        if verified.len() < 1000 {
+            verified.insert(relative.clone());
+        }
+        Ok(relative)
+    }
+    pub fn require_reference(&self, path: &str) -> Result<()> {
+        let normalized = Self::path(path)?
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(v) => Some(v.to_string_lossy().to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        if !self.verified.lock().unwrap().contains(&normalized) {
+            return Err(format!(
+                "Unverified file reference: {path}. Discover its actual location with list_directory or search_files, then reuse the returned path."
+            ));
+        }
+        // Revalidate on every use; cached discovery never replaces filesystem checks.
+        let current = self
+            .dir
+            .canonicalize(Self::path(path)?)
+            .map_err(|e| format!("File reference changed: {e}. Discover again."))?;
+        if current.to_string_lossy() != normalized {
+            return Err("File reference changed; discover again".into());
+        }
+        Ok(())
     }
     pub fn path(path: &str) -> Result<&Path> {
         let p = Path::new(path);

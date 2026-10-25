@@ -69,4 +69,17 @@ struct AgentTaskSnapshot: Codable, Equatable, Identifiable, Sendable {
     var events: [AgentEvent]
     var approval: AgentApproval?
     let result: String?
+    var revision: UInt64? = nil
+    var model: String? = nil
+    var assistantText: String? = nil
+    var usage: ChatUsage? = nil
+    var generating: Bool? = nil
+    var presentationStatus: String {
+        if status == .awaitingApproval {return status.label}
+        if status == .running {
+            if generating == true {return "Processing"}
+            if let last=events.last, ["tool_started","terminal_output"].contains(last.kind){return "Executing"}
+        }
+        return status.label
+    }
 }

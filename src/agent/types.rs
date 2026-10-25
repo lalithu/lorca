@@ -20,6 +20,22 @@ pub struct Turn {
 }
 pub trait Inference: Send + Sync {
     fn generate<'a>(&'a self, messages: &'a [Value], tools: &'a [Value]) -> FutureResult<'a, Turn>;
+    fn generate_stream<'a>(
+        &'a self,
+        messages: &'a [Value],
+        tools: &'a [Value],
+        _updates: &'a (dyn Fn(ModelUpdate) + Send + Sync),
+    ) -> FutureResult<'a, Turn> {
+        self.generate(messages, tools)
+    }
+    fn capacity(&self) -> FutureResult<'_, Option<u64>> {
+        Box::pin(async { Ok(None) })
+    }
+}
+#[derive(Clone, Debug)]
+pub enum ModelUpdate {
+    Text(String),
+    Usage(crate::types::Usage),
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
@@ -83,17 +99,31 @@ pub struct Approval {
 #[serde(rename_all = "camelCase")]
 pub struct TaskView {
     #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
     pub conversation_id: Option<String>,
     #[serde(default)]
     pub request_id: Option<String>,
     pub id: String,
     pub owner: String,
+    pub model: Option<String>,
     pub task: String,
     pub workspace: String,
     pub status: Status,
     pub events: Vec<Event>,
     pub approval: Option<Approval>,
     pub result: Option<String>,
+    #[serde(default)]
+    pub assistant_text: String,
+    #[serde(default)]
+    pub usage: crate::types::Usage,
+    #[serde(default)]
+    pub generating: bool,
+    /// Full model/tool history is persisted separately; never included in UI snapshots.
+    #[serde(skip)]
+    pub transcript: Vec<Value>,
+    #[serde(skip)]
+    pub audit: Vec<Event>,
 }
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -116,9 +146,11 @@ pub fn bounded(text: &str, max: usize) -> String {
 
 pub struct Submission {
     pub owner: String,
+    pub model: Option<String>,
     pub task: String,
     pub workspace: std::path::PathBuf,
     pub limits: Limits,
     pub conversation_id: Option<String>,
     pub request_id: Option<String>,
+    pub history: Vec<Value>,
 }

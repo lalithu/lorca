@@ -5,7 +5,8 @@
 - Launch an existing build: `lorca main` (after installing the Rust command with `cargo install --path . --locked --force` from the repository root).
 - Terminal chat: `lorca`. Both commands work from any directory.
 - Build only: `./build.sh` → `build/lorca.app` (can be opened in Finder).
-- Test: `swift test`. Open `Package.swift` in Xcode to edit.
+- Test: `swift test` with full Xcode/XCTest installed. Open `Package.swift` in Xcode to edit.
+- If command-line tools report a missing SwiftUI macro plugin, use the installed older SDK: `SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk ./build.sh`.
 - Dashboard starts at 880 × 600 and remembers your window size and position. Bringing it forward preserves full screen. **Show Dashboard** (`⌘1`) restores it; **Full Screen Dashboard** (`⌃⌘F`) enters native full screen.
 - Click the emoji to open/collapse Mini; drag it to move. **Show / Hide Mini**: `⌘2`.
 - Mini’s glass controls: new chat, open dashboard, collapse. Its chat stays anchored beside the pet.
@@ -48,3 +49,5 @@
 
 - `AgentClient.swift`, `AgentStore.swift`: authenticated agent commands, event projection, and reconnect.
 - `AgentActivity*.swift`, `AgentApprovalView.swift`, `AgentDiffView.swift`, `AgentComposerControls.swift`: inline tools, approval, diffs, and task input.
+
+- Chats has one composer for conversation, images, and tools. Select a workspace to enable file operations; greetings need no tools. Text streams while tools are enabled, and working context compacts automatically. Pending approvals remain accessible above the composer.

@@ -169,10 +169,13 @@ final class BackendClient: BackendTransport {
 
 }
 
-struct ChatUsage: Codable {
+struct ChatUsage: Codable, Equatable, Sendable {
     var contextUsed: Int? = 0
     var contextLimit: Int?
     var tokensPerSecond: Double?
+    var promptTokens: UInt64?
+    var generatedTokens: UInt64?
+    var generationDurationNs: UInt64?
     var fraction: Double? {
         guard let used = contextUsed, let limit = contextLimit, limit > 0 else { return nil }
         return min(1, max(0, Double(used) / Double(limit)))

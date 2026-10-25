@@ -5,6 +5,7 @@ struct ChatView: View {
     var compact = false
     var openDashboard: (() -> Void)?
     @State private var followsResponse = true
+    @State private var reviewApproval = true
     private var textSize: CGFloat { (compact ? 12 : 14) + store.chatTextZoom }
 
     var body: some View {
@@ -15,11 +16,11 @@ struct ChatView: View {
                         if store.messages.isEmpty {
                             emptyState.frame(minHeight: compact ? 100 : 260)
                         } else {
-                            VStack(alignment: .leading, spacing: compact ? 20 : 27) {
+                            LazyVStack(alignment: .leading, spacing: compact ? 20 : 27) {
                                 ForEach(store.messages) { message in
                                     messageView(message)
-                                    if !compact, message.agentKind == "request", let task = message.agentTaskId {
-                                        AgentActivityView(store: store.agent, taskID: task)
+                                    if !compact, message.agentKind == "result", let task = message.agentTaskId {
+                                        AgentActivityView(store: store.agent, taskID: task,savedMessage:message)
                                     }
                                 }
                                 Color.clear.frame(height: 1).id("conversation-bottom")
@@ -60,11 +61,17 @@ struct ChatView: View {
                     store.openConversation(id)
                 }.buttonStyle(.plain).font(.caption).foregroundStyle(Color.lorcaBlue)
             }
-            if !compact, let error = store.agent.error, store.agentMode || store.currentAgentActive {
+            if !compact, let active=store.agent.active,let approval=active.approval {
+                DisclosureGroup("Approval required · Review action", isExpanded:$reviewApproval) {
+                    ScrollView {AgentApprovalView(store:store.agent,task:active,approval:approval)}
+                        .frame(maxHeight:220)
+                }.font(.caption).padding(10)
+            }
+            if !compact, let error = store.agent.error {
                 errorBanner(error)
             }
             if let error = store.error ?? store.modelSession.error ?? store.library.error { errorBanner(error) }
-            ContextBar(usage: store.usage, compact: compact)
+            ContextBar(usage: store.displayUsage, compact: compact,processing:store.agent.active?.generating==true)
             if let model = store.modelSession.loadingModel, let started = store.modelSession.loadingStarted {
                 ModelLoadingBar(model: model, started: started, compact: compact)
             }
@@ -89,13 +96,10 @@ struct ChatView: View {
             Text(message.role == .user ? "YOU" : "LORCA")
                 .font(.system(size: 9, weight: .bold)).tracking(1.2)
                 .foregroundStyle(message.role == .user ? Color.secondary : .lorcaBlue)
-            if message.agentKind == "request" {
-                Label("Agent task", systemImage: "terminal").font(.system(size: 10)).foregroundStyle(.secondary)
-            }
             if !message.attachments.isEmpty {
                 AttachmentStrip(attachments: message.attachments, storage: store.imageStore, compact: compact)
             }
-            if message.role == .assistant && message.content.isEmpty && store.isGenerating {
+            if message.role == .assistant && message.content.isEmpty && (store.isGenerating || store.currentAgentActive) {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.mini)
                     Text("Thinking…").font(.system(size: 12)).foregroundStyle(.secondary)
