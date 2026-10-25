@@ -2,7 +2,7 @@ import XCTest
 @testable import LorcaMac
 
 @MainActor
-final class MockBackend: BackendTransport {
+class MockBackend: BackendTransport {
     var sessionID: String? = "test-session"
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     var requests: [[String: Any]] = []
@@ -45,6 +45,7 @@ final class MockBackend: BackendTransport {
             turn = ["id": fields["requestId"]!, "conversationId": selected.uuidString, "sessionId": sessionID!, "model": model, "running": true, "usage": [:]]
             emit()
             return try JSONSerialization.data(withJSONObject: turn!)
+        case "agent_snapshot": return Data("null".utf8)
         case "cancel": turn?["running"] = false
         case "close": return Data(#"{"failures":[]}"#.utf8)
         default: break
@@ -55,6 +56,10 @@ final class MockBackend: BackendTransport {
     func events(_ receive: @escaping @MainActor (BackendSnapshot) -> Void) async throws {
         self.receive = receive
         if breakNextStream { breakNextStream = false; failNextCommand = true; throw BackendError(message: "Stream broke") }
+        try await Task.sleep(for: .seconds(600))
+    }
+    func agentEvents(_ receive: @escaping @MainActor (AgentTaskSnapshot?) -> Void) async throws {
+        receive(nil)
         try await Task.sleep(for: .seconds(600))
     }
     func emit() { if let state = try? snapshot() { receive?(state) } }

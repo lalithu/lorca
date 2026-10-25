@@ -3,6 +3,7 @@ import SwiftUI
 struct ChatView: View {
     @ObservedObject var store: ChatStore
     var compact = false
+    var openDashboard: (() -> Void)?
     @State private var followsResponse = true
     private var textSize: CGFloat { (compact ? 12 : 14) + store.chatTextZoom }
 
@@ -17,6 +18,9 @@ struct ChatView: View {
                             VStack(alignment: .leading, spacing: compact ? 20 : 27) {
                                 ForEach(store.messages) { message in
                                     messageView(message)
+                                    if !compact, message.agentKind == "request", let task = message.agentTaskId {
+                                        AgentActivityView(store: store.agent, taskID: task)
+                                    }
                                 }
                                 Color.clear.frame(height: 1).id("conversation-bottom")
                             }
@@ -33,6 +37,9 @@ struct ChatView: View {
                 .onChange(of: store.chatTextZoom) { _, _ in
                     if followsResponse { proxy.scrollTo("conversation-bottom", anchor: .bottom) }
                 }
+                .onChange(of: store.agent.latest) { _, _ in
+                    if followsResponse { proxy.scrollTo("conversation-bottom", anchor: .bottom) }
+                }
                 .onChange(of: store.messages) { previous, current in
                     // A submitted prompt starts following again; streamed tokens respect manual scrolling.
                     if previous.last(where: { $0.role == .user })?.id != current.last(where: { $0.role == .user })?.id {
@@ -43,6 +50,19 @@ struct ChatView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
+            if compact {
+                AgentMiniStatus(store: store.agent) {
+                    if let id = store.agent.active?.conversationId { store.openConversation(id) }
+                    openDashboard?()
+                }
+            } else if let active = store.agent.active, let id = active.conversationId, id != store.library.selectedID {
+                Button("Agent working in another chat · Open") {
+                    store.openConversation(id)
+                }.buttonStyle(.plain).font(.caption).foregroundStyle(Color.lorcaBlue)
+            }
+            if !compact, let error = store.agent.error, store.agentMode || store.currentAgentActive {
+                errorBanner(error)
+            }
             if let error = store.error ?? store.modelSession.error ?? store.library.error { errorBanner(error) }
             ContextBar(usage: store.usage, compact: compact)
             if let model = store.modelSession.loadingModel, let started = store.modelSession.loadingStarted {
@@ -69,6 +89,9 @@ struct ChatView: View {
             Text(message.role == .user ? "YOU" : "LORCA")
                 .font(.system(size: 9, weight: .bold)).tracking(1.2)
                 .foregroundStyle(message.role == .user ? Color.secondary : .lorcaBlue)
+            if message.agentKind == "request" {
+                Label("Agent task", systemImage: "terminal").font(.system(size: 10)).foregroundStyle(.secondary)
+            }
             if !message.attachments.isEmpty {
                 AttachmentStrip(attachments: message.attachments, storage: store.imageStore, compact: compact)
             }
@@ -106,7 +129,7 @@ struct ConnectionBadge: View {
     @ObservedObject var store: ChatStore
     var body: some View {
         HStack(spacing: 7) {
-            if store.isGenerating || store.isChecking || store.modelSession.isLoading || store.modelSession.isClosing {
+            if store.agent.active != nil || store.isGenerating || store.isChecking || store.modelSession.isLoading || store.modelSession.isClosing {
                 ProgressView().controlSize(.mini)
             } else {
                 Circle().fill(store.isConnected ? .green : .orange).frame(width: 6, height: 6)

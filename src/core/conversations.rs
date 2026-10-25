@@ -10,7 +10,7 @@ impl Core {
             .to_string();
         match op {
             "new" => {
-                Self::cancel_session(&mut s, session);
+                self.cancel_chat_navigation(&mut s, session);
                 let c = Conversation::default();
                 self.repository.save(&c).map_err(|e| e.to_string())?;
                 self.repository.select(&c.id).map_err(|e| e.to_string())?;
@@ -26,7 +26,7 @@ impl Core {
             "open" => {
                 let ci = Self::chat_index(&s, &chat_id)?;
                 let id = s.view.conversations[ci].id.clone();
-                Self::cancel_session(&mut s, session);
+                self.cancel_chat_navigation(&mut s, session);
                 self.repository.select(&id).map_err(|e| e.to_string())?;
                 s.selected = Some(id.clone());
                 s.view.sessions[si].selected_id = id;
@@ -57,6 +57,9 @@ impl Core {
                     .any(|t| t.conversation_id == chat_id && t.running)
                 {
                     return Err("Stop the active reply before deleting this chat.".into());
+                }
+                if self.agent_in_chat(&s.view.conversations[ci].id) {
+                    return Err("Stop the active agent task before deleting this chat.".into());
                 }
                 let candidates = s.view.conversations[ci]
                     .images()

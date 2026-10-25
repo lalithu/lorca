@@ -82,6 +82,10 @@ pub struct Approval {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskView {
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+    #[serde(default)]
+    pub request_id: Option<String>,
     pub id: String,
     pub owner: String,
     pub task: String,
@@ -108,4 +112,13 @@ pub fn bounded(text: &str, max: usize) -> String {
         end -= 1;
     }
     format!("{}\n[output truncated]", &text[..end])
+}
+
+pub struct Submission {
+    pub owner: String,
+    pub task: String,
+    pub workspace: std::path::PathBuf,
+    pub limits: Limits,
+    pub conversation_id: Option<String>,
+    pub request_id: Option<String>,
 }

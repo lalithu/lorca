@@ -1,7 +1,7 @@
-# Agent foundation (v0.4A)
+# Agent runtime and Chats (v0.4B)
 
-- One Rust core, one active task; existing chat, Dashboard, and Mini are unchanged.
-- No SwiftUI Tasks UI, MCP, subagents, or background service installation.
+- One Rust core, one active task; agent execution is embedded in existing Chats.
+- Tasks stays untouched. No MCP, subagents, or background service installation.
 
 ## Try it
 
@@ -41,33 +41,50 @@ cargo build
 - Completion requires successful tool evidence and no unresolved failed/denied command or edit. The final explanation is model generated; actual tool results and command exit codes remain the evidence.
 - Task state/events are in memory: only the latest task is retained, with up to 300 events / 2 MiB. Restarting the backend discards agent tasks; saved chats/images are unaffected.
 
+## Chats
+
+- Choose Agent in the composer, select a workspace, and send. Chat mode preserves normal chat/images.
+- Expand tool activity for arguments/results; commands and patches require exact-action inline approval.
+- Scroll up to pause following; return to the bottom to resume. Mini shows basic status and opens Chats.
+- Requests/final results are saved in the originating conversation; drafts, images, and IDs remain compatible.
+- Only latest bounded execution activity is recoverable from the backend. The UI caches up to eight runs in memory, not on disk.
+- Backend restarts mark unfinished saved requests interrupted; they are never resumed or resubmitted automatically.
+- Model menu → Reload model unloads/reloads after a shared-model warning; active work must be stopped first. It reuses Rust leases and loading UI; no automatic reload.
+- GUI limits: 24 model turns, 120 seconds per model request, 120 seconds per command. Broad tasks can hit context/time limits; failures remain visible and saved.
+
 ## v0.4B interface contract
 
 Use the existing authenticated local backend (`Endpoint`, bearer token, no browser Origin):
 
-- `POST /command`: `{"op":"agent_start","session":"…","task":"…","workspace":"/absolute/path","model":"qwen3.5:9b","limits":{"iterations":20,"modelSeconds":120,"commandSeconds":30}}` → `{"taskId":"…"}`. Model/limits are optional.
+- `POST /command`: `{"op":"agent_start","session":"…","task":"…","workspace":"/absolute/path","model":"qwen3.5:9b","limits":{"iterations":20,"modelSeconds":120,"commandSeconds":30}}` → `{"taskId":"…"}`. Model/limits are optional. Chats also sends `conversationId` and a unique `requestId`; the saved request ID prevents duplicate execution after an uncertain acknowledgement.
 - `agent_snapshot` + `session` → latest `TaskView` or `null`.
 - `GET /agent/events` + `X-Lorca-Session`: NDJSON `TaskView` snapshots, including current approval and bounded event history. Reconnect with `agent_snapshot`; deduplicate by task ID + event sequence. A sequence gap means older activity rolled off.
 - `agent_decide` + `session`, `taskId`, `approvalId`, `decision` (`allow_once`, `deny`, `cancel`). Tokens are exact-action, owner-session, single-use; never send edited action arguments.
 - `agent_cancel` + `session`, `taskId`. Closing/expiring the owner session cancels too.
 - Status: `running`, `awaiting_approval`, `completed`, `cancelled`, `failed`.
-- Events: `task_started`, `model_generating`, `tool_requested`, `approval_required`, `tool_started`, `tool_completed`, `tool_failed`, `file_changes`, `terminal_output`, `task_completed`, `task_cancelled`, `task_failed`.
+- Events: `task_started`, `model_generating`, `assistant_message`, `tool_requested`, `approval_required`, `tool_started`, `tool_completed`, `tool_failed`, `file_changes`, `terminal_output`, `task_completed`, `task_cancelled`, `task_failed`.
 - Each event has `id`, `taskId`, monotonic `sequence`, `kind`, and structured `data`. Calls have stable `callId`; approvals contain complete immutable `action` details. Terminal output identifies stdout/stderr.
-- SwiftUI needs a Tasks state projection/event subscription, workspace/task input, activity/results/diff views, exact-action approval sheet, and cancel control. Keep all execution/permission logic in Rust. Pause/resume and durable task history are not implemented in v0.4A.
+- `TaskView` includes optional `conversationId` / `requestId`. `assistant_message` contains only public assistant content, never private thinking. SwiftUI projects these events in Chats; all execution and permission enforcement stays in Rust. Pause/resume and durable execution history are not implemented.
 
 ## Layout
 
 - `src/agent/`: provider-independent runtime, permissions, tools, workspace access, command sandbox, event/task types.
 - `src/provider/agent.rs`: native Ollama tool-call adapter.
-- `src/core/agent.rs`: existing model lifecycle/session integration.
+- `src/core/agent.rs`, `agent_chats.rs`: existing model lifecycle/session integration, saved request/result association, and interruption recovery.
 - `src/agent_cli.rs`: temporary testing interface.
 - `tests/agent*.rs`: deterministic runtime, permission, filesystem and core integration tests; command sandbox tests live alongside the runner.
 
-## Verification for this checkpoint
+## Changed-file map
 
-- `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and all 42 Rust tests passed.
-- All 25 Swift tests and `./macos/build.sh` passed; no SwiftUI sources changed.
-- Live `qwen3.5:9b` inspected this repository, requested approval for `cargo test`, executed it after Lalith's Allow Once, received exit 0 and real test output, and summarized the findings.
-- Live denial prevented execution; pending-approval cancellation and foreground Ctrl+C were verified. CLI regression tests cover returning without stdin EOF and keeping the backend alive across terminal SIGINT.
-- Recursive sandbox/process-inspection checks are omitted when the test suite itself runs inside an agent command sandbox; the normal full-suite run exercises them directly.
-- After updating, quit existing lorca clients once and relaunch the rebuilt app/CLI so the shared backend includes the new agent API. The installed `lorca` command updates only after `cargo install --path . --locked --force`; the build above runs directly from `target/debug`.
+- New Swift agent modules: `AgentTypes`, `AgentClient`, `AgentStore`, `AgentActivity`, `AgentActivityView`, `AgentApprovalView`, `AgentDiffView`, `AgentComposerControls` in `macos/Sources/LorcaMac/`.
+- Existing Swift integration: `BackendClient.swift`, `ChatStore.swift`, `Conversation.swift`, `ChatView.swift`, `ChatComposer.swift`, `ChatScrollObserver.swift`, `MiniView.swift`, `ModelPicker.swift`. ModelPicker includes manual reload; Rust lifecycle commands are reused.
+- Rust: `src/agent/types.rs`, `runtime.rs`; `src/core/agent.rs`, new `agent_chats.rs`, `mod.rs`, `conversations.rs`, `generation.rs`.
+- Tests: new `macos/Tests/LorcaMacTests/AgentTests.swift`; updated `BackendTests.swift`, `ChatTests.swift`, `ChatScrollTests.swift`, and `tests/agent_core.rs`.
+- Docs: `README.md`, `macos/README.md`, `FUNCTIONALITY.md`, and this contract.
+
+## Verification
+
+- All 44 Rust tests and 34 Swift tests passed, along with formatting, strict Clippy, and the macOS build. Tests cover association, persistence, ordering/deduplication, decisions, cancellation, reconnect, and presentation.
+- Live checks used a separate app identity/data directory: Qwen inspection/final response, user-approved cargo test (exit 0), command denial, cancellation, restart without replay, free scrolling/follow, normal chat, Mini status, manual reload, and an approved temporary-file diff. No application source was edited by the live agent.
+- The broad acceptance request hit the existing context limit on its first attempt and timed out on its final summary after cargo test succeeded on its second. A narrower inspection completed. Model-generated summaries can still hit these limits; actual command output/exit codes remain authoritative.
+- After updating, quit existing lorca clients once and relaunch the rebuilt app/CLI so the shared backend includes the updated API. `./macos/build.sh` bundles the new core; the installed terminal command updates with `cargo install --path . --locked --force`.

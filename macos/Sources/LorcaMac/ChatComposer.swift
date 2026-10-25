@@ -7,8 +7,12 @@ struct ChatComposer: View {
     @State private var choosingImages = false
     @State private var dropTarget = false
 
+    private var canSend: Bool { compact ? store.canSendChat : store.canSend }
+    private func send() { if compact { store.sendChat() } else { store.send() } }
+
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 14 : 20) {
+            if !compact { AgentComposerControls(store: store) }
             if !store.draftImages.isEmpty {
                 AttachmentStrip(attachments: store.draftImages, storage: store.imageStore, compact: compact,
                     remove: store.library.removeDraftImage)
@@ -21,7 +25,7 @@ struct ChatComposer: View {
                 ChatInput(text: $store.draft, size: (compact ? 12 : 14) + store.chatTextZoom,
                     maxLines: compact ? 3 : 5,
                     identifier: compact ? "mini-message-input" : "dashboard-message-input",
-                    send: store.send, attach: store.attachImages)
+                    send: send, attach: store.attachImages)
                     .disabled(!store.ready)
             }
             .frame(minHeight: compact ? 34 : 50, alignment: .topLeading)
@@ -32,7 +36,7 @@ struct ChatComposer: View {
                 if store.isImportingImages { ProgressView().controlSize(.mini).accessibilityLabel("Importing images") }
                 Spacer(minLength: 0)
                 ModelPicker(store: store, compact: compact)
-                if store.isGenerating {
+                if store.isGenerating || store.currentAgentActive {
                     Button { store.stop() } label: {
                         Image(systemName: "stop.fill").font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(.white).frame(width: 32, height: 32).background(Color.lorcaBlue, in: Circle())
@@ -40,13 +44,13 @@ struct ChatComposer: View {
                     .help("Stop response (Esc)").keyboardShortcut(.escape, modifiers: [])
                     .accessibilityLabel("Stop response")
                 } else {
-                    Button { store.send() } label: {
+                    Button { send() } label: {
                         Image(systemName: "arrow.up").font(.system(size: 17, weight: .semibold))
-                            .foregroundStyle(store.canSend ? .white : .secondary.opacity(0.55))
+                            .foregroundStyle(canSend ? .white : .secondary.opacity(0.55))
                             .frame(width: 32, height: 32)
-                            .background(store.canSend ? Color.lorcaBlue : Color.primary.opacity(0.10), in: Circle())
+                            .background(canSend ? Color.lorcaBlue : Color.primary.opacity(0.10), in: Circle())
                     }
-                    .disabled(!store.canSend).keyboardShortcut(.return, modifiers: .command)
+                    .disabled(!canSend).keyboardShortcut(.return, modifiers: .command)
                     .help("Send (⌘Return)").accessibilityLabel("Send message")
                 }
             }

@@ -50,7 +50,7 @@ struct MiniView: View {
                 Spacer()
                 ConnectionBadge(store: store)
             }
-            ChatView(store: store, compact: true)
+            ChatView(store: store, compact: true, openDashboard: { windows.page = .chats; windows.showDashboard() })
         }
         .padding(18)
         .frame(width: 374, height: 343)

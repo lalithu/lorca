@@ -11,14 +11,22 @@ final class ChatStore: ObservableObject {
     let library = ConversationLibrary()
     let modelSession = ModelSession()
     let backend: BackendTransport
+    let agent: AgentStore
+    @Published var agentMode = false
+    var agentWorkspace: URL? { agent.workspaces[library.selectedID] }
+    var currentAgentActive: Bool { agent.active?.conversationId == library.selectedID }
     var messages: [ChatMessage] { library.current.messages }
     var draft: String { get { library.current.draft } set { library.setDraft(newValue) } }
     var draftImages: [ChatAttachment] { library.current.draftImages }
     var imageStore: AttachmentStore { AttachmentStore(directory: backend.root.appendingPathComponent("attachments")) }
-    var canSend: Bool { ready && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftImages.isEmpty)
+    var canSend: Bool { agentMode ? canSendAgent : canSendChat }
+    var canSendAgent: Bool { canSendChat && agentWorkspace != nil && draftImages.isEmpty && !agent.busy && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    var canSendChat: Bool { ready && !isReloadingModel && !agent.submitting && !currentAgentActive && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftImages.isEmpty)
         && !isGenerating && !isImportingImages && !modelSession.isLoading && !modelSession.isClosing }
     @Published private(set) var chatTextZoom: CGFloat = 0
     @Published var isImportingImages = false
+    @Published private(set) var isReloadingModel = false
+    var canReloadModel: Bool { ready && !closing && !isReloadingModel && !isGenerating && !agent.busy && !isChecking && !modelSession.isLoading && !modelSession.isClosing }
     @Published private(set) var models: [String] = []
     @Published var selectedModel: String {
         didSet {
@@ -52,9 +60,10 @@ final class ChatStore: ObservableObject {
     init(backend: BackendTransport? = nil, defaults: UserDefaults = .standard) {
         self.backend = backend ?? BackendClient()
         self.defaults = defaults
+        agent = AgentStore(backend: self.backend)
         selectedModel = defaults.string(forKey: "model") ?? "qwen3.5:9b"
         appearance = Appearance(rawValue: defaults.string(forKey: "appearance") ?? "Dark") ?? .dark
-        for source in [modelSession.objectWillChange, library.objectWillChange] {
+        for source in [modelSession.objectWillChange, library.objectWillChange, agent.objectWillChange] {
             source.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &updates)
         }
         library.perform = { [weak self] in self?.enqueue($0) }
@@ -70,6 +79,7 @@ final class ChatStore: ObservableObject {
             await self.pending?.value
             self.closing = true
             self.eventTask?.cancel()
+            self.agent.shutdown()
             do {
                 let data = try await self.backend.command(["op": "close", "unload": unload])
                 struct Closed: Decodable { let failures: [String] }
@@ -80,7 +90,9 @@ final class ChatStore: ObservableObject {
     var modelChoices: [String] { Array(Set(models + [selectedModel])).sorted() }
     var status: String {
         if modelSession.isClosing { return "Closing session" }
+        if isReloadingModel { return "Reloading model" }
         if modelSession.isLoading { return "Loading model" }
+        if let task = agent.active { return "Agent · \(task.status.label)" }
         if isGenerating { return receivedText ? "Responding" : "Thinking" }
         if isChecking { return "Connecting" }
         return isConnected && ready ? "Connected" : "Offline"
@@ -96,8 +108,10 @@ final class ChatStore: ObservableObject {
                 ready = true
                 library.restorePendingDrafts()
                 observeEvents()
+                agent.observe()
             }
             await pending?.value
+            if agent.unconfirmedSubmission || !agent.connected { try? await agent.restore() }
             guard await perform(["op": "refresh"]) else { return }
             guard isConnected else { return }
             if models.isEmpty { error = "No local models yet. Run ‘ollama pull qwen3.5:9b’ to get started."; return }
@@ -127,6 +141,8 @@ final class ChatStore: ObservableObject {
                             self.revision = 0
                             self.apply(try await self.backend.connect(model: self.selectedModel))
                             self.ready = true
+                            self.agent.observe()
+                            try? await self.agent.restore()
                             self.library.restorePendingDrafts()
                             self.error = nil
                             await self.refreshConnection()
@@ -163,6 +179,11 @@ final class ChatStore: ObservableObject {
         guard snapshot.revision >= revision, let session = snapshot.sessions.first(where: { $0.id == backend.sessionID }) else { return }
         revision = snapshot.revision
         library.apply(snapshot, selected: session.selectedId)
+        for chat in snapshot.conversations where agent.workspaces[chat.id] == nil {
+            if let path = chat.messages.last(where: { $0.agentWorkspace != nil })?.agentWorkspace {
+                agent.workspaces[chat.id] = URL(fileURLWithPath: path)
+            }
+        }
         modelSession.apply(session)
         models = session.models
         isConnected = session.isConnected
@@ -178,19 +199,53 @@ final class ChatStore: ObservableObject {
         } else { usage = session.usage }
     }
     func send() {
-        guard canSend else { return }
+        if agentMode { sendAgent(); return }
+        sendChat()
+    }
+    func sendChat() {
+        guard canSendChat else { return }
         let id = UUID()
         pendingTurn = id
         isGenerating = true
         error = nil
         enqueue(["op": "send", "conversationId": library.selectedID.uuidString, "requestId": id.uuidString])
     }
-    func stop() { guard ready, !closing else { return }; enqueue(["op": "cancel", "conversationId": library.selectedID.uuidString]) }
+    private func sendAgent() {
+        guard canSendAgent, let workspace = agentWorkspace, agent.reserveSubmission() else { return }
+        let conversation = library.selectedID, request = UUID(), text = draft, model = selectedModel
+        let preceding = pending
+        pending = Task { [weak self] in
+            await preceding?.value
+            guard let self else { return }
+            _ = await self.agent.submit(task: text, workspace: workspace, conversation: conversation, request: request, model: model)
+            _ = await self.perform(["op": "snapshot"])
+        }
+    }
+    // Called only after the UI's shared-model warning is accepted. Rust release
+    // enforces other-session leases; prepare reuses the existing loading UI.
+    func reloadModel() async {
+        guard canReloadModel else { return }
+        let model = selectedModel
+        isReloadingModel = true
+        defer { isReloadingModel = false }
+        await pending?.value
+        guard !isGenerating, !agent.busy else { return }
+        do {
+            _ = try await backend.command(["op": "release", "model": model])
+            _ = await perform(["op": "snapshot"])
+            _ = await perform(["op": "prepare", "model": model, "unloadPrevious": false])
+        } catch { self.error = "Couldn’t reload the model. \(friendlyError(error))" }
+    }
+    func stop() {
+        if currentAgentActive { Task { await agent.cancel() }; return }
+        stopReply()
+    }
+    private func stopReply() { guard ready, !closing else { return }; enqueue(["op": "cancel", "conversationId": library.selectedID.uuidString]) }
     func resizeChatText(by amount: CGFloat) { chatTextZoom = min(10, max(-4, chatTextZoom + amount)) }
-    func newChat() { stop(); enqueue(["op": "new"]) }
+    func newChat() { stopReply(); enqueue(["op": "new"]) }
     func openConversation(_ id: UUID) {
         guard id != library.selectedID else { return }
-        stop(); enqueue(["op": "open", "conversationId": id.uuidString])
+        stopReply(); enqueue(["op": "open", "conversationId": id.uuidString])
     }
-    func deleteConversation(_ id: UUID) { stop(); enqueue(["op": "delete", "conversationId": id.uuidString]) }
+    func deleteConversation(_ id: UUID) { stopReply(); enqueue(["op": "delete", "conversationId": id.uuidString]) }
 }

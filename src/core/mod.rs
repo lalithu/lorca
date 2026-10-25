@@ -1,4 +1,5 @@
 mod agent;
+mod agent_chats;
 mod conversations;
 mod generation;
 mod models;
@@ -40,6 +41,7 @@ impl Core {
     pub fn new(repository: Repository) -> Result<Arc<Self>> {
         let (mut conversations, selected, warning) =
             repository.load().map_err(|e| e.to_string())?;
+        Self::recover_agent_chats(&repository, &mut conversations)?;
         if conversations.is_empty() {
             let c = Conversation::default();
             repository.save(&c).map_err(|e| e.to_string())?;
@@ -92,6 +94,7 @@ impl Core {
         self.state.lock().unwrap().clients.len()
     }
     pub fn maintenance(&self) {
+        self.save_agent_result();
         let mut s = self.state.lock().unwrap();
         let stale: Vec<_> = s
             .clients
@@ -210,6 +213,7 @@ impl Core {
         }
         let session = text(&v, "session")?;
         self.touch(session)?;
+        self.save_agent_result();
         if op.starts_with("agent_") {
             return self.agent_command(session, op, &v);
         }

@@ -46,6 +46,20 @@ or print Cargo output.
 - Images: 20 MB input maximum each; optimized to JPEG, at most 4,096 pixels on the
   longest edge and 8 MB each. Requests allow 24 MB of image data across history.
 
+## Coding tasks in Chats
+
+- Choose **Agent** in the existing composer, select a workspace, and send a task.
+- Expand live activity to inspect tools, file contents, diffs, commands, and output.
+- Review each exact command or patch with **Allow Once**, **Deny**, or **Cancel Task**.
+- Scroll upward to read freely; return to the bottom to resume following.
+- Mini shows shared agent status and opens Chats for detailed activity and approvals.
+- Requests and final results stay in the originating saved chat. Execution activity is
+  temporary; reconnect restores only the Rust backend’s latest bounded snapshot.
+- One agent task runs at a time. Select **Chat** to continue a normal conversation
+  after it finishes. Image attachments remain available in Chat mode.
+- Work is limited to the selected workspace and existing Rust tools. Cancellation
+  stops execution; it does not undo approved changes. See [AGENT.md](AGENT.md).
+
 The sections below describe the Rust terminal interface. The GUI keeps its model
 and appearance preferences separately in macOS preferences.
 
@@ -76,6 +90,10 @@ and set its name in the configuration file. Lorca does not download models or
 start Ollama automatically.
 
 ## Model lifecycle
+
+In Dashboard or Mini, use the model menu’s **Reload model…** to unload and reload
+a stalled model. Stop active work first. A warning explains that other apps may
+be affected; the Rust core protects models leased by another lorca session.
 
 Lorca preloads the selected model on launch with an indeterminate animated bar
 and elapsed time, then sends `keep_alive: -1` with every chat request to keep it
@@ -169,4 +187,4 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swift test --pack
 ```
 
 The core and transport tests use isolated storage and local test servers; they do
-not unload your real Ollama models. Agent tests use temporary workspaces and explicit mock approvals; real subprocess tests verify the macOS sandbox. See [AGENT.md](AGENT.md) for the v0.4A runtime, limits, commands, and future Tasks API.
+not unload your real Ollama models. Agent tests use temporary workspaces and explicit mock approvals; real subprocess tests verify the macOS sandbox. See [AGENT.md](AGENT.md) for the runtime, limits, commands, and Chats integration.

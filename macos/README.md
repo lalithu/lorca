@@ -18,7 +18,11 @@
 - Both chats show a cyan context bar and response speed from Ollama; unavailable measurements display `—`.
 - The selected model preloads at startup and stays loaded (`keep_alive: -1`). A temporary loading bar and timer appear under `ctx` in both chats.
 - Model switching offers to unload the old model before loading the next, or explicitly keep both loaded. The core keeps any model still held by another lorca session. A failed replacement tries to restore the previous model. `⌘Q` offers **Quit & Unload** or **Keep Loaded & Quit**, warning that Ollama models are shared with other apps.
+- Model menu → **Reload model…**: unload/reload a stalled model after a shared-model warning. Stop active work first; Rust protects other lorca sessions.
 - Settings: installed Ollama models and System/Dark/Light appearance. Defaults to `qwen3.5:9b` at `http://127.0.0.1:11434`.
+- Chats composer: choose **Agent**, select a workspace, and submit a coding task. Expand real tool activity, diffs, and command output inline; approve exact actions once, deny them, or cancel.
+- One task at a time; switching chats does not cancel it. Mini links to the dashboard for activity and approvals. Choose **Chat** for ordinary chat and images.
+- Agent requests and final results are saved; activity is temporary. Reconnection restores the latest backend snapshot without replaying the request. Backend restarts mark unfinished requests interrupted.
 - Overview, Tasks, Pipelines, Scheduled are placeholders.
 - Dashboard, Mini, and terminal chat use one Rust backend. The app starts its bundled backend automatically; a lock prevents duplicate runtimes.
 
@@ -41,3 +45,6 @@
 - `ConversationLibrary.swift`, `Conversation.swift`: observable history projection and compatible data types. Rust owns persistence.
 - `ChatComposer.swift`, `AttachmentStrip.swift`, `ImageInput.swift`, `AttachmentStore.swift`: native image input, JPEG normalization, and read-only previews. Rust validates and stores attachments.
 - `ChatInput.swift`, `ClipboardImages.swift`: native text editing and image paste/drop handling.
+
+- `AgentClient.swift`, `AgentStore.swift`: authenticated agent commands, event projection, and reconnect.
+- `AgentActivity*.swift`, `AgentApprovalView.swift`, `AgentDiffView.swift`, `AgentComposerControls.swift`: inline tools, approval, diffs, and task input.

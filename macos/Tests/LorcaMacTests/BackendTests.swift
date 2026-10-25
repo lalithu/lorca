@@ -54,3 +54,39 @@ final class BackendTests: XCTestCase {
         XCTAssertEqual(paths, ["/health", "/command", "/events"])
     }
 }
+
+@MainActor
+final class AgentBackendTests: XCTestCase {
+    func testAgentStreamSharesAuthenticationAndReconnectReusesValidSession() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("runtime"), withIntermediateDirectories: true)
+        try Data(#"{"url":"http://127.0.0.1:43210","token":"agent-secret","protocol":1}"#.utf8).write(to: root.appendingPathComponent("runtime/endpoint.json"))
+        let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [BackendProtocol.self]
+        let network = URLSession(configuration: configuration); defer { network.invalidateAndCancel() }
+        let state = try JSONEncoder().encode(MockBackend().snapshot())
+        let connected = try JSONSerialization.data(withJSONObject: ["session": "test-session", "state": JSONSerialization.jsonObject(with: state)])
+        let agent = try JSONEncoder().encode(agentFixture())
+        var commands = 0, streams = 0
+        BackendProtocol.reply = { request in
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer agent-secret")
+            switch request.url!.path {
+            case "/health": return (200, Data(#"{"protocol":1}"#.utf8))
+            case "/agent/events":
+                streams += 1
+                XCTAssertEqual(request.value(forHTTPHeaderField: "X-Lorca-Session"), "test-session")
+                return (200, agent + Data("\n".utf8))
+            default:
+                commands += 1
+                return (200, commands == 1 ? connected : state)
+            }
+        }
+        let backend = BackendClient(root: root, network: network)
+        _ = try await backend.connect(model: "qwen")
+        var received: AgentTaskSnapshot?
+        do { try await backend.agentEvents { received = $0 } } catch { /* Completed stream reconnects. */ }
+        XCTAssertEqual(received?.approval?.id, "approval"); XCTAssertEqual(streams, 1)
+        _ = try await backend.connect(model: "qwen")
+        XCTAssertEqual(backend.sessionID, "test-session"); XCTAssertEqual(commands, 2)
+    }
+}

@@ -40,6 +40,13 @@ protocol BackendTransport: AnyObject {
     func connect(model: String) async throws -> BackendSnapshot
     func command(_ fields: [String: Any]) async throws -> Data
     func events(_ receive: @escaping @MainActor (BackendSnapshot) -> Void) async throws
+    func agentEvents(_ receive: @escaping @MainActor (AgentTaskSnapshot?) -> Void) async throws
+}
+
+extension BackendTransport {
+    func agentEvents(_ receive: @escaping @MainActor (AgentTaskSnapshot?) -> Void) async throws {
+        throw BackendError(message: "Agent events are unavailable. Rebuild and relaunch lorca.")
+    }
 }
 
 @MainActor
@@ -99,7 +106,11 @@ final class BackendClient: BackendTransport {
         throw BackendError(message: "Couldn’t start lorca’s Rust backend. Check Application Support permissions and reconnect.")
     }
     func connect(model: String) async throws -> BackendSnapshot {
+        let previous = endpoint
         try await discover()
+        if previous?.token == endpoint?.token, sessionID != nil,
+           let data = try? await command(["op": "snapshot"]),
+           let snapshot = try? JSONDecoder().decode(BackendSnapshot.self, from: data) { return snapshot }
         let data = try await command(["op": "connect", "model": model, "host": "http://127.0.0.1:11434"])
         struct Connected: Decodable { let session: String; let state: BackendSnapshot }
         let result = try JSONDecoder().decode(Connected.self, from: data)
@@ -137,6 +148,25 @@ final class BackendClient: BackendTransport {
         }
         throw BackendError(message: "Backend connection ended")
     }
+    func agentEvents(_ receive: @escaping @MainActor (AgentTaskSnapshot?) -> Void) async throws {
+        guard let endpoint, let sessionID else { throw BackendError(message: "Backend disconnected") }
+        var request = URLRequest(url: endpoint.url.appendingPathComponent("agent/events"))
+        request.timeoutInterval = 30
+        request.setValue("Bearer \(endpoint.token)", forHTTPHeaderField: "Authorization")
+        request.setValue(sessionID, forHTTPHeaderField: "X-Lorca-Session")
+        let (bytes, response) = try await network.bytes(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw BackendError(message: "Agent event connection ended") }
+        for try await line in bytes.lines where !line.isEmpty {
+            try Task.checkCancellation()
+            let data = Data(line.utf8)
+            let state = try await Task.detached(priority: .utility) {
+                try JSONDecoder().decode(AgentTaskSnapshot?.self, from: data)
+            }.value
+            receive(state)
+        }
+        throw BackendError(message: "Agent event connection ended")
+    }
+
 }
 
 struct ChatUsage: Codable {

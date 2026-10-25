@@ -1,10 +1,10 @@
 use super::*;
-use crate::agent::{Agent, Decision, FutureResult, Inference, Limits, Registry, Turn};
+use crate::agent::{Agent, Decision, FutureResult, Inference, Turn};
 
-struct CoreInference {
-    core: Arc<Core>,
-    session: String,
-    model: String,
+pub(super) struct CoreInference {
+    pub(super) core: Arc<Core>,
+    pub(super) session: String,
+    pub(super) model: String,
 }
 /// Keep the existing model preparation future alive until it has cleaned up its
 /// loading state, even when a task timeout/cancellation drops its inference future.
@@ -56,38 +56,7 @@ impl Core {
         v: &Value,
     ) -> Result<Value> {
         match op {
-            "agent_start" => {
-                let model = {
-                    let s = self.state.lock().unwrap();
-                    s.view.sessions[Self::session_index(&s, session)?]
-                        .model
-                        .clone()
-                };
-                let model = v["model"].as_str().unwrap_or(&model).to_string();
-                if model.is_empty() || model.len() > 500 || model.chars().any(char::is_control) {
-                    return Err("Invalid model name".into());
-                }
-                let limits = if v.get("limits").is_some() {
-                    serde_json::from_value::<Limits>(v["limits"].clone())
-                        .map_err(|e| e.to_string())?
-                } else {
-                    Limits::default()
-                };
-                let inference = Arc::new(CoreInference {
-                    core: self.clone(),
-                    session: session.into(),
-                    model,
-                });
-                let id = self.agent.start(
-                    session,
-                    text(v, "task")?,
-                    std::path::Path::new(text(v, "workspace")?),
-                    limits,
-                    inference,
-                    Registry::default(),
-                )?;
-                Ok(json!({"taskId":id}))
-            }
+            "agent_start" => self.start_agent(session, v),
             "agent_snapshot" => Ok(json!(self.agent.snapshot())),
             "agent_decide" => {
                 let decision: Decision = serde_json::from_value(v["decision"].clone())

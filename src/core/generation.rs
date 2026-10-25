@@ -27,6 +27,12 @@ impl Core {
         {
             return Err("This conversation already has a reply in progress.".into());
         }
+        if self.agent_in_chat(&s.view.conversations[ci].id) {
+            return Err(
+                "This conversation has an active agent task. Stop it before sending a reply."
+                    .into(),
+            );
+        }
         let mut chat = s.view.conversations[ci].clone();
         let content = v["text"].as_str().unwrap_or(&chat.draft).trim().to_string();
         if content.is_empty() && chat.draft_images.is_empty() {

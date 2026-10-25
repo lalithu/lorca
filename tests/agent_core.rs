@@ -214,3 +214,107 @@ async fn model_timeout_clears_preparation_without_closing_the_session() {
         .unwrap();
     http.abort();
 }
+
+#[tokio::test]
+async fn chat_agents_are_idempotent_follow_the_origin_and_persist_only_request_and_result() {
+    let (store, w, core, session, _server, http) = setup(false).await;
+    let chat = core.snapshot().sessions[0].selected_id.clone();
+    let request = lorca::types::id();
+    core.command(json!({"op":"draft","session":session,"text":"Create a file"}))
+        .await
+        .unwrap();
+    let command = json!({"op":"agent_start","session":session,"task":"Create a file","conversationId":chat,"requestId":request,"workspace":w.0});
+    let started = core.command(command.clone()).await.unwrap();
+    assert_eq!(
+        core.command(command.clone()).await.unwrap()["taskId"],
+        started["taskId"]
+    );
+    let pending = wait(&core, |v| v.approval.is_some()).await;
+    assert_eq!(pending.conversation_id.as_deref(), Some(chat.as_str()));
+    assert_eq!(pending.request_id.as_deref(), Some(request.as_str()));
+    assert_eq!(core.repository.load().unwrap().0[0].messages.len(), 1);
+    assert!(
+        core.command(json!({"op":"delete","session":session,"conversationId":chat}))
+            .await
+            .is_err()
+    );
+    assert!(core.command(json!({"op":"send","session":session,"conversationId":chat,"requestId":lorca::types::id(),"text":"Race"})).await.is_err());
+    core.command(json!({"op":"new","session":session}))
+        .await
+        .unwrap();
+    let next = core.snapshot().sessions[0].selected_id.clone();
+    assert_ne!(next, chat);
+    assert_eq!(
+        core.agent().snapshot().unwrap().status,
+        Status::AwaitingApproval
+    );
+    let approval = pending.approval.unwrap();
+    core.command(json!({"op":"agent_decide","session":session,"taskId":pending.id,"approvalId":approval.id,"decision":"allow_once"})).await.unwrap();
+    wait(&core, |v| !v.status.active()).await;
+    core.maintenance();
+    let snapshot = core.snapshot();
+    let original = snapshot
+        .conversations
+        .iter()
+        .find(|c| c.id == chat)
+        .unwrap();
+    assert_eq!(original.messages.len(), 2);
+    assert!(original.draft.is_empty());
+    assert_eq!(original.messages[1].extra["agentStatus"], "completed");
+    assert!(
+        snapshot
+            .conversations
+            .iter()
+            .find(|c| c.id == next)
+            .unwrap()
+            .messages
+            .is_empty()
+    );
+    let recovered = Core::new(Repository::new(store.0.clone()).unwrap()).unwrap();
+    let restored = recovered.snapshot();
+    let original = restored
+        .conversations
+        .iter()
+        .find(|c| c.id == chat)
+        .unwrap();
+    assert_eq!(original.messages.len(), 2);
+    assert!(original.messages[1].content.contains("Verified"));
+    assert!(!original.extra.contains_key("events"));
+    assert!(recovered.agent().snapshot().is_none());
+    assert_eq!(
+        core.command(command).await.unwrap()["taskId"],
+        started["taskId"]
+    );
+    http.abort();
+}
+#[tokio::test]
+async fn cancelled_and_interrupted_chat_agents_preserve_requests_without_restarting() {
+    let (store, w, core, session, _server, http) = setup(false).await;
+    let chat = core.snapshot().sessions[0].selected_id.clone();
+    let command = json!({"op":"agent_start","session":session,"task":"Edit file","conversationId":chat,"requestId":lorca::types::id(),"workspace":w.0});
+    core.command(command).await.unwrap();
+    let pending = wait(&core, |v| v.approval.is_some()).await;
+    // Reconstructing Core from saved data represents a backend restart; no tool is resumed.
+    let recovered = Core::new(Repository::new(store.0.clone()).unwrap()).unwrap();
+    let state = recovered.snapshot();
+    let messages = &state
+        .conversations
+        .iter()
+        .find(|c| c.id == chat)
+        .unwrap()
+        .messages;
+    assert_eq!(messages.len(), 2);
+    assert!(messages[1].content.contains("interrupted"));
+    assert!(recovered.agent().snapshot().is_none());
+    assert!(!w.0.join("created.txt").exists());
+    core.command(json!({"op":"agent_cancel","session":session,"taskId":pending.id}))
+        .await
+        .unwrap();
+    wait(&core, |v| !v.status.active()).await;
+    core.maintenance();
+    assert_eq!(
+        core.snapshot().conversations[0].messages[1].extra["agentStatus"],
+        "cancelled"
+    );
+    http.abort();
+}
