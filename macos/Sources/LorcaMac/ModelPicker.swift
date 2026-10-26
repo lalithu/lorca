@@ -4,6 +4,7 @@ struct ModelPicker: View {
     @ObservedObject var store: ChatStore
     var compact = false
     @State private var confirmingReload = false
+    @State private var confirmingUnload = false
     var body: some View {
         Menu {
             ForEach(store.modelChoices, id: \.self) { model in
@@ -14,6 +15,7 @@ struct ModelPicker: View {
             }
             Divider()
             Button("Reload model…") { confirmingReload = true }.disabled(!store.canReloadModel)
+            Button("Unload model…") { confirmingUnload = true }.disabled(!store.canUnloadModel)
         } label: {
             HStack(spacing: 6) {
                 Text(store.selectedModel).lineLimit(1).truncationMode(.middle)
@@ -26,9 +28,15 @@ struct ModelPicker: View {
         }
         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize(horizontal: true, vertical: true)
         .frame(maxWidth: compact ? 180 : 250, alignment: .trailing)
-        .disabled(!store.ready || store.isReloadingModel || store.isGenerating || store.agent.busy || store.jobs.running || store.isChecking || store.modelSession.isLoading)
+        .disabled(!store.ready || store.isManagingModel || store.isGenerating || store.agent.busy || store.jobs.running || store.isChecking || store.modelSession.isLoading)
         .accessibilityLabel("Model").accessibilityValue(store.selectedModel)
-        .help("Choose an installed Ollama model; stop active work before reloading")
+        .help("Choose an installed Ollama model; stop active work before reloading or unloading")
+        .confirmationDialog("Unload \(store.modelSession.activeModel ?? store.selectedModel)?", isPresented: $confirmingUnload) {
+            Button("Unload model", role: .destructive) { Task { await store.unloadModel() } }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Ollama shares models with other apps. Unloading can interrupt another app using this model. Your chats are kept; the model loads again when you send a message. Other active lorca sessions prevent unloading.")
+        }
         .confirmationDialog("Reload \(store.selectedModel)?", isPresented: $confirmingReload) {
             Button("Reload model", role: .destructive) { Task { await store.reloadModel() } }
             Button("Cancel", role: .cancel) { }

@@ -163,8 +163,41 @@ final class AgentTests: XCTestCase {
         _ = await chat.modelSession.close(unload: false)
         XCTAssertFalse(chat.canReloadModel)
     }
+    func testUnloadReleasesWithoutReloadingOrChangingChatAndStopsOnFailure() async throws {
+        let backend = AgentMockBackend()
+        let store = ChatStore(backend: backend)
+        await store.refreshConnection()
+        store.draft = "Keep my draft"
+        try await Task.sleep(for: .milliseconds(30))
+        let conversation = store.library.selectedID, model = store.selectedModel
+        backend.requests.removeAll()
+        backend.failNextCommand = true
+        await store.unloadModel()
+        XCTAssertNotNil(store.error)
+        XCTAssertEqual(store.modelSession.activeModel, model)
+        XCTAssertFalse(store.isUnloadingModel)
+        backend.requests.removeAll()
+        await store.unloadModel()
+        XCTAssertEqual(backend.requests.compactMap { $0["op"] as? String }, ["release", "snapshot"])
+        XCTAssertNil(store.modelSession.activeModel)
+        XCTAssertEqual(store.selectedModel, model)
+        XCTAssertEqual(store.library.selectedID, conversation)
+        XCTAssertEqual(store.draft, "Keep my draft")
+        XCTAssertFalse(store.canUnloadModel)
+        await store.unloadModel()
+        XCTAssertEqual(backend.requests.filter { $0["op"] as? String == "release" }.count, 1)
+        _ = await store.modelSession.prepare(model).value
+        XCTAssertTrue(store.canUnloadModel)
+        backend.agentState = try agentFixture()
+        try await store.agent.restore()
+        XCTAssertFalse(store.canUnloadModel)
+        await store.unloadModel()
+        XCTAssertEqual(backend.requests.filter { $0["op"] as? String == "release" }.count, 1)
+        _ = await store.modelSession.close(unload: false)
+        XCTAssertFalse(store.canUnloadModel)
+    }
     func testDiffClassificationTerminalOutputAndSavedMetadata() throws {
-        XCTAssertEqual(AgentDiffLine.parse("--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new\n context").map(\.kind), [.header, .header, .header, .removal, .addition, .context])
+        XCTAssertEqual(AgentDiffLine.parse("--- a\n+++ b\n@@ -1,2 +1,2 @@\n-old\n+new\n context").map(\.kind), [.header, .header, .header, .removal, .addition, .context])
         let data = Data(#"{"id":"output","sequence":4,"taskId":"run","kind":"terminal_output","data":{"callId":"call","output":{"stream":"stderr","text":"actual error\n"}}}"#.utf8)
         let event = try JSONDecoder().decode(AgentEvent.self, from: data)
         XCTAssertEqual(AgentActivity.make(from: [event]).first?.output, "[stderr] actual error\n")

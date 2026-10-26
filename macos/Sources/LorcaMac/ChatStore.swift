@@ -20,12 +20,15 @@ final class ChatStore: ObservableObject {
     var draftImages: [ChatAttachment] { library.current.draftImages }
     var imageStore: AttachmentStore { AttachmentStore(directory: backend.root.appendingPathComponent("attachments")) }
     var canSend: Bool { canSendChat && !agent.busy && !jobs.running }
-    var canSendChat: Bool { ready && !isReloadingModel && !agent.submitting && !currentAgentActive && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftImages.isEmpty)
+    var canSendChat: Bool { ready && !isManagingModel && !agent.submitting && !currentAgentActive && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftImages.isEmpty)
         && !isGenerating && !isImportingImages && !modelSession.isLoading && !modelSession.isClosing }
     @Published private(set) var chatTextZoom: CGFloat = 0
     @Published var isImportingImages = false
     @Published private(set) var isReloadingModel = false
-    var canReloadModel: Bool { ready && !closing && !isReloadingModel && !isGenerating && !agent.busy && !jobs.running && !isChecking && !modelSession.isLoading && !modelSession.isClosing }
+    @Published private(set) var isUnloadingModel = false
+    var isManagingModel: Bool { isReloadingModel || isUnloadingModel }
+    var canReloadModel: Bool { ready && !closing && !isManagingModel && !isGenerating && !agent.busy && !jobs.running && !isChecking && !modelSession.isLoading && !modelSession.isClosing }
+    var canUnloadModel: Bool { canReloadModel && modelSession.activeModel != nil }
     @Published private(set) var models: [String] = []
     @Published var selectedModel: String {
         didSet {
@@ -94,6 +97,7 @@ final class ChatStore: ObservableObject {
     var modelChoices: [String] { Array(Set(models + [selectedModel])).sorted() }
     var status: String {
         if modelSession.isClosing { return "Closing session" }
+        if isUnloadingModel { return "Unloading model" }
         if isReloadingModel { return "Reloading model" }
         if modelSession.isLoading { return "Loading model" }
         if let task = agent.active { return task.presentationStatus }
@@ -230,6 +234,18 @@ final class ChatStore: ObservableObject {
             _ = await perform(["op": "snapshot"])
             _ = await perform(["op": "prepare", "model": model, "unloadPrevious": false])
         } catch { self.error = "Couldn’t reload the model. \(friendlyError(error))" }
+    }
+    // Release only; the next message prepares the selected model normally.
+    func unloadModel() async {
+        guard canUnloadModel, let model = modelSession.activeModel else { return }
+        isUnloadingModel = true
+        defer { isUnloadingModel = false }
+        await pending?.value
+        guard !isGenerating, !agent.busy, !jobs.running, !closing else { return }
+        do {
+            _ = try await backend.command(["op": "release", "model": model])
+            _ = await perform(["op": "snapshot"])
+        } catch { self.error = "Couldn’t unload the model. \(friendlyError(error))" }
     }
     func stop() {
         if currentAgentActive { Task { await agent.cancel() }; return }

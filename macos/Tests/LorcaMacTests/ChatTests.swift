@@ -9,6 +9,7 @@ class MockBackend: BackendTransport {
     var chats = [Conversation()]
     var selected: UUID
     var model = "qwen3.5:9b"
+    var activeModel: String? = "qwen3.5:9b"
     var fail = false
     var breakNextStream = false
     var failNextCommand = false
@@ -22,12 +23,12 @@ class MockBackend: BackendTransport {
         let encoded = try JSONEncoder().encode(chats)
         return try JSONDecoder().decode(BackendSnapshot.self, from: JSONSerialization.data(withJSONObject: [
             "revision": revision, "conversations": JSONSerialization.jsonObject(with: encoded),
-            "sessions": [["id": sessionID!, "selectedId": selected.uuidString, "model": model, "activeModel": model,
-                          "modelsToRelease": [model], "models": [model, "other"], "isConnected": true,
+            "sessions": [["id": sessionID!, "selectedId": selected.uuidString, "model": model, "activeModel": activeModel as Any? ?? NSNull(),
+                          "modelsToRelease": activeModel.map { [$0] } ?? [], "models": [model, "other"], "isConnected": true,
                           "usage": ["contextUsed": 0, "contextLimit": 4096]]], "turns": turn.map { [$0] } ?? []
         ]))
     }
-    func connect(model: String) async throws -> BackendSnapshot { connects += 1; self.model = model; return try snapshot() }
+    func connect(model: String) async throws -> BackendSnapshot { connects += 1; self.model = model; activeModel = model; return try snapshot() }
     func command(_ fields: [String: Any]) async throws -> Data {
         requests.append(fields)
         if failNextCommand { failNextCommand = false; throw BackendError(message: "Backend restarted") }
@@ -36,7 +37,10 @@ class MockBackend: BackendTransport {
         let index = chats.firstIndex { $0.id == selected }!
         switch fields["op"] as? String {
         case "draft": chats[index].draft = fields["text"] as! String
-        case "prepare": model = fields["model"] as! String
+        case "prepare": model = fields["model"] as! String; activeModel = model
+        case "release":
+            activeModel = nil; emit()
+            return Data(#"{"unloaded":true}"#.utf8)
         case "new": let chat = Conversation(); chats.append(chat); selected = chat.id
         case "open": selected = UUID(uuidString: fields["conversationId"] as! String)!
         case "send":
