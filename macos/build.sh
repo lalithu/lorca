@@ -20,11 +20,29 @@ xcrun swift build -c "$configuration"
 bin_dir="$(xcrun swift build -c "$configuration" --show-bin-path)"
 app="build/lorca.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp "$bin_dir/lorca-macos" "$app/Contents/MacOS/lorca"
-cp ../target/release/lorca "$app/Contents/MacOS/lorca-core"
+# Replace Mach-O files with new inodes. Overwriting an executable in place can
+# leave macOS's cached signature for the old binary and cause launch-time SIGKILL.
+cp "$bin_dir/lorca-macos" "$app/Contents/MacOS/lorca.new"
+mv -f "$app/Contents/MacOS/lorca.new" "$app/Contents/MacOS/lorca"
+cp ../target/release/lorca "$app/Contents/MacOS/lorca-core.new"
+mv -f "$app/Contents/MacOS/lorca-core.new" "$app/Contents/MacOS/lorca-core"
 cp Sources/LorcaMac/Resources/orca.txt "$app/Contents/Resources/orca.txt"
+rm -rf "$app/Contents/Resources/jobapps"
+mkdir -p "$app/Contents/Resources/jobapps"
+cp ../jobapps/*.py "$app/Contents/Resources/jobapps/"
+cp -R ../jobapps/defaults ../jobapps/vendor "$app/Contents/Resources/jobapps/"
 cp Info.plist "$app/Contents/Info.plist"
 # Finder/iCloud can attach metadata to generated bundles that codesign rejects.
 xattr -cr "$app"
+codesign --force --sign - "$app/Contents/MacOS/lorca-core"
 codesign --force --sign - "$app"
+# Exercise the bundled core, not target/release: {} must reach input validation
+# without loading a model, creating data, or running a research task.
+python3 - "$app/Contents/MacOS/lorca-core" <<'PYCORE'
+import pathlib, subprocess, sys
+core = str(pathlib.Path(sys.argv[1]).resolve())
+result = subprocess.run([core, 'job-session'], input=b'{}', capture_output=True, timeout=10)
+if result.returncode != 1 or b'Missing model' not in result.stderr:
+    raise SystemExit(f'Bundled research core failed startup (exit {result.returncode}): {result.stderr.decode(errors="replace")[:300]}')
+PYCORE
 echo "Built $PWD/$app"

@@ -1,3 +1,16 @@
 /target
 
 .DS_Store
+
+# Job Apps runtime data and private configuration
+/jobapps/__pycache__/
+/jobapps/tests/__pycache__/
+/jobapps/*.sqlite3*
+/jobapps/.research/
+/jobapps/packets/
+
+/jobapps/private/
+/jobapps/google.json
+/jobapps/profile/
+/jobapps/*token*.json
+/jobapps/oauth_client*.json

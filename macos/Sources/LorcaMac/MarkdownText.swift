@@ -47,70 +47,52 @@ struct MarkdownText: View {
     let size: CGFloat
 
     var body: some View {
-        let blocks = MarkdownBlock.parse(text)
-        VStack(alignment: .leading, spacing: 12) {
-            ForEach(blocks) { block in
-                if let table = block.table {
-                    if blocks.first(where: { $0.table == table })?.id == block.id {
-                        tableView(blocks.filter { $0.table == table })
-                    }
-                } else {
-                    blockView(block)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    @ViewBuilder private func blockView(_ block: MarkdownBlock) -> some View {
-        if block.isRule {
-            Divider().padding(.vertical, 4)
-        } else if block.isCode {
-            ScrollView(.horizontal) {
-                Text(block.text).font(.system(size: max(10, size - 1), design: .monospaced))
-                    .lineSpacing(4).padding(12)
-            }
-            .background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 9))
-        } else {
-            HStack(alignment: .top, spacing: 8) {
-                if block.isQuote { Rectangle().fill(.secondary.opacity(0.4)).frame(width: 2) }
-                if block.listDepth > 0 {
-                    Text(block.marker ?? "").frame(minWidth: 18, alignment: .trailing)
-                }
-                Text(block.text)
-                    .font(.system(size: headingSize(block.heading), weight: block.heading == nil ? .regular : .semibold))
-                    .lineSpacing(5)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
+        Text(Self.rendered(text, size: size))
             .font(.system(size: size))
-            .padding(.leading, CGFloat(max(0, block.listDepth - 1)) * 18)
-            .padding(.top, block.heading == nil ? 0 : 5)
+            .lineSpacing(4)
+            .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
-        }
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func headingSize(_ level: Int?) -> CGFloat {
-        guard let level else { return size }
-        return size + CGFloat(max(1, 7 - level)) * 1.5
-    }
-
-    private func tableView(_ cells: [MarkdownBlock]) -> some View {
-        let rows = cells.reduce(into: [Int]()) { result, cell in
-            if let row = cell.row, !result.contains(row) { result.append(row) }
-        }
-        return ScrollView(.horizontal) {
-            Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 9) {
-                ForEach(rows, id: \.self) { row in
-                    GridRow {
-                        ForEach(cells.filter { $0.row == row }) { cell in
-                            Text(cell.text).font(.system(size: size, weight: cell.isTableHeader ? .semibold : .regular))
-                        }
-                    }
-                    if row == rows.first { Divider().gridCellUnsizedAxes(.horizontal) }
-                }
+    // One Text keeps selection continuous across Markdown elements and leaves
+    // wrapping/height entirely to SwiftUI, including while streaming/resizing.
+    static func rendered(_ source: String, size: CGFloat) -> AttributedString {
+        let blocks = MarkdownBlock.parse(source)
+        var result = AttributedString()
+        for (index, block) in blocks.enumerated() {
+            if index > 0 {
+                let previous = blocks[index - 1]
+                let sameRow = block.table != nil && block.row == previous.row
+                let compact = (block.listDepth > 0 && previous.listDepth > 0
+                    && block.listDepth >= previous.listDepth && block.marker != nil)
+                    || (block.table != nil && block.table == previous.table)
+                result += AttributedString(sameRow ? "\t" : compact ? "\n" : "\n\n")
             }
-            .padding(12)
+            if block.isRule {
+                var rule = AttributedString("────────────────")
+                rule.foregroundColor = .secondary
+                result += rule
+                continue
+            }
+            if let marker = block.marker {
+                result += AttributedString(String(repeating: "  ", count: max(0, block.listDepth - 1)) + marker + "  ")
+            }
+            var content = block.text
+            if block.isCode {
+                // Code parsers retain the fence's final newline; separators
+                // already supply paragraph spacing outside the code block.
+                while content.characters.last == "\n" { content.removeSubrange(content.characters.index(before: content.endIndex)..<content.endIndex) }
+                content.font = .system(size: max(10, size - 1), design: .monospaced)
+                content.backgroundColor = .primary.opacity(0.045)
+            } else if let level = block.heading {
+                content.font = .system(size: size + CGFloat(max(1, 7 - level)) * 1.5, weight: .semibold)
+            } else if block.isTableHeader {
+                content.font = .system(size: size, weight: .semibold)
+            }
+            if block.isQuote { result += AttributedString("│ ") }
+            result += content
         }
-        .background(.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 9))
+        return result
     }
 }

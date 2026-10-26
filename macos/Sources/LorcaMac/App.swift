@@ -36,7 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         windows.showDashboard()
-        windows.showMini()
+        if windows.miniVisible { windows.showMini() }
         return true
     }
 

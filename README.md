@@ -30,7 +30,7 @@ lorca agent --workspace "$PWD" "Inspect this repository"  # Agent testing CLI
 ```
 
 Build the macOS app once with `./macos/build.sh` before using `lorca main`.
-In the GUI, `⌘W` closes the dashboard and shows Mini, even if Mini was hidden.
+Mini is off by default. In the GUI, `⌘W` closes the dashboard; `⌘2` toggles Mini.
 Use `⌘1` to reopen the dashboard and `⌘Q` to quit both.
 See [macOS instructions](macos/README.md). Launching either mode does not build
 or print Cargo output.
@@ -68,6 +68,14 @@ or print Cargo output.
 
 The sections below describe the Rust terminal interface. The GUI keeps its model
 and appearance preferences separately in macOS preferences.
+
+## Job Apps
+
+The native sidebar includes continuous, source-backed job research using Lorca’s
+selected local model and Exa free search/extraction, manual application tracking,
+Gmail drafts and linked follow-ups, and two-way Google Sheets monitoring. Templates
+and an approved resume PDF can be configured later. No emails or applications are
+sent automatically. See [Job Apps setup and limitations](jobapps/README.md).
 
 ## Configuration
 

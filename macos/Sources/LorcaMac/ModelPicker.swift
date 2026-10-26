@@ -26,7 +26,7 @@ struct ModelPicker: View {
         }
         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize(horizontal: true, vertical: true)
         .frame(maxWidth: compact ? 180 : 250, alignment: .trailing)
-        .disabled(!store.ready || store.isReloadingModel || store.isGenerating || store.agent.busy || store.isChecking || store.modelSession.isLoading)
+        .disabled(!store.ready || store.isReloadingModel || store.isGenerating || store.agent.busy || store.jobs.running || store.isChecking || store.modelSession.isLoading)
         .accessibilityLabel("Model").accessibilityValue(store.selectedModel)
         .help("Choose an installed Ollama model; stop active work before reloading")
         .confirmationDialog("Reload \(store.selectedModel)?", isPresented: $confirmingReload) {

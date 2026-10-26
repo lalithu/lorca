@@ -1,5 +1,6 @@
 mod agent_cli;
 mod config;
+mod job_session;
 mod launcher;
 mod lifecycle;
 mod model;
@@ -20,6 +21,9 @@ fn main() -> ExitCode {
 
 fn run() -> io::Result<()> {
     let mut args = std::env::args_os().skip(1);
+    if std::env::args().nth(1).as_deref() == Some("job-session") {
+        return job_session::run();
+    }
     if std::env::args().nth(1).as_deref() == Some("agent") {
         return agent_cli::run();
     }

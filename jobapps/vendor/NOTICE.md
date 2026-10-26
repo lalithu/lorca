@@ -1,0 +1,1 @@
+Exa keyless MCP transport and result parsing in web.py adapted from NousResearch/hermes-agent plugins/web/keyless_mcp.py, MIT; see HERMES-LICENSE. Research orchestration and validation are ported from the user-owned m2max-job-pipeline. No Hermes runtime, configuration, account credentials, or private sessions are bundled.

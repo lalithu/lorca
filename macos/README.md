@@ -12,7 +12,7 @@
 - Mini’s glass controls: new chat, open dashboard, collapse. Its chat stays anchored beside the pet.
 - Blue GUI accents; expanded Mini moves together with the pet and fits back onscreen after dragging.
 - Dashboard’s native top bar: toggle sidebar, new chat, current section.
-- `⌘W` closes the dashboard and shows Mini if hidden. `⌘1` restores the dashboard; `⌘Q` quits both.
+- Mini is off by default; `⌘W` closes the dashboard without showing Mini. `⌘1` restores the dashboard; `⌘Q` quits both.
 - `⌘=` / `⌘−`: increase / decrease chat text size in Dashboard and Mini.
 - Scroll back freely during replies; return to the bottom to resume following. Headings, lists, quotes, tables, and code render as Markdown.
 - Both views share saved conversations and drafts. Recents in the sidebar supports create/open/rename/delete; Mini has a history menu. **New Chat**: `⌘N`; stop a reply with Escape or the stop button.
@@ -22,7 +22,7 @@
 - Model menu → **Reload model…**: unload/reload a stalled model after a shared-model warning. Stop active work first; Rust protects other lorca sessions.
 - Settings: installed Ollama models and System/Dark/Light appearance. Defaults to `qwen3.5:9b` at `http://127.0.0.1:11434`.
 - Chats composer: choose **Agent**, select a workspace, and submit a coding task. Expand real tool activity, diffs, and command output inline; approve exact actions once, deny them, or cancel.
-- One task at a time; switching chats does not cancel it. Mini links to the dashboard for activity and approvals. Choose **Chat** for ordinary chat and images.
+- One task at a time; switching chats does not cancel it. Mini links to the dashboard for activity and approvals. Use the same chat for ordinary questions and images.
 - Agent requests and final results are saved; activity is temporary. Reconnection restores the latest backend snapshot without replaying the request. Backend restarts mark unfinished requests interrupted.
 - Overview, Tasks, Pipelines, Scheduled are placeholders.
 - Dashboard, Mini, and terminal chat use one Rust backend. The app starts its bundled backend automatically; a lock prevents duplicate runtimes.
@@ -51,3 +51,9 @@
 - `AgentActivity*.swift`, `AgentApprovalView.swift`, `AgentDiffView.swift`, `AgentComposerControls.swift`: inline tools, approval, diffs, and task input.
 
 - Chats has one composer for conversation, images, and tools. Select a workspace to enable file operations; greetings need no tools. Text streams while tools are enabled, and working context compacts automatically. Pending approvals remain accessible above the composer.
+
+## Job Apps
+
+See [Job Apps setup](../jobapps/README.md) for research, local templates, Gmail drafts,
+linked follow-ups and two-way Sheets. Pause research before chatting; quitting the
+app stops research and background Google checks.

@@ -10,7 +10,7 @@ final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolb
     @Published private(set) var sidebarVisible = true
     @Published private(set) var isFullScreen = false
     @Published private(set) var isTransitioning = false
-    @Published private(set) var miniVisible = true
+    @Published private(set) var miniVisible = false
     @Published private(set) var miniExpanded = false
     @Published private(set) var miniChatBelowPet = false
 
@@ -90,7 +90,6 @@ final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolb
         store.appearanceChanged = { [weak self] in self?.applyAppearance() }
         applyAppearance()
         showDashboard()
-        showMini()
     }
 
     func showDashboard() {
@@ -102,7 +101,6 @@ final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolb
     }
 
     func closeDashboard() {
-        showMini()
         dashboard.performClose(nil)
     }
 

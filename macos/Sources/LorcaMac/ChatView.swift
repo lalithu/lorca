@@ -57,6 +57,13 @@ struct ChatView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
+            if store.jobs.running {
+                HStack {
+                    Text("Pause Job Apps research before chatting.").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Pause research") { store.jobs.pause() }.controlSize(.small)
+                }
+            }
             if compact {
                 AgentMiniStatus(store: store.agent) {
                     if let id = store.agent.active?.conversationId { store.openConversation(id) }

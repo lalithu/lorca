@@ -26,12 +26,13 @@ struct AgentActivityView: View {
             let text = response(task)
             let events = (savedMessage?.agentEvents?.count ?? 0) > task.events.count ? savedMessage!.agentEvents! : task.events
             let activities = events == task.events ? (store.activities[task.id] ?? AgentActivity.make(from: events)) : AgentActivity.make(from: events)
+            let timeline = AgentTimelineItem.make(text: text, events: events, activities: activities)
             VStack(alignment: .leading, spacing: 16) {
                 AgentRunHeader(store: store, task: task, text: text)
                 if events.first?.sequence ?? 0 > 1 {
                     Text("Earlier activity is unavailable.").font(.caption).foregroundStyle(.secondary)
                 }
-                ForEach(AgentTimelineItem.make(text: text, events: events, activities: activities)) { row in
+                ForEach(timeline) { row in
                     switch row.content {
                     case .text(let text): MarkdownText(text: text, size: textSize).textSelection(.enabled)
                     case .tools(let items): AgentActivityGroup(store: store, task: task, items: items)

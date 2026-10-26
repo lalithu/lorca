@@ -1,0 +1,187 @@
+"""One-minute, field-aware two-way sync for the existing phone monitor."""
+import json
+import re
+import urllib.parse
+import uuid
+from datetime import date
+import google_connections as google
+import jobtracker as tracker
+import outreach
+from monitor_data import snapshot as monitor_snapshot, HEADERS
+
+FIELDS={'stage':4,'notes':19,'priority':20,'follow_up':21}
+EXTRA=['Notes','Priority','Follow-up date','Lorca ID','Lorca record','Outreach detail']
+
+
+def merge_value(base,local,remote):
+    if local==remote:return local,False
+    if base is not None and local==base:return remote,False
+    if base is not None and remote==base:return local,False
+    return local,True
+
+
+def validate(field,value):
+    if not isinstance(value,str):raise ValueError('Sheet values must be text')
+    if field=='stage' and value not in tracker.STATUSES:raise ValueError('Invalid stage in Google Sheet')
+    if field=='priority' and value not in tracker.PRIORITIES:raise ValueError('Invalid priority in Google Sheet')
+    if field=='follow_up' and value:date.fromisoformat(value)
+    if len(value)>20000:raise ValueError('Sheet note exceeds limit')
+    return value
+
+
+def resolve(job_id,field,choice):
+    if field not in FIELDS or choice not in ('local','sheet'):raise ValueError('Invalid conflict choice')
+    with tracker.db() as db:
+        row=db.execute('SELECT * FROM sync_conflicts WHERE job_id=? AND field=?',(job_id,field)).fetchone()
+        if not row:raise ValueError('Conflict no longer exists')
+        value=validate(field,row['local_value'] if choice=='local' else row['remote_value'])
+        if field=='follow_up':db.execute('UPDATE job_meta SET follow_up=? WHERE job_id=?',(value,job_id))
+        else:db.execute('UPDATE jobs SET '+field+'=?,updated_at=? WHERE id=?',(value,tracker.now(),job_id))
+        meta=db.execute('SELECT baseline FROM job_meta WHERE job_id=?',(job_id,)).fetchone()
+        baseline=json.loads(meta[0]);baseline[field]=row['remote_value']
+        db.execute('UPDATE job_meta SET baseline=? WHERE job_id=?',(json.dumps(baseline),job_id))
+        db.execute('DELETE FROM sync_conflicts WHERE job_id=? AND field=?',(job_id,field))
+
+
+def cloud_record(job,dossier):
+    # Only job facts and summary evidence travel through Sheets, never candidate
+    # profile, resume, token files, raw browsing logs, or local filesystem paths.
+    fields={k:v for k,v in job.items() if k in tracker.EDITABLE and k not in ('resume_file','cover_letter_file','application_approved','outreach_approved')}
+    value={'job':fields,'dossier':dossier}
+    text=json.dumps(value,ensure_ascii=False)
+    if len(text)>45000:raise ValueError('Job record is too large for a Sheets cell')
+    return text
+
+
+def bootstrap_row(row):
+    if len(row)<24 or not row[22] or not row[23]:return None
+    identity=row[22]
+    uuid.UUID(identity)
+    data=json.loads(row[23]);job=tracker.validate(data['job'])
+    # Provider status from a sheet is descriptive, never a Gmail send receipt.
+    job['outreach_stage']='Not started'
+    job['application_approved']=False;job['outreach_approved']=False
+    for field in ('stage','notes','priority'):
+        if len(row)>FIELDS[field]:job[field]=validate(field,row[FIELDS[field]])
+    follow_up=validate('follow_up',row[21])
+    dossier=data.get('dossier')
+    payload=json.dumps(dossier) if isinstance(dossier,dict) else None
+    # Keep a downloaded record and its identity/evidence in one transaction.
+    # The same tracker imported on another Mac must not duplicate the same URL.
+    with tracker.db() as db:
+        db.execute('BEGIN IMMEDIATE')
+        existing=db.execute('SELECT job_id FROM job_meta WHERE sync_id=?',(identity,)).fetchone()
+        if existing:return existing[0]
+        same=db.execute('SELECT id FROM jobs WHERE job_url=? AND company=? AND title=?',(job.get('job_url',''),job['company'],job['title'])).fetchall() if job.get('job_url') else []
+        if len(same)>1:raise ValueError('Multiple local jobs match the Sheet record; resolve duplicate postings first')
+        if same:
+            identifier=same[0][0]
+            db.execute("INSERT INTO job_meta(job_id,sync_id) VALUES(?,?) ON CONFLICT(job_id) DO UPDATE SET sync_id=excluded.sync_id,baseline='{}'",(identifier,identity))
+            return identifier
+        stamp=tracker.now();job.update(created_at=stamp,updated_at=stamp)
+        identifier=db.execute('INSERT INTO jobs('+','.join(job)+') VALUES('+','.join('?' for _ in job)+')',list(job.values())).lastrowid
+        db.execute('INSERT INTO history(job_id,action,happened_at) VALUES(?,?,?)',(identifier,'Downloaded job summary from Google Sheets',stamp))
+        db.execute('INSERT INTO job_meta(job_id,sync_id,follow_up) VALUES(?,?,?)',(identifier,identity,follow_up))
+        if payload:
+            db.execute('INSERT INTO research_dossiers(job_id,run_id,researched_at,payload) VALUES(?,?,?,?)',(identifier,0,stamp,payload))
+    return identifier
+
+
+
+def sync():
+    config=google.config();sid=google.sheet_id(config.get('sheet_url',''))
+    prefix=sid
+    def api(path,body=None):return google.api('sheets',prefix+path,body)
+    metadata=api('?fields=sheets(properties(sheetId,title,gridProperties))')
+    tabs={s['properties']['title']:s['properties'] for s in metadata.get('sheets',[])}
+    missing=[name for name in ('Opportunities','Status') if name not in tabs]
+    if missing:
+        api(':batchUpdate',{'requests':[{'addSheet':{'properties':{'title':name}}} for name in missing]})
+        metadata=api('?fields=sheets(properties(sheetId,title,gridProperties))')
+        tabs={s['properties']['title']:s['properties'] for s in metadata['sheets']}
+    remote=api('/values/'+urllib.parse.quote("'Opportunities'!A:Y",safe='')).get('values',[])
+    by_uuid={};legacy={}
+    for number,row in enumerate(remote[1:],2):
+        if len(row)>22 and row[22]:
+            if row[22] in by_uuid:raise ValueError('Duplicate Lorca ID in Sheet; fix the duplicate row before syncing')
+            by_uuid[row[22]]=(number,row)
+        elif row and str(row[0]).isdigit():legacy[int(row[0])]=(number,row)
+    outreach.ensure_ids()
+    with tracker.db() as db:known={r['sync_id'] for r in db.execute('SELECT sync_id FROM job_meta')}
+    remote_urls=set()
+    for identity,(_,row) in by_uuid.items():
+        if identity not in known:
+            record=json.loads(row[23]) if len(row)>23 and row[23] else {}
+            posting=record.get('job',{}).get('job_url','')
+            if posting and posting in remote_urls:raise ValueError('Duplicate posting identities in Sheet; resolve duplicate rows first')
+            if posting:remote_urls.add(posting)
+            bootstrap_row(row)
+    jobs=tracker.list_jobs()
+    with tracker.db() as db:
+        metas={r['job_id']:dict(r) for r in db.execute('SELECT * FROM job_meta')}
+        dossiers={r['job_id']:json.loads(r['payload']) for r in db.execute('SELECT job_id,payload FROM research_dossiers')}
+    patches=[];baselines=[];next_row=max(2,len(remote)+1);conflict_count=0
+    header=HEADERS+EXTRA
+    if not remote or remote[0]!=header:patches.append({'range':"'Opportunities'!A1:Y1",'values':[header]})
+    projection=monitor_snapshot(tracker.ROOT)
+    monitor={int(r[0]):r for r in projection['Opportunities'][1:]}
+    for job in jobs:
+        meta=metas[job['id']];identity=meta['sync_id'];pair=by_uuid.get(identity)
+        if not pair and job['id'] in legacy:
+            number,row=legacy[job['id']]
+            if len(row)>2 and (row[1],row[2])==(job['company'],job['title']):pair=(number,row)
+        if pair:number,remote_row=pair
+        else:number,remote_row=next_row,[];next_row+=1
+        baseline=json.loads(meta['baseline']);next_base=baseline.copy();blocked=set()
+        for field,col in FIELDS.items():
+            local=meta['follow_up'] if field=='follow_up' else job[field]
+            # Old monitor has no notes/priority/follow-up columns. Missing cells
+            # are absent on first adoption, not requests to erase local values.
+            remote_value=str(remote_row[col]) if len(remote_row)>col else (local if field not in baseline else '')
+            try:validate(field,remote_value)
+            except (ValueError,TypeError):
+                remote_value=str(remote_value);conflict=True;chosen=local
+            else:chosen,conflict=merge_value(baseline.get(field),local,remote_value)
+            if conflict:
+                with tracker.db() as db:db.execute('INSERT OR REPLACE INTO sync_conflicts(job_id,field,local_value,remote_value) VALUES(?,?,?,?)',(job['id'],field,local,remote_value))
+                blocked.add(field);conflict_count+=1
+            else:
+                with tracker.db() as db:
+                    db.execute('DELETE FROM sync_conflicts WHERE job_id=? AND field=?',(job['id'],field))
+                    # Do not replace a local edit made while the API read was in flight.
+                    current=db.execute('SELECT '+('follow_up FROM job_meta' if field=='follow_up' else field+' FROM jobs')+' WHERE '+('job_id' if field=='follow_up' else 'id')+'=?',(job['id'],)).fetchone()[0]
+                    if current!=local:
+                        blocked.add(field);continue
+                    if chosen!=local:
+                        if field=='follow_up':db.execute('UPDATE job_meta SET follow_up=? WHERE job_id=?',(chosen,job['id']))
+                        else:db.execute('UPDATE jobs SET '+field+'=?,updated_at=? WHERE id=?',(chosen,tracker.now(),job['id']))
+                next_base[field]=chosen
+                if field=='follow_up':meta['follow_up']=chosen
+                else:job[field]=chosen
+        row=list(monitor[job['id']])
+        row[4]=job['stage'];row+=[job['notes'],job['priority'],meta['follow_up'],identity,cloud_record(job,dossiers.get(job['id'])),job['outreach_stage']]
+        # Write only changed cells. Conflicted editable cells are never overwritten.
+        for col,value in enumerate(row):
+            field=next((key for key,index in FIELDS.items() if index==col),None)
+            if field in blocked:continue
+            old=str(remote_row[col]) if len(remote_row)>col else ''
+            if str(value)==old:continue
+            letter=chr(ord('A')+col)
+            patches.append({'range':f"'Opportunities'!{letter}{number}",'values':[[value]]})
+        baselines.append((json.dumps(next_base),job['id']))
+    # Keep existing phone-monitor status useful; only its timestamp changes each minute.
+    status=projection['Status'];status[2]=['Sync connection','Lorca two-way sync · notes, priority, stage, follow-up date']
+    patches.append({'range':f"'Status'!A1:B{len(status)}",'values':status})
+    requests=[]
+    for name,rows,cols in [('Opportunities',next_row+1,25),('Status',len(status)+1,2)]:
+        properties=tabs[name];grid=properties.get('gridProperties',{})
+        if grid.get('rowCount',0)<rows or grid.get('columnCount',0)<cols:
+            requests.append({'updateSheetProperties':{'properties':{'sheetId':properties['sheetId'],'gridProperties':{'rowCount':max(rows,grid.get('rowCount',0)),'columnCount':max(cols,grid.get('columnCount',0))}},'fields':'gridProperties'}})
+    if requests:api(':batchUpdate',{'requests':requests})
+    # Sheets has no compare-and-swap. Recheck before writing so a phone edit
+    # made during this sync is retried instead of overwritten from an old read.
+    latest=api('/values/'+urllib.parse.quote("'Opportunities'!A:Y",safe='')).get('values',[])
+    if latest!=remote:raise ValueError('Sheet changed during sync; retrying on the next cycle without overwriting it')
+    if patches:api('/values:batchUpdate',{'valueInputOption':'RAW','data':patches})
+    with tracker.db() as db:db.executemany('UPDATE job_meta SET baseline=? WHERE job_id=?',baselines)
+    return {'jobs':len(jobs),'changed_cells':len(patches)-1,'conflicts':conflict_count}

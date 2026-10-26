@@ -12,19 +12,20 @@ final class ChatStore: ObservableObject {
     let modelSession = ModelSession()
     let backend: BackendTransport
     let agent: AgentStore
+    let jobs = JobAppsStore()
     var agentWorkspace: URL? { agent.workspaces[library.selectedID] }
     var currentAgentActive: Bool { agent.active?.conversationId == library.selectedID }
     var messages: [ChatMessage] { library.current.messages }
     var draft: String { get { library.current.draft } set { library.setDraft(newValue) } }
     var draftImages: [ChatAttachment] { library.current.draftImages }
     var imageStore: AttachmentStore { AttachmentStore(directory: backend.root.appendingPathComponent("attachments")) }
-    var canSend: Bool { canSendChat && !agent.busy }
+    var canSend: Bool { canSendChat && !agent.busy && !jobs.running }
     var canSendChat: Bool { ready && !isReloadingModel && !agent.submitting && !currentAgentActive && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftImages.isEmpty)
         && !isGenerating && !isImportingImages && !modelSession.isLoading && !modelSession.isClosing }
     @Published private(set) var chatTextZoom: CGFloat = 0
     @Published var isImportingImages = false
     @Published private(set) var isReloadingModel = false
-    var canReloadModel: Bool { ready && !closing && !isReloadingModel && !isGenerating && !agent.busy && !isChecking && !modelSession.isLoading && !modelSession.isClosing }
+    var canReloadModel: Bool { ready && !closing && !isReloadingModel && !isGenerating && !agent.busy && !jobs.running && !isChecking && !modelSession.isLoading && !modelSession.isClosing }
     @Published private(set) var models: [String] = []
     @Published var selectedModel: String {
         didSet {
@@ -65,7 +66,7 @@ final class ChatStore: ObservableObject {
         agent = AgentStore(backend: self.backend)
         selectedModel = defaults.string(forKey: "model") ?? "qwen3.5:9b"
         appearance = Appearance(rawValue: defaults.string(forKey: "appearance") ?? "Dark") ?? .dark
-        for source in [modelSession.objectWillChange, library.objectWillChange, agent.objectWillChange] {
+        for source in [modelSession.objectWillChange, library.objectWillChange, agent.objectWillChange, jobs.objectWillChange] {
             source.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &updates)
         }
         library.perform = { [weak self] in self?.enqueue($0) }
@@ -79,6 +80,7 @@ final class ChatStore: ObservableObject {
         modelSession.closeAction = { [weak self] unload in
             guard let self else { return [] }
             await self.pending?.value
+            await self.jobs.shutdown()
             self.closing = true
             self.eventTask?.cancel()
             self.agent.shutdown()
