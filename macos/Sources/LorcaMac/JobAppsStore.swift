@@ -5,6 +5,8 @@ import UniformTypeIdentifiers
 
 struct JobRecord: Codable, Identifiable, Equatable {
     let id: Int
+    let number: Int?
+    var displayNumber: Int { number ?? id }
     let company: String
     let title: String
     let location: String

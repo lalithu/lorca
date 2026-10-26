@@ -21,13 +21,20 @@ def init():
         CREATE TABLE IF NOT EXISTS outreach_messages(id TEXT PRIMARY KEY,job_id INTEGER NOT NULL,kind TEXT NOT NULL,recipient TEXT NOT NULL,subject TEXT NOT NULL,body TEXT NOT NULL,state TEXT NOT NULL,created_at TEXT NOT NULL,gmail_draft TEXT NOT NULL DEFAULT '',thread_id TEXT NOT NULL DEFAULT '',rfc_id TEXT NOT NULL DEFAULT '',sent_at TEXT NOT NULL DEFAULT '',provider_message TEXT NOT NULL DEFAULT '',error TEXT NOT NULL DEFAULT '',UNIQUE(job_id,kind));
         CREATE TABLE IF NOT EXISTS sync_conflicts(job_id INTEGER NOT NULL,field TEXT NOT NULL,local_value TEXT NOT NULL,remote_value TEXT NOT NULL,PRIMARY KEY(job_id,field));
         ''')
+    with tracker.db() as db:
+        if 'discovery_number' not in {row[1] for row in db.execute('PRAGMA table_info(job_meta)')}:
+            db.execute('ALTER TABLE job_meta ADD COLUMN discovery_number INTEGER NOT NULL DEFAULT 0')
+            db.execute('UPDATE job_meta SET discovery_number=job_id')
     ensure_ids()
 
 
 def ensure_ids():
     with tracker.db() as db:
-        for row in db.execute('SELECT id FROM jobs').fetchall():
-            db.execute('INSERT OR IGNORE INTO job_meta(job_id,sync_id) VALUES(?,?)',(row[0],str(uuid.uuid4())))
+        maximum=db.execute('SELECT COALESCE(MAX(discovery_number),0) FROM job_meta').fetchone()[0]
+        for row in db.execute('SELECT id FROM jobs ORDER BY id').fetchall():
+            if db.execute('SELECT 1 FROM job_meta WHERE job_id=?',(row[0],)).fetchone():continue
+            maximum=max(maximum+1,row[0])
+            db.execute('INSERT INTO job_meta(job_id,sync_id,discovery_number) VALUES(?,?,?)',(row[0],str(uuid.uuid4()),maximum))
 
 
 def business_due(sent):
@@ -186,3 +193,8 @@ def snapshot():
         return {'messages':[dict(r) for r in db.execute('SELECT * FROM outreach_messages ORDER BY created_at DESC')],
                 'meta':[dict(r) for r in db.execute('SELECT job_id,follow_up FROM job_meta')],
                 'conflicts':[dict(r) for r in db.execute('SELECT * FROM sync_conflicts')]}
+
+def numbered_jobs():
+    ensure_ids()
+    with tracker.db() as db:numbers={r[0]:r[1] for r in db.execute('SELECT job_id,discovery_number FROM job_meta')}
+    return [{**job,'number':numbers[job['id']]} for job in tracker.list_jobs()]

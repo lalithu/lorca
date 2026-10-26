@@ -164,7 +164,28 @@ class GoogleTests(unittest.TestCase):
             self.assertEqual(state['rows'][2][1],'Acme')
             filters=[r['setBasicFilter']['filter']['range'] for r in state['layout'] if 'setBasicFilter' in r]
             self.assertEqual(filters[-1]['endRowIndex'],3)
-            self.assertEqual(filters[-1]['endColumnIndex'],25)
+            self.assertEqual(filters[-1]['endColumnIndex'],26)
+
+    def test_second_mac_keeps_original_numbers_and_repairs_existing_import(self):
+        import uuid
+        self.configure();state,api=self.fake_sheet()
+        original=str(uuid.uuid4());row=['']*26
+        row[0]=49;row[4]='Ready for review';row[20]='High';row[22]=original;row[25]=49
+        row[23]=json.dumps({'job':{'company':'Latest','title':'Engineer','job_url':'https://latest.test/job'}})
+        identifier=sheets.bootstrap_row(row)
+        self.assertNotEqual(identifier,49)
+        # Reproduce a previously imported M3 record with the wrong local number.
+        with tracker.db() as db:db.execute('UPDATE job_meta SET discovery_number=? WHERE job_id=?',(identifier,identifier))
+        state['rows'].append(row)
+        with patch.object(google,'api',side_effect=api):
+            sheets.sync()
+            self.assertEqual(state['rows'][1][0],49)
+            self.assertEqual(state['rows'][1][1],'Latest')
+            self.assertEqual(next(j['number'] for j in outreach.numbered_jobs() if j['id']==identifier),49)
+            third=tracker.create_job({'company':'Even newer','title':'Engineer'})
+            sheets.sync()
+            self.assertEqual(state['rows'][1][0],50)
+            self.assertEqual(next(j['number'] for j in outreach.numbered_jobs() if j['id']==third['id']),50)
 
     def test_sheet_changes_during_read_are_not_overwritten(self):
         self.configure();state,api=self.fake_sheet();reads=0

@@ -9,7 +9,7 @@ struct JobAppsView: View {
     @State private var filter = "All"
     @State private var settings = false
     private var jobs: [JobRecord] {
-        (store.snapshot?.jobs ?? []).sorted { $0.id > $1.id }.filter { job in
+        (store.snapshot?.jobs ?? []).sorted { $0.displayNumber > $1.displayNumber }.filter { job in
             (query.isEmpty || "\(job.company) \(job.title) \(job.location)".localizedCaseInsensitiveContains(query))
                 && (filter == "Follow-up due" && followUpDue(job.id) || filter == "All" || filter == "Verified" && job.verification == "Verified" || filter == "Needs review" && job.stage == "Ready for review" || filter == "With contact" && job.recruiter_contact.contains("@"))
         }
@@ -87,7 +87,7 @@ struct JobAppsView: View {
                     List(selection: $store.selected) {
                         ForEach(jobs) { job in
                             VStack(alignment: .leading, spacing: 5) {
-                                Text("\(job.id). \(job.company)").font(.system(size: 13, weight: .semibold))
+                                Text("\(job.displayNumber). \(job.company)").font(.system(size: 13, weight: .semibold))
                                 Text(job.title).font(.system(size: 12)).lineLimit(2)
                                 if mode == .email { Text(followUpDue(job.id) ? "Follow-up due" : job.outreach_stage).font(.caption).foregroundStyle(followUpDue(job.id) ? Color.orange : Color.secondary) }
                                 HStack { Text(job.location).lineLimit(1); Spacer(); Text(job.verification).foregroundStyle(job.verification == "Verified" ? Color.green : Color.secondary) }

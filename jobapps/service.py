@@ -34,7 +34,7 @@ def setup():
 
 def snapshot():
     state=research.status()
-    return {'jobs':tracker.list_jobs(),'dossiers':state['dossiers'],'run':state['run'],
+    return {'jobs':outreach.numbered_jobs(),'dossiers':state['dossiers'],'run':state['run'],
             'preferences':state['preferences'],'profile':(ROOT/'profile/master_resume.md').read_text(),
             'context':state['context'],'root':str(ROOT),'stages':tracker.STATUSES,
             'priorities':tracker.PRIORITIES,'outreach':tracker.OUTREACH,

@@ -10,7 +10,7 @@ import outreach
 from monitor_data import snapshot as monitor_snapshot, HEADERS
 
 FIELDS={'stage':4,'notes':19,'priority':20,'follow_up':21}
-EXTRA=['Notes','Priority','Follow-up date','Lorca ID','Lorca record','Outreach detail']
+EXTRA=['Notes','Priority','Follow-up date','Lorca ID','Lorca record','Outreach detail','Found number']
 
 
 def merge_value(base,local,remote):
@@ -41,6 +41,13 @@ def resolve(job_id,field,choice):
         baseline=json.loads(meta[0]);baseline[field]=row['remote_value']
         db.execute('UPDATE job_meta SET baseline=? WHERE job_id=?',(json.dumps(baseline),job_id))
         db.execute('DELETE FROM sync_conflicts WHERE job_id=? AND field=?',(job_id,field))
+
+
+def found_number(row):
+    # Column Z survives older clients that rewrite the A:Y monitor range.
+    value=row[25] if len(row)>25 and row[25] else (row[0] if row else '')
+    if str(value).isdigit() and int(value)>0:return int(value)
+    return None
 
 
 def cloud_record(job,dossier):
@@ -81,7 +88,7 @@ def bootstrap_row(row):
         stamp=tracker.now();job.update(created_at=stamp,updated_at=stamp)
         identifier=db.execute('INSERT INTO jobs('+','.join(job)+') VALUES('+','.join('?' for _ in job)+')',list(job.values())).lastrowid
         db.execute('INSERT INTO history(job_id,action,happened_at) VALUES(?,?,?)',(identifier,'Downloaded job summary from Google Sheets',stamp))
-        db.execute('INSERT INTO job_meta(job_id,sync_id,follow_up) VALUES(?,?,?)',(identifier,identity,follow_up))
+        db.execute('INSERT INTO job_meta(job_id,sync_id,follow_up,discovery_number) VALUES(?,?,?,?)',(identifier,identity,follow_up,found_number(row) or identifier))
         if payload:
             db.execute('INSERT INTO research_dossiers(job_id,run_id,researched_at,payload) VALUES(?,?,?,?)',(identifier,0,stamp,payload))
     return identifier
@@ -116,13 +123,16 @@ def sync():
             if posting and posting in remote_urls:raise ValueError('Duplicate posting identities in Sheet; resolve duplicate rows first')
             if posting:remote_urls.add(posting)
             bootstrap_row(row)
+        number=found_number(row)
+        if number is not None:
+            with tracker.db() as db:db.execute('UPDATE job_meta SET discovery_number=? WHERE sync_id=?',(number,identity))
     jobs=tracker.list_jobs()
     with tracker.db() as db:
         metas={r['job_id']:dict(r) for r in db.execute('SELECT * FROM job_meta')}
         dossiers={r['job_id']:json.loads(r['payload']) for r in db.execute('SELECT job_id,payload FROM research_dossiers')}
     patches=[];baselines=[];next_row=max(2,len(remote)+1);conflict_count=0
     header=HEADERS+EXTRA
-    if not remote or remote[0]!=header:patches.append({'range':"'Opportunities'!A1:Y1",'values':[header]})
+    if not remote or remote[0]!=header:patches.append({'range':"'Opportunities'!A1:Z1",'values':[header]})
     projection=monitor_snapshot(tracker.ROOT)
     monitor={int(r[0]):r for r in projection['Opportunities'][1:]}
     for job in jobs:
@@ -159,7 +169,8 @@ def sync():
                 if field=='follow_up':meta['follow_up']=chosen
                 else:job[field]=chosen
         row=list(monitor[job['id']])
-        row[4]=job['stage'];row+=[job['notes'],job['priority'],meta['follow_up'],identity,cloud_record(job,dossiers.get(job['id'])),job['outreach_stage']]
+        row[0]=meta['discovery_number']
+        row[4]=job['stage'];row+=[job['notes'],job['priority'],meta['follow_up'],identity,cloud_record(job,dossiers.get(job['id'])),job['outreach_stage'],meta['discovery_number']]
         # Write only changed cells. Conflicted editable cells are never overwritten.
         for col,value in enumerate(row):
             field=next((key for key,index in FIELDS.items() if index==col),None)
@@ -173,7 +184,7 @@ def sync():
     status=projection['Status'];status[2]=['Sync connection','Lorca two-way sync · notes, priority, stage, follow-up date']
     patches.append({'range':f"'Status'!A1:B{len(status)}",'values':status})
     requests=[]
-    for name,rows,cols in [('Opportunities',next_row+1,25),('Status',len(status)+1,2)]:
+    for name,rows,cols in [('Opportunities',next_row+1,26),('Status',len(status)+1,2)]:
         properties=tabs[name];grid=properties.get('gridProperties',{})
         if grid.get('rowCount',0)<rows or grid.get('columnCount',0)<cols:
             requests.append({'updateSheetProperties':{'properties':{'sheetId':properties['sheetId'],'gridProperties':{'rowCount':max(rows,grid.get('rowCount',0)),'columnCount':max(cols,grid.get('columnCount',0))}},'fields':'gridProperties'}})
@@ -187,12 +198,12 @@ def sync():
     # stay attached to their job. New records must not sit below the old filter.
     properties=tabs['Opportunities'];end_row=next_row-1
     current_ids=[int(row[0]) for row in remote[1:] if row and str(row[0]).isdigit()]
-    desired_ids=sorted((job['id'] for job in jobs),reverse=True)
+    desired_ids=sorted((meta['discovery_number'] for meta in metas.values()),reverse=True)
     layout=[]
     if current_ids!=desired_ids:
-        layout.append({'sortRange':{'range':{'sheetId':properties['sheetId'],'startRowIndex':1,'endRowIndex':end_row,'startColumnIndex':0,'endColumnIndex':max(25,properties.get('gridProperties',{}).get('columnCount',25))},'sortSpecs':[{'dimensionIndex':0,'sortOrder':'DESCENDING'}]}})
+        layout.append({'sortRange':{'range':{'sheetId':properties['sheetId'],'startRowIndex':1,'endRowIndex':end_row,'startColumnIndex':0,'endColumnIndex':max(26,properties.get('gridProperties',{}).get('columnCount',26))},'sortSpecs':[{'dimensionIndex':0,'sortOrder':'DESCENDING'}]}})
     old_filter=next((sheet.get('basicFilter',{}) for sheet in metadata['sheets'] if sheet['properties']['title']=='Opportunities'),{})
-    filter_range={'sheetId':properties['sheetId'],'startRowIndex':0,'endRowIndex':end_row,'startColumnIndex':0,'endColumnIndex':25}
+    filter_range={'sheetId':properties['sheetId'],'startRowIndex':0,'endRowIndex':end_row,'startColumnIndex':0,'endColumnIndex':26}
     if old_filter.get('range')!=filter_range:
         layout.append({'setBasicFilter':{'filter':{**old_filter,'range':filter_range}}})
     if layout:api(':batchUpdate',{'requests':layout})
