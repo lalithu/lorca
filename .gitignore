@@ -14,3 +14,9 @@
 /jobapps/profile/
 /jobapps/*token*.json
 /jobapps/oauth_client*.json
+
+# Accidental exports of Google client credentials or local API settings
+client_secret*.json
+/jobapps/*credentials*.json
+/jobapps/.env
+/jobapps/.env.*

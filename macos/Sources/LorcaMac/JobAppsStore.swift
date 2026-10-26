@@ -23,8 +23,8 @@ struct JobRecord: Codable, Identifiable, Equatable {
     let email_subject: String
     let email_draft: String
 }
-struct JobDossier: Decodable { let job_id: Int; let researched_at: String; let payload: AgentJSON }
-struct JobRun: Decodable {
+struct JobDossier: Decodable, Equatable { let job_id: Int; let researched_at: String; let payload: AgentJSON }
+struct JobRun: Decodable, Equatable {
     let status: String
     let message: String
     let model: String
@@ -33,7 +33,13 @@ struct JobRun: Decodable {
     let failures: Int
     var active: Bool { ["starting", "running", "stopping"].contains(status) }
 }
-struct JobGoogleState: Decodable {
+struct JobSettingsConflict: Decodable, Identifiable, Equatable {
+    let field: String
+    let local_value: String
+    let remote_value: String
+    var id: String { field }
+}
+struct JobGoogleState: Decodable, Equatable {
     let message: String
     let busy: Bool
     let connected: Bool
@@ -43,8 +49,10 @@ struct JobGoogleState: Decodable {
     let initial_template: String
     let followup_template: String
     let resume_name: String
+    let settings_conflicts: [JobSettingsConflict]?
+    let templates_version: String?
 }
-struct JobMailRecord: Decodable, Identifiable {
+struct JobMailRecord: Decodable, Identifiable, Equatable {
     let id: String
     let job_id: Int
     let kind: String
@@ -55,9 +63,9 @@ struct JobMailRecord: Decodable, Identifiable {
     let sent_at: String?
     let error: String?
 }
-struct JobMailSnapshot: Decodable {
-    struct Meta: Decodable { let job_id: Int; let follow_up: String }
-    struct Conflict: Decodable, Identifiable {
+struct JobMailSnapshot: Decodable, Equatable {
+    struct Meta: Decodable, Equatable { let job_id: Int; let follow_up: String }
+    struct Conflict: Decodable, Identifiable, Equatable {
         let job_id: Int; let field: String; let local_value: String; let remote_value: String
         var id: String { "\(job_id)-\(field)" }
     }
@@ -65,8 +73,8 @@ struct JobMailSnapshot: Decodable {
     let meta: [Meta]
     let conflicts: [Conflict]
 }
-struct JobSnapshot: Decodable {
-    struct Preferences: Decodable { let text: String; let version: String }
+struct JobSnapshot: Decodable, Equatable {
+    struct Preferences: Decodable, Equatable { let text: String; let version: String }
     let jobs: [JobRecord]
     let dossiers: [JobDossier]
     let run: JobRun?
@@ -79,9 +87,14 @@ struct JobSnapshot: Decodable {
     let mail: JobMailSnapshot?
 }
 
+protocol JobAppsTransport: Sendable {
+    func request(_ payload: Data) async throws -> Data
+    func close() async
+}
+
 // The existing Python tracker is a small stdio companion, never a web dashboard.
 // Blocking pipe I/O stays off the main actor. All requests are serialized here.
-private actor JobAppsBridge {
+private actor JobAppsBridge: JobAppsTransport {
     private var child: Process?
     private var input: FileHandle?
     private var output: FileHandle?
@@ -122,9 +135,12 @@ final class JobAppsStore: ObservableObject {
     @Published var error: String?
     @Published var selected: Int?
     @Published private(set) var history: [String] = []
-    private let bridge = JobAppsBridge()
+    private let bridge: any JobAppsTransport
     private var poll: Task<Void, Never>?
     private var pendingRequests = 0
+    private var pendingActions = 0
+    private var errorOperation: String?
+    init(bridge: any JobAppsTransport = JobAppsBridge()) { self.bridge = bridge }
     var running: Bool { snapshot?.run?.active == true }
     var selectedJob: JobRecord? { snapshot?.jobs.first { $0.id == selected } }
     func observe() {
@@ -132,15 +148,25 @@ final class JobAppsStore: ObservableObject {
         poll = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                if !self.busy { await self.perform(["op": "snapshot"]) }
+                if self.pendingRequests == 0 { await self.perform(["op": "snapshot"]) }
                 try? await Task.sleep(for: .seconds(3))
             }
         }
     }
     @discardableResult func perform(_ fields: [String: Any]) async -> Bool {
-        // The bridge serializes requests; never silently drop a click during polling.
-        pendingRequests += 1; busy = true
-        defer { pendingRequests -= 1; busy = pendingRequests > 0 }
+        // Reads are silent. User actions still queue behind a poll and retain
+        // their busy state until every pending action has finished.
+        let operation = fields["op"] as? String ?? ""
+        let action = !["snapshot", "detail"].contains(operation)
+        pendingRequests += 1
+        if action { pendingActions += 1; if !busy { busy = true } }
+        defer {
+            pendingRequests -= 1
+            if action {
+                pendingActions -= 1
+                if busy != (pendingActions > 0) { busy = pendingActions > 0 }
+            }
+        }
         do {
             let data = try JSONSerialization.data(withJSONObject: fields)
             let response = try await bridge.request(data)
@@ -149,24 +175,30 @@ final class JobAppsStore: ObservableObject {
             let result = try JSONSerialization.data(withJSONObject: value["result"] ?? [:])
             if fields["op"] as? String == "detail" {
                 let detail = value["result"] as? [String: Any]
-                history = (detail?["history"] as? [[String: Any]] ?? []).map { "\($0["happened_at"] ?? "") · \($0["action"] ?? "")" }
+                let history = (detail?["history"] as? [[String: Any]] ?? []).map { "\($0["happened_at"] ?? "") · \($0["action"] ?? "")" }
+                if self.history != history { self.history = history }
             } else if let snapshot = try? JSONDecoder().decode(JobSnapshot.self, from: result) {
-                self.snapshot = snapshot
+                if self.snapshot != snapshot { self.snapshot = snapshot }
                 if selected == nil { selected = snapshot.jobs.first?.id }
             }
-            error = nil; return true
-        } catch { self.error = friendlyError(error); return false }
+            if error != nil, errorOperation == operation { dismissError() }
+            return true
+        } catch {
+            let message = friendlyError(error)
+            if action || self.error == nil || errorOperation == operation {
+                if self.error != message { self.error = message }
+                errorOperation = operation
+            }
+            return false
+        }
+    }
+    func dismissError() {
+        if error != nil { error = nil }
+        errorOperation = nil
     }
     func start(model: String) { Task { await perform(["op":"start", "model":model]) } }
     func pause() { Task { await perform(["op":"pause"]) } }
     func update(_ job: JobRecord, field: String, value: String) { Task { await perform(["op":"update", "id":job.id, "field":field, "value":value]) } }
-    func importTracker() {
-        let panel = NSOpenPanel(); panel.canChooseFiles = false; panel.canChooseDirectories = true
-        panel.message = "Choose the existing m2max-job-pipeline folder. The original tracker stays intact."
-        panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        Task { await perform(["op":"import", "path":url.path]) }
-    }
     func connectGoogle() {
         let legacy = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/lalith-job-search/google_token.json")
         var path = ""

@@ -5,6 +5,7 @@ struct JobGoogleSettings: View {
     @State private var sheet = ""
     @State private var initial = ""
     @State private var followup = ""
+    @State private var version = ""
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 13) {
@@ -22,7 +23,8 @@ struct JobGoogleSettings: View {
                     Button("Save connection & templates") { save() }
                     Button(store.snapshot?.integrations?.enabled == true ? "Sync now" : "Enable Sheets sync") {
                         Task {
-                            if await store.perform(["op":"google_settings","sheet_url":sheet,"initial_template":initial,"followup_template":followup]) {
+                            if await store.perform(["op":"google_settings","sheet_url":sheet,"initial_template":initial,"followup_template":followup,"templatesVersion":version]) {
+                                version = store.snapshot?.integrations?.templates_version ?? ""
                                 await store.perform(["op":"google_enable"])
                             }
                         }
@@ -35,6 +37,30 @@ struct JobGoogleSettings: View {
                     Spacer();Button("Select PDF…") { store.chooseResume() }
                 }
                 Text(store.snapshot?.integrations?.resume_name.isEmpty == false ? store.snapshot!.integrations!.resume_name : "No PDF selected. Initial Gmail drafts require your approved PDF.").font(.caption).foregroundStyle(.secondary)
+                Text("The PDF and Google credentials stay on this Mac. Profile, preferences, and both templates sync through the same Sheet.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let conflicts = store.snapshot?.integrations?.settings_conflicts, !conflicts.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Shared settings need review").font(.headline).foregroundStyle(.orange)
+                        ForEach(conflicts) { conflict in
+                            DisclosureGroup(conflict.field.replacingOccurrences(of: "_", with: " ").capitalized) {
+                                ScrollView {
+                                    Text("This Mac:\n\(conflict.local_value)\n\nSheet:\n\(conflict.remote_value)")
+                                        .font(.caption).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                                }.frame(height: 130)
+                                HStack {
+                                    ForEach(["local", "sheet"], id: \.self) { choice in
+                                        Button(choice == "local" ? "Keep this Mac" : "Use Sheet") {
+                                            Task { await store.perform(["op": "settings_conflict", "field": conflict.field, "choice": choice]) }
+                                        }
+                                    }
+                                }.controlSize(.small).disabled(store.busy || store.running || store.snapshot?.integrations?.busy == true)
+                            }
+                        }
+                        Text("Resolve each difference, then sync again. Neither version is overwritten automatically.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
                 Text("Initial outreach template").font(.headline)
                 TextEditor(text: $initial).font(.system(size: 12)).frame(height: 130).border(.secondary.opacity(0.2))
                 Text("Follow-up template").font(.headline)
@@ -42,12 +68,18 @@ struct JobGoogleSettings: View {
                 Text("Start each template with Subject: on its own line. Placeholders: {{first_name}}, {{contact_name}}, {{company}}, {{role}}, {{job_url}}, {{job_specific}}, {{your_name}}. Leave blank to configure later.")
                     .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                 Button("Save templates") { save() }.buttonStyle(.borderedProminent)
-                if let error = store.error { Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled) }
+                JobAppsErrorView(store: store)
             }.padding(.trailing, 6)
         }.frame(height: 500)
-        .onAppear { sheet = store.snapshot?.integrations?.sheet_url ?? ""; initial = store.snapshot?.integrations?.initial_template ?? ""; followup = store.snapshot?.integrations?.followup_template ?? "" }
+        .onAppear { sheet = store.snapshot?.integrations?.sheet_url ?? ""; initial = store.snapshot?.integrations?.initial_template ?? ""; followup = store.snapshot?.integrations?.followup_template ?? ""; version = store.snapshot?.integrations?.templates_version ?? "" }
     }
-    private func save() { Task { await store.perform(["op":"google_settings","sheet_url":sheet,"initial_template":initial,"followup_template":followup]) } }
+    private func save() {
+        Task {
+            if await store.perform(["op":"google_settings","sheet_url":sheet,"initial_template":initial,"followup_template":followup,"templatesVersion":version]) {
+                version = store.snapshot?.integrations?.templates_version ?? ""
+            }
+        }
+    }
 }
 
 struct JobEmailDetail: View {

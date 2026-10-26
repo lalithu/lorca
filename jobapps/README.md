@@ -7,9 +7,9 @@ runtime, application automation, or email sending is involved.
 ## Setup
 
 Build with `./macos/build.sh`, quit older Lorca instances, and open the rebuilt app.
-Import the existing `m2max-job-pipeline` folder once on this Mac. SQLite backup copies
-records/history, profile, packets and research evidence; the original stays intact.
-Runtime data lives in `~/Library/Application Support/lorca/job-apps`, outside Git.
+Existing records load automatically from `~/Library/Application Support/lorca/job-apps`,
+outside Git. On another Mac, connect Google and sync the same Sheet to download saved
+job records and shared profile/templates. Google sign-in and the approved PDF remain local.
 Review the factual candidate profile and editable research preferences in Settings.
 Start pins Lorca's selected local model for the shift. Research continues across tab
 changes; Pause it before chatting or switching models. Quit stops research.
@@ -27,9 +27,17 @@ every minute and writes changed job cells only; the Status timestamp refreshes t
 Notes, priority, stage and ISO follow-up dates are editable on either side. Conflicts
 retain both values for review in Lorca. Evidence and Gmail status come from Lorca.
 Stable IDs and job/evidence summaries let a fresh local tracker download Sheet jobs;
-full browser logs, candidate profile, templates, resume and Gmail thread links are
-local. Sheets provides no atomic compare-and-swap: a second read checks for changes
+full browser logs, the approved resume PDF, credentials and Gmail thread links stay local. Sheets provides no atomic compare-and-swap: a second read checks for changes
 before writes, but simultaneous writers are not supported. Run one active Mac.
+
+The **Lorca Settings** tab syncs the candidate profile, search preferences, initial
+email template, and follow-up template. Sync first on the Mac with the completed
+profile/templates, then sync the other Mac. Default placeholders do not overwrite
+saved settings. Different edits are retained for review in **Google & templates**;
+choose Keep this Mac or Use Sheet, then sync again. Incoming profile changes wait
+until research is paused. This tab contains your personal profile, so use the same
+private Sheet on both Macs. Google tokens, OAuth clients, API keys, PDF files,
+connection/enable state, and local paths are never included in settings sync.
 
 Templates may be left blank until later. Start each with `Subject: ...`, then the
 body. Supported placeholders: `{{first_name}}`, `{{contact_name}}`, `{{company}}`,
@@ -70,5 +78,5 @@ cargo clippy --all-targets -- -D warnings
 
 Tests cover source validation, research transport/lifecycle, template preservation,
 PDF approval, duplicate-draft prevention, provider-confirmed send/reply tracking,
-field conflicts, Sheet round trips and record bootstrap. Native SwiftUI acceptance
+field conflicts, Sheet round trips, shared settings/credential exclusion, and record bootstrap. Native SwiftUI acceptance
 and live Google draft/Sheets checks were also run on the development Mac.

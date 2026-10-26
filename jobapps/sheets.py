@@ -55,8 +55,8 @@ def found_number(row):
 
 
 def cloud_record(job,dossier,number):
-    # Only job facts and summary evidence travel through Sheets, never candidate
-    # profile, resume, token files, raw browsing logs, or local filesystem paths.
+    # This job record carries facts/evidence only. Profile/templates use the
+    # dedicated settings tab; credentials, PDFs and local paths are excluded.
     fields={k:v for k,v in job.items() if k in tracker.EDITABLE and k not in ('resume_file','cover_letter_file','application_approved','outreach_approved')}
     value={'job':fields,'dossier':dossier,'discovery_number':number,'created_at':job.get('created_at','')}
     text=json.dumps(value,ensure_ascii=False)

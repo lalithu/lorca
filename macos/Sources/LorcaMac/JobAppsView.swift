@@ -68,7 +68,7 @@ struct JobAppsView: View {
                     } }.frame(maxHeight: 150)
                 }.font(.caption).foregroundStyle(.orange)
             }
-            if let error = store.error { Text(error).font(.caption).foregroundStyle(.orange).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) }
+            JobAppsErrorView(store: store)
             HStack {
                 TextField("Search companies, roles, locations", text: $query).textFieldStyle(.roundedBorder)
                 Picker("Show", selection: $filter) { ForEach(["All", "Verified", "Needs review", "With contact", "Follow-up due"], id: \.self) { Text($0) } }.frame(width: 165)
@@ -78,9 +78,8 @@ struct JobAppsView: View {
                 VStack(spacing: 13) {
                     Image(systemName: "briefcase").font(.system(size: 30)).foregroundStyle(.secondary)
                     Text("Your next opportunity starts here").font(.headline)
-                    Text("Import your saved tracker or add your candidate profile in Settings, then start research.")
+                    Text("Add your candidate profile in Settings, then start research.")
                         .font(.system(size: 12)).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 340)
-                    Button("Import existing tracker") { store.importTracker() }.disabled(store.busy)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 HSplitView {
@@ -106,7 +105,9 @@ struct JobAppsView: View {
                    let url = URL(string: value), url.scheme == "https", url.host == "docs.google.com" {
                     Link("Open Google Sheet ↗", destination: url).font(.system(size: 10))
                 }
-                if store.busy { ProgressView().controlSize(.mini) }
+                ZStack {
+                    if store.busy { ProgressView().controlSize(.mini) }
+                }.frame(width: 12, height: 12)
             }
         }
         .padding(.horizontal, 28).padding(.bottom, 22)
@@ -191,13 +192,12 @@ private struct JobAppsSettings: View {
             TextEditor(text: $preferences).font(.system(size: 12)).frame(height: 150).border(.secondary.opacity(0.2))
             Text("Candidate profile · Facts only").font(.headline)
             TextEditor(text: $profile).font(.system(size: 12)).frame(height: 170).border(.secondary.opacity(0.2))
-            Text("Changes apply to the next research session. Pause research before saving.").font(.caption).foregroundStyle(.secondary)
-            if let error = store.error { Text(error).font(.caption).foregroundStyle(.orange) }
+            Text("Profile and preferences sync through your Google Sheet. Pause research before saving.").font(.caption).foregroundStyle(.secondary)
+            JobAppsErrorView(store: store)
             HStack {
-                Button("Import existing tracker") { store.importTracker() }.disabled(store.snapshot?.jobs.isEmpty == false || store.busy)
                 Spacer();Button("Cancel") { dismiss() }
                 Button("Save") { Task { if await store.perform(["op":"settings","preferences":preferences,"profile":profile,"version":version]) { dismiss() } } }
-                    .buttonStyle(.borderedProminent).disabled(store.busy || store.running)
+                    .buttonStyle(.borderedProminent).disabled(store.busy || store.running || store.snapshot?.integrations?.busy == true)
             }
             }
         }.padding(24).frame(width: 620)

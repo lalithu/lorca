@@ -9,6 +9,7 @@ import google_connections as google
 import jobtracker as tracker
 import outreach
 import sheets
+import shared_settings
 
 _stop=threading.Event()
 _busy=threading.Lock()
@@ -24,7 +25,7 @@ def status():
     config=google.config()
     return {**_state,'connected':google.TOKEN.exists(),'enabled':config.get('enabled',False),'sheet_url':config.get('sheet_url',''),
             'account':config.get('account',''),'initial_template':config.get('initial_template',''),'followup_template':config.get('followup_template',''),
-            'resume_name':config.get('resume_name','')}
+            'resume_name':config.get('resume_name',''),'settings_conflicts':shared_settings.conflicts(),'templates_version':shared_settings.templates_version()}
 
 
 def run(operation):
@@ -45,14 +46,17 @@ def connect(client_path=''):
 
 def save(values):
     if _busy.locked():raise ValueError('Wait for the Google operation to finish before editing settings')
-    config=google.config()
-    for key in ('initial_template','followup_template','sheet_url'):
-        if key in values:
-            value=values[key]
-            if not isinstance(value,str) or len(value)>20000:raise ValueError('Invalid '+key)
-            config[key]=value
-    if config.get('sheet_url'):google.sheet_id(config['sheet_url'])
-    google.save_config(config)
+    with shared_settings.LOCK:
+        if 'templatesVersion' in values and values['templatesVersion']!=shared_settings.templates_version():
+            raise ValueError('Templates changed. Reopen settings before saving your edits.')
+        config=google.config()
+        for key in ('initial_template','followup_template','sheet_url'):
+            if key in values:
+                value=values[key]
+                if not isinstance(value,str) or len(value)>20000:raise ValueError('Invalid '+key)
+                config[key]=value
+        if config.get('sheet_url'):google.sheet_id(config['sheet_url'])
+        google.save_config(config)
 
 
 def enable():
@@ -68,11 +72,16 @@ def enable():
 
 
 def sync():
+    import research
+    run=research.status()['run']
+    settings=shared_settings.sync(research_active=bool(run and run['status'] in ('starting','running','stopping')))
+    settings_note=(f" · {settings['conflicts']} profile/template conflicts: review Google & templates" if settings['conflicts'] else '')
+    if settings['deferred']:settings_note+=' · Pause research to receive shared profile changes'
     gmail_error=''
     try:outreach.reconcile()
     except Exception as exc:gmail_error=' · Gmail needs attention: '+str(exc)[:250]
     result=sheets.sync()
-    _state.update(message=f"Synced {result['jobs']} jobs · {result['conflicts']} conflicts"+gmail_error,last_sync=tracker.now())
+    _state.update(message=f"Synced {result['jobs']} jobs · {result['conflicts']} conflicts"+settings_note+gmail_error,last_sync=tracker.now())
 
 
 def auto_drafts():

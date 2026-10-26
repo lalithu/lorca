@@ -1,4 +1,4 @@
-"""Isolated stdio integration, migration and Lorca session transport tests."""
+"""Isolated stdio integration, saved-data and Lorca session transport tests."""
 import json
 import os
 from pathlib import Path
@@ -11,24 +11,22 @@ from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 
 class ServiceTests(unittest.TestCase):
-    def test_migration_history_preferences_and_idempotence(self):
+    def test_existing_records_history_and_settings_work_without_import(self):
         with tempfile.TemporaryDirectory() as tmp:
-            base=Path(tmp);source=base/'source';source.mkdir();(source/'profile').mkdir()
-            (source/'profile/master_resume.md').write_text('Real reviewed profile with Python and SQL.')
-            (source/'profile/preferences.md').write_text('# Search preferences\nNew York junior engineering roles')
-            env=dict(os.environ,LORCA_JOBS_ROOT=str(source),JOB_PIPELINE_DB=str(source/'pipeline.sqlite3'))
+            root=Path(tmp)/'tracker';root.mkdir()
+            env=dict(os.environ,LORCA_JOBS_ROOT=str(root),JOB_PIPELINE_DB=str(root/'pipeline.sqlite3'))
             seed="import jobtracker as j;import research as r;j.init_db();r.init_research();j.create_job({'company':'Acme','title':'Engineer','job_url':'https://acme.test/job'});j.update_job(1,{'notes':'Keep this history'})"
             subprocess.run([sys.executable,'-B','-c',seed],env=env,cwd=Path(__file__).parents[1],check=True)
-            root=base/'target';env.update(LORCA_JOBS_ROOT=str(root),JOB_PIPELINE_DB=str(root/'pipeline.sqlite3'))
             child=subprocess.Popen([sys.executable,'-B',str(Path(__file__).parents[1]/'service.py')],env=env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
             def call(v):child.stdin.write(json.dumps(v)+'\n');child.stdin.flush();return json.loads(child.stdout.readline())
             try:
-                self.assertEqual(call({'op':'snapshot'})['result']['jobs'],[])
-                imported=call({'op':'import','path':str(source)})
-                self.assertTrue(imported['ok'],imported)
-                self.assertEqual(imported['result']['jobs'][0]['notes'],'Keep this history')
+                state=call({'op':'snapshot'})['result']
+                self.assertEqual(state['jobs'][0]['notes'],'Keep this history')
                 self.assertEqual(len(call({'op':'detail','id':1})['result']['history']),2)
-                self.assertFalse(call({'op':'import','path':str(source)})['ok'])
+                rejected=call({'op':'import','path':str(root)})
+                self.assertFalse(rejected['ok'])
+                self.assertEqual(rejected['error'],'Unknown Job Apps operation')
+                self.assertEqual(call({'op':'start','model':'test-model'})['error'],'Add your candidate profile in Settings first')
                 state=call({'op':'snapshot'})['result']
                 self.assertFalse(call({'op':'settings','version':'stale','preferences':'valid preferences for testing','profile':'Real factual candidate profile'})['ok'])
                 self.assertTrue(call({'op':'settings','version':state['preferences']['version'],'preferences':'Updated search preferences for testing','profile':'Real factual candidate profile'})['ok'])
@@ -36,7 +34,9 @@ class ServiceTests(unittest.TestCase):
                 self.assertFalse(call({'op':'update','id':1,'field':'email_send','value':'yes'})['ok'])
                 self.assertTrue(call({'op':'quit'})['ok'])
                 child.wait(timeout=10)
-                with sqlite3.connect(source/'pipeline.sqlite3') as db:self.assertEqual(db.execute('select stage from jobs').fetchone()[0],'Discovered')
+                with sqlite3.connect(root/'pipeline.sqlite3') as db:
+                    self.assertEqual(db.execute('select stage,notes from jobs').fetchone(),('Applied','Keep this history'))
+                self.assertFalse((root/'import.sqlite3').exists())
             finally:
                 if child.poll() is None:child.terminate();child.wait()
                 child.stdin.close();child.stdout.close()
