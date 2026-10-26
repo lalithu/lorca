@@ -197,4 +197,4 @@ def snapshot():
 def numbered_jobs():
     ensure_ids()
     with tracker.db() as db:numbers={r[0]:r[1] for r in db.execute('SELECT job_id,discovery_number FROM job_meta')}
-    return [{**job,'number':numbers[job['id']]} for job in tracker.list_jobs()]
+    return sorted(({**job,'number':numbers[job['id']]} for job in tracker.list_jobs()),key=lambda job:job['number'],reverse=True)

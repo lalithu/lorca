@@ -122,7 +122,11 @@ class GoogleTests(unittest.TestCase):
                     state['layout'].append(request)
                     if 'sortRange' in request:state['rows'][1:]=sorted(state['rows'][1:],key=lambda row:int(row[0]),reverse=True)
                 return {}
-            if '/values/' in path:return {'values':copy.deepcopy(state['rows'])}
+            if '/values/' in path:
+                requested=urllib.parse.unquote(path.split('/values/',1)[1])
+                match=re.search(r'!A:([A-Z])$',requested)
+                end=ord(match[1])-ord('A')+1 if match else 26
+                return {'values':[row[:end] for row in copy.deepcopy(state['rows'])]}
             if path.endswith('/values:batchUpdate'):
                 state['writes']+=1
                 for change in body['data']:
@@ -186,6 +190,49 @@ class GoogleTests(unittest.TestCase):
             sheets.sync()
             self.assertEqual(state['rows'][1][0],50)
             self.assertEqual(next(j['number'] for j in outreach.numbered_jobs() if j['id']==third['id']),50)
+
+    def test_backup_column_is_read_when_visible_number_was_overwritten(self):
+        import uuid
+        self.configure();state,api=self.fake_sheet()
+        row=['']*26;row[0]=2;row[4]='Ready for review';row[20]='High'
+        row[22]=str(uuid.uuid4());row[25]=49
+        row[23]=json.dumps({'job':{'company':'Latest','title':'Engineer','job_url':'https://latest.test/job'}})
+        identifier=sheets.bootstrap_row(row)
+        with tracker.db() as db:db.execute('UPDATE job_meta SET discovery_number=2 WHERE job_id=?',(identifier,))
+        state['rows'].append(row)
+        with patch.object(google,'api',side_effect=api):sheets.sync()
+        self.assertEqual(next(j['number'] for j in outreach.numbered_jobs() if j['id']==identifier),49)
+        self.assertEqual(state['rows'][1][0],49)
+        self.assertEqual(state['rows'][1][25],49)
+
+    def test_49_reversed_imports_recover_original_numbers_and_stay_newest_first(self):
+        import uuid
+        self.configure();state,api=self.fake_sheet()
+        with tracker.db() as db:existing=db.execute('SELECT sync_id FROM job_meta WHERE job_id=?',(self.job['id'],)).fetchone()[0]
+        for index,number in enumerate(range(49,0,-1)):
+            row=['']*26;row[0]=index+1;row[25]=index+1
+            row[4]='Ready for review';row[19]='Phone note '+str(number);row[20]='High'
+            row[22]=existing if index==0 else str(uuid.uuid4())
+            job={k:self.job[k] for k in ('company','title','job_url')} if index==0 else {'company':'Company '+str(number),'title':'Engineer','job_url':'https://company.test/job/'+str(number)}
+            row[23]=json.dumps({'job':job,'discovery_number':number,'created_at':'2026-10-01T12:00:00+00:00','dossier':{'researched_at':'2026-10-01T12:00:00+00:00'}})
+            sheets.bootstrap_row(row);state['rows'].append(row)
+        with tracker.db() as db:db.execute('UPDATE job_meta SET discovery_number=job_id')
+        with patch.object(google,'api',side_effect=api):
+            sheets.sync();sheets.sync()
+            jobs=outreach.numbered_jobs()
+            self.assertEqual([j['number'] for j in jobs],list(range(49,0,-1)))
+            self.assertEqual([j['id'] for j in jobs],list(range(1,50)))
+            self.assertEqual([r[0] for r in state['rows'][1:]],list(range(49,0,-1)))
+            self.assertEqual([r[25] for r in state['rows'][1:]],list(range(49,0,-1)))
+            self.assertEqual(len({r[22] for r in state['rows'][1:]}),49)
+            self.assertEqual(tracker.get_job(49)['notes'],'Phone note 1')
+            self.assertEqual(tracker.get_job(49)['created_at'],'2026-10-01T12:00:00+00:00')
+            self.assertEqual(json.loads(state['rows'][1][23])['discovery_number'],49)
+            latest=tracker.create_job({'company':'Newest','title':'Engineer'})
+            sheets.sync()
+            self.assertEqual(outreach.numbered_jobs()[0]['number'],50)
+            self.assertEqual(outreach.numbered_jobs()[0]['id'],latest['id'])
+            self.assertEqual(state['rows'][1][1],'Newest')
 
     def test_sheet_changes_during_read_are_not_overwritten(self):
         self.configure();state,api=self.fake_sheet();reads=0

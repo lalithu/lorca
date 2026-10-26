@@ -3,7 +3,7 @@ import json
 import re
 import urllib.parse
 import uuid
-from datetime import date
+from datetime import date,datetime
 import google_connections as google
 import jobtracker as tracker
 import outreach
@@ -44,17 +44,21 @@ def resolve(job_id,field,choice):
 
 
 def found_number(row):
-    # Column Z survives older clients that rewrite the A:Y monitor range.
-    value=row[25] if len(row)>25 and row[25] else (row[0] if row else '')
-    if str(value).isdigit() and int(value)>0:return int(value)
+    # Record metadata is portable identity data, independent of row position or
+    # a Mac's SQLite IDs. Retain Z/A fallback for older Sheet records.
+    try:record=json.loads(row[23]) if len(row)>23 and row[23] else {}
+    except (ValueError,TypeError):record={}
+    original=record.get('discovery_number') if isinstance(record,dict) else None
+    for value in (original,row[25] if len(row)>25 else None,row[0] if row else None):
+        if str(value).isdigit() and int(value)>0:return int(value)
     return None
 
 
-def cloud_record(job,dossier):
+def cloud_record(job,dossier,number):
     # Only job facts and summary evidence travel through Sheets, never candidate
     # profile, resume, token files, raw browsing logs, or local filesystem paths.
     fields={k:v for k,v in job.items() if k in tracker.EDITABLE and k not in ('resume_file','cover_letter_file','application_approved','outreach_approved')}
-    value={'job':fields,'dossier':dossier}
+    value={'job':fields,'dossier':dossier,'discovery_number':number,'created_at':job.get('created_at','')}
     text=json.dumps(value,ensure_ascii=False)
     if len(text)>45000:raise ValueError('Job record is too large for a Sheets cell')
     return text
@@ -85,12 +89,16 @@ def bootstrap_row(row):
             identifier=same[0][0]
             db.execute("INSERT INTO job_meta(job_id,sync_id) VALUES(?,?) ON CONFLICT(job_id) DO UPDATE SET sync_id=excluded.sync_id,baseline='{}'",(identifier,identity))
             return identifier
-        stamp=tracker.now();job.update(created_at=stamp,updated_at=stamp)
+        stamp=tracker.now()
+        original_time=data.get('created_at') or (dossier.get('researched_at') if isinstance(dossier,dict) else None)
+        try:original_time=datetime.fromisoformat(original_time).isoformat()
+        except (TypeError,ValueError):original_time=stamp
+        job.update(created_at=original_time,updated_at=stamp)
         identifier=db.execute('INSERT INTO jobs('+','.join(job)+') VALUES('+','.join('?' for _ in job)+')',list(job.values())).lastrowid
         db.execute('INSERT INTO history(job_id,action,happened_at) VALUES(?,?,?)',(identifier,'Downloaded job summary from Google Sheets',stamp))
         db.execute('INSERT INTO job_meta(job_id,sync_id,follow_up,discovery_number) VALUES(?,?,?,?)',(identifier,identity,follow_up,found_number(row) or identifier))
         if payload:
-            db.execute('INSERT INTO research_dossiers(job_id,run_id,researched_at,payload) VALUES(?,?,?,?)',(identifier,0,stamp,payload))
+            db.execute('INSERT INTO research_dossiers(job_id,run_id,researched_at,payload) VALUES(?,?,?,?)',(identifier,0,dossier.get('researched_at') or original_time,payload))
     return identifier
 
 
@@ -106,7 +114,7 @@ def sync():
         api(':batchUpdate',{'requests':[{'addSheet':{'properties':{'title':name}}} for name in missing]})
         metadata=api('?fields=sheets(properties(sheetId,title,gridProperties),basicFilter)')
         tabs={s['properties']['title']:s['properties'] for s in metadata['sheets']}
-    remote=api('/values/'+urllib.parse.quote("'Opportunities'!A:Y",safe='')).get('values',[])
+    remote=api('/values/'+urllib.parse.quote("'Opportunities'!A:Z",safe='')).get('values',[])
     by_uuid={};legacy={}
     for number,row in enumerate(remote[1:],2):
         if len(row)>22 and row[22]:
@@ -170,7 +178,7 @@ def sync():
                 else:job[field]=chosen
         row=list(monitor[job['id']])
         row[0]=meta['discovery_number']
-        row[4]=job['stage'];row+=[job['notes'],job['priority'],meta['follow_up'],identity,cloud_record(job,dossiers.get(job['id'])),job['outreach_stage'],meta['discovery_number']]
+        row[4]=job['stage'];row+=[job['notes'],job['priority'],meta['follow_up'],identity,cloud_record(job,dossiers.get(job['id']),meta['discovery_number']),job['outreach_stage'],meta['discovery_number']]
         # Write only changed cells. Conflicted editable cells are never overwritten.
         for col,value in enumerate(row):
             field=next((key for key,index in FIELDS.items() if index==col),None)
@@ -191,7 +199,7 @@ def sync():
     if requests:api(':batchUpdate',{'requests':requests})
     # Sheets has no compare-and-swap. Recheck before writing so a phone edit
     # made during this sync is retried instead of overwritten from an old read.
-    latest=api('/values/'+urllib.parse.quote("'Opportunities'!A:Y",safe='')).get('values',[])
+    latest=api('/values/'+urllib.parse.quote("'Opportunities'!A:Z",safe='')).get('values',[])
     if latest!=remote:raise ValueError('Sheet changed during sync; retrying on the next cycle without overwriting it')
     if patches:api('/values:batchUpdate',{'valueInputOption':'RAW','data':patches})
     # Sort complete rows after cell writes so UUIDs, evidence and phone edits
