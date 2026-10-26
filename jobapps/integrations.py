@@ -10,8 +10,10 @@ import jobtracker as tracker
 import outreach
 import sheets
 import shared_settings
+import shared_resume
 
 _stop=threading.Event()
+_wake=threading.Event()
 _busy=threading.Lock()
 _state={'message':'Google not connected','busy':False,'last_sync':'','account':''}
 
@@ -25,7 +27,9 @@ def status():
     config=google.config()
     return {**_state,'connected':google.TOKEN.exists(),'enabled':config.get('enabled',False),'sheet_url':config.get('sheet_url',''),
             'account':config.get('account',''),'initial_template':config.get('initial_template',''),'followup_template':config.get('followup_template',''),
-            'resume_name':config.get('resume_name',''),'settings_conflicts':shared_settings.conflicts(),'templates_version':shared_settings.templates_version()}
+            'resume_name':config.get('resume_name',''),'resume_sha256':config.get('resume_sha256',''),'latex_source':shared_settings.local_values()['master_latex'],
+            'resume_conflict':shared_resume.state().get('conflict',False),
+            'settings_conflicts':shared_settings.conflicts(),'templates_version':shared_settings.templates_version()}
 
 
 def run(operation):
@@ -73,15 +77,30 @@ def enable():
 
 def sync():
     import research
-    run=research.status()['run']
-    settings=shared_settings.sync(research_active=bool(run and run['status'] in ('starting','running','stopping')))
-    settings_note=(f" · {settings['conflicts']} profile/template conflicts: review Google & templates" if settings['conflicts'] else '')
-    if settings['deferred']:settings_note+=' · Pause research to receive shared profile changes'
-    gmail_error=''
+    def research_active():
+        current=research.status()['run']
+        return bool(current and current['status'] in ('starting','running','stopping'))
+    warnings=[]
+    try:shared_resume.sync()
+    except Exception as exc:warnings.append('Master resume: '+str(exc)[:200])
+    try:
+        settings=shared_settings.sync(research_active=research_active)
+        if settings['conflicts']:warnings.append(f"{settings['conflicts']} profile/template conflicts: review Google settings")
+        if settings['deferred']:warnings.append('Pause research to receive shared profile changes')
+    except Exception as exc:warnings.append('Settings need attention: '+str(exc)[:250])
     try:outreach.reconcile()
-    except Exception as exc:gmail_error=' · Gmail needs attention: '+str(exc)[:250]
-    result=sheets.sync()
-    _state.update(message=f"Synced {result['jobs']} jobs · {result['conflicts']} conflicts"+settings_note+gmail_error,last_sync=tracker.now())
+    except Exception as exc:warnings.append('Gmail needs attention: '+str(exc)[:250])
+    try:result=sheets.sync()
+    except Exception as exc:
+        _state['message']=' · '.join([*warnings,'Jobs need attention: '+str(exc)[:250]])
+        return
+    message=f"Synced {result['jobs']} jobs · {result['conflicts']} conflicts"
+    _state.update(message=' · '.join([message,*warnings]),last_sync=tracker.now())
+
+
+def request_sync():
+    # Reuse the same worker/sync path; coalesce repeated opens and saves.
+    if google.config().get('enabled') and google.TOKEN.exists():_wake.set()
 
 
 def auto_drafts():
@@ -92,19 +111,33 @@ def auto_drafts():
     for identifier in ids:
         try:outreach.prepare(identifier)
         except ValueError:continue  # Missing published contact is normal.
+    with tracker.db() as db:
+        due=[r[0] for r in db.execute("SELECT job_id FROM job_meta WHERE follow_up!='' AND follow_up<=? AND job_id NOT IN (SELECT job_id FROM outreach_messages WHERE kind='followup')",(time.strftime('%Y-%m-%d'),))]
+    for identifier in due:
+        try:outreach.prepare(identifier,'followup')
+        except ValueError:continue
 
 
 def start_background():
     def loop():
-        while not _stop.wait(60):
-            if not _busy.acquire(blocking=False):continue
-            try:
-                auto_drafts()
-                if google.config().get('enabled') and google.TOKEN.exists():
-                    _state['busy']=True;sync()
-            except Exception as exc:_state['message']=str(exc)[:600]
-            finally:_state['busy']=False;_busy.release()
-    threading.Thread(target=loop,daemon=True).start()
+        while not _stop.is_set():
+            _wake.wait(60);_wake.clear()
+            if _stop.is_set():break
+            # A requested sync waits for an in-flight Google operation rather
+            # than getting dropped. All Google work stays serialized.
+            with _busy:
+                if _stop.is_set():break
+                try:
+                    if google.config().get('enabled') and google.TOKEN.exists():
+                        _state['busy']=True;sync()
+                    import research
+                    current=research.status()['run']
+                    if current and current['status'] in ('starting','running'):auto_drafts()
+                except Exception as exc:_state['message']=str(exc)[:600]
+                finally:_state['busy']=False
+    thread=threading.Thread(target=loop,daemon=True);thread.start()
+    return thread
 
 
-def shutdown():_stop.set()
+def shutdown():
+    _stop.set();_wake.set()

@@ -1,4 +1,4 @@
-"""Google connection for Job Apps. Draft creation and linked-thread reads only; never sends."""
+"""Google connection for Job Apps. Sending requires an explicitly approved draft."""
 import base64
 import hashlib
 import json
@@ -57,13 +57,14 @@ def authorize(client_path=''):
         if client_file:client_file.unlink(missing_ok=True)
 
 
-def api(service,path,body=None,method=None):
-    # There is deliberately no send endpoint. API origins are fixed here.
+def api(service,path,body=None,method=None,approved_send=False):
+    # API origins are fixed. Sending is gated separately from ordinary API calls.
     if service=='gmail':
         verb=method or ('POST' if body is not None else 'GET')
-        if verb!='GET' and not (path=='drafts' and verb=='POST' and body is not None):
+        sending=path=='drafts/send' and verb=='POST' and approved_send and isinstance(body,dict) and bool(body.get('id'))
+        if verb!='GET' and not sending and not (path=='drafts' and verb=='POST' and body is not None):
             raise ValueError('Only Gmail draft creation is allowed')
-        if not re.match(r'^(profile|drafts(?:/[\w-]+)?|threads/[\w-]+|messages(?:/[\w-]+)?)(?:\?|$)',path):raise ValueError('Unsupported Gmail operation')
+        if not sending and not re.match(r'^(profile|drafts(?:/[\w-]+)?|threads/[\w-]+|messages(?:/[\w-]+)?)(?:\?|$)',path):raise ValueError('Unsupported Gmail operation')
         url='https://gmail.googleapis.com/gmail/v1/users/me/'+path
     elif service=='sheets':url='https://sheets.googleapis.com/v4/spreadsheets/'+path
     else:raise ValueError('Unsupported Google service')
@@ -79,7 +80,7 @@ def api(service,path,body=None,method=None):
 
 def approved_resume(path):
     source=Path(path).expanduser()
-    data=source.read_bytes()
+    with source.open('rb') as file:data=file.read(15_000_001)
     if not data.startswith(b'%PDF-') or not 1<=len(data)<=15_000_000:raise ValueError('Choose a PDF no larger than 15 MB')
     target=ROOT/'profile/approved-resume.pdf'
     target.parent.mkdir(exist_ok=True)

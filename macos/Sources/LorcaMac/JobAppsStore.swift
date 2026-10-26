@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import Foundation
 import UniformTypeIdentifiers
+import SwiftUI
 
 struct JobRecord: Codable, Identifiable, Equatable {
     let id: Int
@@ -49,6 +50,9 @@ struct JobGoogleState: Decodable, Equatable {
     let initial_template: String
     let followup_template: String
     let resume_name: String
+    let latex_source: String?
+    let resume_sha256: String?
+    let resume_conflict: Bool?
     let settings_conflicts: [JobSettingsConflict]?
     let templates_version: String?
 }
@@ -62,8 +66,10 @@ struct JobMailRecord: Decodable, Identifiable, Equatable {
     let state: String
     let sent_at: String?
     let error: String?
+    let approval_token: String?
 }
 struct JobMailSnapshot: Decodable, Equatable {
+    struct ThreadMessage: Decodable, Identifiable, Equatable { let id: String; let from: String; let body: String; let sent: Bool; let date: String }
     struct Meta: Decodable, Equatable { let job_id: Int; let follow_up: String }
     struct Conflict: Decodable, Identifiable, Equatable {
         let job_id: Int; let field: String; let local_value: String; let remote_value: String
@@ -72,6 +78,15 @@ struct JobMailSnapshot: Decodable, Equatable {
     let messages: [JobMailRecord]
     let meta: [Meta]
     let conflicts: [Conflict]
+    let threads: [String: [ThreadMessage]]?
+}
+struct JobResumeSnapshot: Decodable, Equatable {
+    struct Work: Decodable, Equatable { let busy: Bool; let job_id: Int?; let message: String }
+    struct Record: Decodable, Equatable {
+        let job_id: Int; let source: String; let master_source: String; let version: String
+        let selection: String; let saved_version: String; let submitted_version: String; let pdf_path: String
+    }
+    let work: Work; let records: [Record]; let compiler: Bool
 }
 struct JobSnapshot: Decodable, Equatable {
     struct Preferences: Decodable, Equatable { let text: String; let version: String }
@@ -85,6 +100,7 @@ struct JobSnapshot: Decodable, Equatable {
     let priorities: [String]
     let integrations: JobGoogleState?
     let mail: JobMailSnapshot?
+    let resumes: JobResumeSnapshot?
 }
 
 protocol JobAppsTransport: Sendable {
@@ -130,6 +146,8 @@ private actor JobAppsBridge: JobAppsTransport {
 
 @MainActor
 final class JobAppsStore: ObservableObject {
+    struct EmailEdit { let subject: String; let body: String; let token: String }
+    @Published var emailEdits: [String: EmailEdit] = [:]
     @Published private(set) var snapshot: JobSnapshot?
     @Published private(set) var busy = false
     @Published var error: String?
@@ -143,6 +161,32 @@ final class JobAppsStore: ObservableObject {
     init(bridge: any JobAppsTransport = JobAppsBridge()) { self.bridge = bridge }
     var running: Bool { snapshot?.run?.active == true }
     var selectedJob: JobRecord? { snapshot?.jobs.first { $0.id == selected } }
+    func needsAttention(_ job: JobRecord) -> Bool {
+        !["Archived", "Rejected", "Offer"].contains(job.stage) && actionLabel(job) != "Waiting for reply"
+    }
+    func actionLabel(_ job: JobRecord) -> String {
+        if job.outreach_stage == "Replied" || snapshot?.mail?.messages.contains(where: { $0.job_id == job.id && $0.state == "Needs review" }) == true { return "Reply received" }
+        if let due = snapshot?.mail?.meta.first(where: { $0.job_id == job.id })?.follow_up, !due.isEmpty {
+            let format = DateFormatter();format.dateFormat = "yyyy-MM-dd";format.timeZone = TimeZone(identifier: "America/New_York")
+            if due <= format.string(from: Date()) { return "Follow-up due" }
+        }
+        if job.outreach_stage == "Sent" || snapshot?.mail?.messages.contains(where: { $0.job_id == job.id && $0.state == "Sent" }) == true { return "Waiting for reply" }
+        if snapshot?.mail?.messages.contains(where: { $0.job_id == job.id && ["Creating", "Sending", "Needs reconciliation", "Needs send reconciliation"].contains($0.state) }) == true { return "Check email status" }
+        if snapshot?.mail?.messages.contains(where: { $0.job_id == job.id && $0.state == "Gmail draft" }) == true { return "Review in Gmail" }
+        if !job.recruiter_contact.contains("@") { return job.recruiter_name.isEmpty ? "Add recruiter" : "Add recruiter email" }
+        return "Review & send"
+    }
+    func actionColor(_ job: JobRecord) -> Color {
+        switch actionLabel(job) {
+        case "Add recruiter", "Add recruiter email", "Follow-up due": return .yellow
+        case "Reply received": return .blue
+        default: return .secondary
+        }
+    }
+    func open() async {
+        observe()
+        await perform(["op": "google_auto_sync"])
+    }
     func observe() {
         guard poll == nil else { return }
         poll = Task { [weak self] in
@@ -157,7 +201,7 @@ final class JobAppsStore: ObservableObject {
         // Reads are silent. User actions still queue behind a poll and retain
         // their busy state until every pending action has finished.
         let operation = fields["op"] as? String ?? ""
-        let action = !["snapshot", "detail"].contains(operation)
+        let action = !["snapshot", "detail", "google_auto_sync"].contains(operation)
         pendingRequests += 1
         if action { pendingActions += 1; if !busy { busy = true } }
         defer {
@@ -214,7 +258,31 @@ final class JobAppsStore: ObservableObject {
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.pdf]
         panel.message = "Select the approved PDF to attach to initial outreach drafts."
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        Task { await perform(["op":"resume_pdf","path":url.path]) }
+        importResume([url])
+    }
+    func chooseLatex() {
+        let panel = NSOpenPanel();panel.allowedContentTypes = [.init(filenameExtension: "tex") ?? .plainText]
+        panel.message = "Choose your master LaTeX resume. Source text syncs through your private Sheet."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let data = try Data(contentsOf: url)
+            guard data.count <= 24000, let text = String(data: data, encoding: .utf8) else { throw BackendError(message: "Choose a UTF-8 LaTeX source under 24 KB.") }
+            Task { await perform(["op":"resume_source","source":text]) }
+        } catch { self.error = friendlyError(error) }
+    }
+    @discardableResult func importResume(_ urls: [URL]) -> Bool {
+        guard urls.count == 1, let url = urls.first, url.isFileURL, url.pathExtension.lowercased() == "pdf" else {
+            error = "Choose or drop one PDF resume."; errorOperation = "resume_pdf"; return false
+        }
+        guard !busy, snapshot?.integrations?.busy != true else {
+            error = "Wait for the current operation before replacing your resume."; errorOperation = "resume_pdf"; return false
+        }
+        Task {
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            await perform(["op": "resume_pdf", "path": url.path])
+        }
+        return true
     }
     func shutdown() async {
         guard poll != nil || snapshot != nil || busy else { return }

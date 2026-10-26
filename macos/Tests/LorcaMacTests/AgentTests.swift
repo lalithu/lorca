@@ -196,6 +196,20 @@ final class AgentTests: XCTestCase {
         _ = await store.modelSession.close(unload: false)
         XCTAssertFalse(store.canUnloadModel)
     }
+    func testUnloadCanReleasePausedResearchModelOutsideChatLease() async throws {
+        let backend = AgentMockBackend()
+        let store = ChatStore(backend: backend)
+        await store.refreshConnection()
+        let researchModel = store.selectedModel
+        await store.unloadModel()
+        XCTAssertNil(store.modelSession.activeModel)
+        backend.requests.removeAll()
+        await store.unloadModel(model: researchModel)
+        XCTAssertEqual(backend.requests.compactMap { $0["op"] as? String }, ["release", "snapshot"])
+        XCTAssertEqual(backend.requests.first?["model"] as? String, researchModel)
+        XCTAssertNil(store.modelSession.activeModel)
+        _ = await store.modelSession.close(unload: false)
+    }
     func testDiffClassificationTerminalOutputAndSavedMetadata() throws {
         XCTAssertEqual(AgentDiffLine.parse("--- a\n+++ b\n@@ -1,2 +1,2 @@\n-old\n+new\n context").map(\.kind), [.header, .header, .header, .removal, .addition, .context])
         let data = Data(#"{"id":"output","sequence":4,"taskId":"run","kind":"terminal_output","data":{"callId":"call","output":{"stream":"stderr","text":"actual error\n"}}}"#.utf8)

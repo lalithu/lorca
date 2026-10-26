@@ -83,6 +83,43 @@ final class JobAppsTests: XCTestCase {
         withExtendedLifetime((updates, busy)) { }
     }
 
+    func testOpeningJobAppsRequestsSyncWithoutPollingOrBusyFlicker() async throws {
+        let bridge = JobAppsTestTransport(response: try jobResponse())
+        let store = JobAppsStore(bridge: bridge)
+        var busyStates: [Bool] = []
+        let busy = store.$busy.dropFirst().sink { busyStates.append($0) }
+        await store.open()
+        try await waitUntil { await bridge.count("snapshot") >= 2 }
+        let firstCount = await bridge.count("google_auto_sync")
+        XCTAssertEqual(firstCount, 1)
+        XCTAssertTrue(busyStates.isEmpty)
+        await store.open()
+        let secondCount = await bridge.count("google_auto_sync")
+        XCTAssertEqual(secondCount, 2)
+        XCTAssertTrue(busyStates.isEmpty)
+        await store.shutdown()
+        withExtendedLifetime(busy) { }
+    }
+
+    func testResumeDropAcceptsOneLocalPDFAndPreservesValidationErrors() async throws {
+        let bridge = JobAppsTestTransport(response: try jobResponse())
+        let store = JobAppsStore(bridge: bridge)
+        _ = await store.perform(["op": "snapshot"])
+        let pdf = URL(fileURLWithPath: "/tmp/test-resume.PDF")
+        XCTAssertFalse(store.importResume([URL(fileURLWithPath: "/tmp/resume.txt")]))
+        XCTAssertFalse(store.importResume([pdf, pdf]))
+        XCTAssertFalse(store.importResume([URL(string: "https://example.com/resume.pdf")!]))
+        _ = await store.perform(["op": "snapshot"])
+        XCTAssertEqual(store.error, "Choose or drop one PDF resume.")
+        let invalidCount = await bridge.count("resume_pdf")
+        XCTAssertEqual(invalidCount, 0)
+        XCTAssertTrue(store.importResume([pdf]))
+        try await waitUntil { await bridge.count("resume_pdf") == 1 }
+        try await waitUntil { !store.busy }
+        XCTAssertNil(store.error)
+        await store.shutdown()
+    }
+
     func testChangedSnapshotPublishesOnceWithoutTogglingBusy() async throws {
         let bridge = JobAppsTestTransport(response: try jobResponse())
         let store = JobAppsStore(bridge: bridge)

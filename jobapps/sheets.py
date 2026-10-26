@@ -7,10 +7,23 @@ from datetime import date,datetime
 import google_connections as google
 import jobtracker as tracker
 import outreach
+import resumes
 from monitor_data import snapshot as monitor_snapshot, HEADERS
 
-FIELDS={'stage':4,'notes':19,'priority':20,'follow_up':21}
-EXTRA=['Notes','Priority','Follow-up date','Lorca ID','Lorca record','Outreach detail','Found number']
+FIELDS={'stage':4,'notes':19,'priority':20,'follow_up':21,'recruiter_name':10,'recruiter_contact':12,'contact_origin':26,'mail_data':27,'application_data':28}
+EXTRA=['Notes','Priority','Follow-up date','Lorca ID','Lorca record','Outreach detail','Found number','Contact origin','Mail workflow','Application resume']
+META_FIELDS={'follow_up','contact_origin','mail_data','application_data'}
+
+def contact_value(field,value):
+    # The legacy phone monitor used a display label for a missing contact.
+    # It carries no contact data and must compare equal to an empty cell.
+    if field=='recruiter_contact' and isinstance(value,str) and value.strip()=='Not publicly established':return ''
+    return value
+
+def column(index):
+    result='';index+=1
+    while index:index,remainder=divmod(index-1,26);result=chr(65+remainder)+result
+    return result
 
 
 def merge_value(base,local,remote):
@@ -25,8 +38,14 @@ def validate(field,value):
     if field=='stage' and value not in tracker.STATUSES:raise ValueError('Invalid stage in Google Sheet')
     if field=='priority' and value not in tracker.PRIORITIES:raise ValueError('Invalid priority in Google Sheet')
     if field=='follow_up' and value:date.fromisoformat(value)
-    if len(value)>20000:raise ValueError('Sheet note exceeds limit')
-    return value
+    if field=='contact_origin' and value not in ('','Provided by you'):raise ValueError('Invalid contact origin')
+    if field=='recruiter_contact' and value and len(value)>1024:raise ValueError('Contact is too long')
+    if len(value)>(45000 if field in ('mail_data','application_data') else 20000):raise ValueError('Sheet value exceeds limit')
+    if field=='mail_data':
+        parsed=json.loads(value or '[]')
+        if not isinstance(parsed,list):raise ValueError('Invalid mail workflow')
+    if field=='application_data' and not isinstance(json.loads(value or '{}'),dict):raise ValueError('Invalid application resume')
+    return contact_value(field,value)
 
 
 def resolve(job_id,field,choice):
@@ -35,7 +54,10 @@ def resolve(job_id,field,choice):
         row=db.execute('SELECT * FROM sync_conflicts WHERE job_id=? AND field=?',(job_id,field)).fetchone()
         if not row:raise ValueError('Conflict no longer exists')
         value=validate(field,row['local_value'] if choice=='local' else row['remote_value'])
-        if field=='follow_up':db.execute('UPDATE job_meta SET follow_up=? WHERE job_id=?',(value,job_id))
+        if field in META_FIELDS:
+            if field=='mail_data':outreach.import_mail(db,job_id,value or '[]')
+            if field=='application_data':resumes.import_record(db,job_id,value or '{}')
+            db.execute('UPDATE job_meta SET '+field+'=? WHERE job_id=?',(value,job_id))
         else:db.execute('UPDATE jobs SET '+field+'=?,updated_at=? WHERE id=?',(value,tracker.now(),job_id))
         meta=db.execute('SELECT baseline FROM job_meta WHERE job_id=?',(job_id,)).fetchone()
         baseline=json.loads(meta[0]);baseline[field]=row['remote_value']
@@ -72,7 +94,7 @@ def bootstrap_row(row):
     # Provider status from a sheet is descriptive, never a Gmail send receipt.
     job['outreach_stage']='Not started'
     job['application_approved']=False;job['outreach_approved']=False
-    for field in ('stage','notes','priority'):
+    for field in ('stage','notes','priority','recruiter_name','recruiter_contact'):
         if len(row)>FIELDS[field]:job[field]=validate(field,row[FIELDS[field]])
     follow_up=validate('follow_up',row[21])
     dossier=data.get('dossier')
@@ -104,6 +126,7 @@ def bootstrap_row(row):
 
 
 def sync():
+    resumes.init()
     config=google.config();sid=google.sheet_id(config.get('sheet_url',''))
     prefix=sid
     def api(path,body=None):return google.api('sheets',prefix+path,body)
@@ -114,7 +137,7 @@ def sync():
         api(':batchUpdate',{'requests':[{'addSheet':{'properties':{'title':name}}} for name in missing]})
         metadata=api('?fields=sheets(properties(sheetId,title,gridProperties),basicFilter)')
         tabs={s['properties']['title']:s['properties'] for s in metadata['sheets']}
-    remote=api('/values/'+urllib.parse.quote("'Opportunities'!A:Z",safe='')).get('values',[])
+    remote=api('/values/'+urllib.parse.quote("'Opportunities'!A:AC",safe='')).get('values',[])
     by_uuid={};legacy={}
     for number,row in enumerate(remote[1:],2):
         if len(row)>22 and row[22]:
@@ -134,13 +157,17 @@ def sync():
         number=found_number(row)
         if number is not None:
             with tracker.db() as db:db.execute('UPDATE job_meta SET discovery_number=? WHERE sync_id=?',(number,identity))
+    with tracker.db() as db:
+        for row in db.execute('SELECT job_id FROM job_meta').fetchall():
+            db.execute('UPDATE job_meta SET mail_data=? WHERE job_id=?',(outreach.portable_mail(row[0]),row[0]))
+            db.execute('UPDATE job_meta SET application_data=? WHERE job_id=?',(resumes.portable(row[0]),row[0]))
     jobs=tracker.list_jobs()
     with tracker.db() as db:
         metas={r['job_id']:dict(r) for r in db.execute('SELECT * FROM job_meta')}
         dossiers={r['job_id']:json.loads(r['payload']) for r in db.execute('SELECT job_id,payload FROM research_dossiers')}
     patches=[];baselines=[];next_row=max(2,len(remote)+1);conflict_count=0
     header=HEADERS+EXTRA
-    if not remote or remote[0]!=header:patches.append({'range':"'Opportunities'!A1:Z1",'values':[header]})
+    if not remote or remote[0]!=header:patches.append({'range':"'Opportunities'!A1:AC1",'values':[header]})
     projection=monitor_snapshot(tracker.ROOT)
     monitor={int(r[0]):r for r in projection['Opportunities'][1:]}
     for job in jobs:
@@ -150,16 +177,23 @@ def sync():
             if len(row)>2 and (row[1],row[2])==(job['company'],job['title']):pair=(number,row)
         if pair:number,remote_row=pair
         else:number,remote_row=next_row,[];next_row+=1
-        baseline=json.loads(meta['baseline']);next_base=baseline.copy();blocked=set()
+        baseline={key:contact_value(key,value) for key,value in json.loads(meta['baseline']).items()};next_base=baseline.copy();blocked=set()
         for field,col in FIELDS.items():
-            local=meta['follow_up'] if field=='follow_up' else job[field]
+            raw_local=meta[field] if field in META_FIELDS else job[field]
+            local=contact_value(field,raw_local)
             # Old monitor has no notes/priority/follow-up columns. Missing cells
             # are absent on first adoption, not requests to erase local values.
-            remote_value=str(remote_row[col]) if len(remote_row)>col else (local if field not in baseline else '')
-            try:validate(field,remote_value)
+            remote_value=str(remote_row[col]) if len(remote_row)>col else (local if field not in baseline else ('[]' if field=='mail_data' else '{}' if field=='application_data' else ''))
+            if field=='mail_data' and not remote_value:remote_value='[]'
+            if field=='application_data' and not remote_value:remote_value='{}'
+            placeholder=field=='recruiter_contact' and remote_value.strip()=='Not publicly established'
+            try:remote_value=validate(field,remote_value)
             except (ValueError,TypeError):
                 remote_value=str(remote_value);conflict=True;chosen=local
-            else:chosen,conflict=merge_value(baseline.get(field),local,remote_value)
+            else:
+                if field not in baseline and placeholder:chosen,conflict=local,False
+                elif field not in baseline and local in ('','[]','{}') and field in ('mail_data','contact_origin','application_data'):chosen,conflict=remote_value,False
+                else:chosen,conflict=merge_value(baseline.get(field),local,remote_value)
             if conflict:
                 with tracker.db() as db:db.execute('INSERT OR REPLACE INTO sync_conflicts(job_id,field,local_value,remote_value) VALUES(?,?,?,?)',(job['id'],field,local,remote_value))
                 blocked.add(field);conflict_count+=1
@@ -167,39 +201,42 @@ def sync():
                 with tracker.db() as db:
                     db.execute('DELETE FROM sync_conflicts WHERE job_id=? AND field=?',(job['id'],field))
                     # Do not replace a local edit made while the API read was in flight.
-                    current=db.execute('SELECT '+('follow_up FROM job_meta' if field=='follow_up' else field+' FROM jobs')+' WHERE '+('job_id' if field=='follow_up' else 'id')+'=?',(job['id'],)).fetchone()[0]
-                    if current!=local:
+                    current=outreach.portable_mail(job['id']) if field=='mail_data' else resumes.portable(job['id']) if field=='application_data' else db.execute('SELECT '+(field+' FROM job_meta' if field in META_FIELDS else field+' FROM jobs')+' WHERE '+('job_id' if field in META_FIELDS else 'id')+'=?',(job['id'],)).fetchone()[0]
+                    if contact_value(field,current)!=local:
                         blocked.add(field);continue
-                    if chosen!=local:
-                        if field=='follow_up':db.execute('UPDATE job_meta SET follow_up=? WHERE job_id=?',(chosen,job['id']))
+                    if chosen!=raw_local:
+                        if field in META_FIELDS:
+                            if field=='mail_data':outreach.import_mail(db,job['id'],chosen)
+                            if field=='application_data':resumes.import_record(db,job['id'],chosen)
+                            db.execute('UPDATE job_meta SET '+field+'=? WHERE job_id=?',(chosen,job['id']))
                         else:db.execute('UPDATE jobs SET '+field+'=?,updated_at=? WHERE id=?',(chosen,tracker.now(),job['id']))
                 next_base[field]=chosen
-                if field=='follow_up':meta['follow_up']=chosen
+                if field in META_FIELDS:meta[field]=chosen
                 else:job[field]=chosen
         row=list(monitor[job['id']])
         row[0]=meta['discovery_number']
-        row[4]=job['stage'];row+=[job['notes'],job['priority'],meta['follow_up'],identity,cloud_record(job,dossiers.get(job['id']),meta['discovery_number']),job['outreach_stage'],meta['discovery_number']]
+        row[4]=job['stage'];row[10]=job['recruiter_name'];row[12]=job['recruiter_contact'];row+=[job['notes'],job['priority'],meta['follow_up'],identity,cloud_record(job,dossiers.get(job['id']),meta['discovery_number']),job['outreach_stage'],meta['discovery_number'],meta['contact_origin'],meta['mail_data'],meta['application_data']]
         # Write only changed cells. Conflicted editable cells are never overwritten.
         for col,value in enumerate(row):
             field=next((key for key,index in FIELDS.items() if index==col),None)
             if field in blocked:continue
             old=str(remote_row[col]) if len(remote_row)>col else ''
             if str(value)==old:continue
-            letter=chr(ord('A')+col)
+            letter=column(col)
             patches.append({'range':f"'Opportunities'!{letter}{number}",'values':[[value]]})
         baselines.append((json.dumps(next_base),job['id']))
     # Keep existing phone-monitor status useful; only its timestamp changes each minute.
     status=projection['Status'];status[2]=['Sync connection','Lorca two-way sync · notes, priority, stage, follow-up date']
     patches.append({'range':f"'Status'!A1:B{len(status)}",'values':status})
     requests=[]
-    for name,rows,cols in [('Opportunities',next_row+1,26),('Status',len(status)+1,2)]:
+    for name,rows,cols in [('Opportunities',next_row+1,29),('Status',len(status)+1,2)]:
         properties=tabs[name];grid=properties.get('gridProperties',{})
         if grid.get('rowCount',0)<rows or grid.get('columnCount',0)<cols:
             requests.append({'updateSheetProperties':{'properties':{'sheetId':properties['sheetId'],'gridProperties':{'rowCount':max(rows,grid.get('rowCount',0)),'columnCount':max(cols,grid.get('columnCount',0))}},'fields':'gridProperties'}})
     if requests:api(':batchUpdate',{'requests':requests})
     # Sheets has no compare-and-swap. Recheck before writing so a phone edit
     # made during this sync is retried instead of overwritten from an old read.
-    latest=api('/values/'+urllib.parse.quote("'Opportunities'!A:Z",safe='')).get('values',[])
+    latest=api('/values/'+urllib.parse.quote("'Opportunities'!A:AC",safe='')).get('values',[])
     if latest!=remote:raise ValueError('Sheet changed during sync; retrying on the next cycle without overwriting it')
     if patches:api('/values:batchUpdate',{'valueInputOption':'RAW','data':patches})
     # Sort complete rows after cell writes so UUIDs, evidence and phone edits
@@ -209,9 +246,9 @@ def sync():
     desired_ids=sorted((meta['discovery_number'] for meta in metas.values()),reverse=True)
     layout=[]
     if current_ids!=desired_ids:
-        layout.append({'sortRange':{'range':{'sheetId':properties['sheetId'],'startRowIndex':1,'endRowIndex':end_row,'startColumnIndex':0,'endColumnIndex':max(26,properties.get('gridProperties',{}).get('columnCount',26))},'sortSpecs':[{'dimensionIndex':0,'sortOrder':'DESCENDING'}]}})
+        layout.append({'sortRange':{'range':{'sheetId':properties['sheetId'],'startRowIndex':1,'endRowIndex':end_row,'startColumnIndex':0,'endColumnIndex':max(29,properties.get('gridProperties',{}).get('columnCount',29))},'sortSpecs':[{'dimensionIndex':0,'sortOrder':'DESCENDING'}]}})
     old_filter=next((sheet.get('basicFilter',{}) for sheet in metadata['sheets'] if sheet['properties']['title']=='Opportunities'),{})
-    filter_range={'sheetId':properties['sheetId'],'startRowIndex':0,'endRowIndex':end_row,'startColumnIndex':0,'endColumnIndex':26}
+    filter_range={'sheetId':properties['sheetId'],'startRowIndex':0,'endRowIndex':end_row,'startColumnIndex':0,'endColumnIndex':29}
     if old_filter.get('range')!=filter_range:
         layout.append({'setBasicFilter':{'filter':{**old_filter,'range':filter_range}}})
     if layout:api(':batchUpdate',{'requests':layout})

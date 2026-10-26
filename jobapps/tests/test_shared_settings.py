@@ -58,7 +58,8 @@ class SharedSettingsTests(unittest.TestCase):
         self.fail('Unexpected API request: ' + path)
 
     def publish(self):
-        values = {'candidate_profile': 'Factual test profile: Python and backend projects.',
+        values = {'master_latex': '\\documentclass{article}\\begin{document}Resume\\end{document}',
+                  'candidate_profile': 'Factual test profile: Python and backend projects.',
                   'search_preferences': 'Test search: junior backend engineering roles.',
                   'initial_template': 'Subject: {{role}}\nHello {{first_name}}, exact template wording.',
                   'followup_template': 'Subject: Follow up\nExact follow-up wording.'}
@@ -123,6 +124,34 @@ class SharedSettingsTests(unittest.TestCase):
             self.assertIn('Updated follow-up', settings.local_values()['followup_template'])
             settings.sync()
             self.assertTrue(settings.local_values()['candidate_profile'].startswith('New factual'))
+
+    def test_research_started_during_sync_defers_profile_and_preferences(self):
+        import integrations, outreach, research, service, sheets
+        original = self.publish()
+        with self.mac('B'): settings.sync()
+        with self.mac('A'):
+            settings.apply_values({'candidate_profile': 'A new factual profile with additional reviewed projects.',
+                                   'search_preferences': 'Updated preferences for junior backend engineering.',
+                                   'initial_template': 'Subject: New template\nPreserve this new wording.'})
+            settings.sync()
+        active = {'value': False}
+        with self.mac('B'):
+            def api(name, path, body=None):
+                if not active['value']: service.dispatch({'op': 'start', 'model': 'test-model'})
+                return self.api(name, path, body)
+            def begin(): active['value'] = True
+            with patch.object(service, 'ROOT', self.roots['B']), patch.object(service, 'snapshot', return_value={}), \
+                 patch.object(research, 'status', side_effect=lambda: {'run': {'status': 'running'} if active['value'] else None}), \
+                 patch.object(research, 'start', side_effect=begin), patch.object(google, 'api', side_effect=api), \
+                 patch.object(outreach, 'reconcile'), patch.object(sheets, 'sync', return_value={'jobs': 49, 'conflicts': 0}):
+                integrations.sync()
+            self.assertTrue(active['value'])
+            self.assertEqual(settings.local_values()['candidate_profile'], original['candidate_profile'])
+            self.assertEqual(settings.local_values()['search_preferences'], original['search_preferences'])
+            self.assertIn('New template', settings.local_values()['initial_template'])
+            settings.sync(research_active=False)
+            self.assertTrue(settings.local_values()['candidate_profile'].startswith('A new factual'))
+            self.assertTrue(settings.local_values()['search_preferences'].startswith('Updated preferences'))
 
     def test_sheet_race_does_not_advance_baseline_or_write_local_files(self):
         self.publish()

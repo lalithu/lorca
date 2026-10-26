@@ -10,7 +10,7 @@ from research_context import atomic_text
 DEFAULT_PROFILE = '# Candidate profile\nPaste and review your factual resume before starting research.\n'
 DEFAULT_PREFERENCES = '# Job search preferences\nNew York City startups; full-time junior/new-grad software roles; expected graduation December 2026. Flag eligibility and start-date uncertainties.\n'
 FIELDS = {'candidate_profile': 24000, 'search_preferences': 16000,
-          'initial_template': 20000, 'followup_template': 20000}
+          'initial_template': 20000, 'followup_template': 20000, 'master_latex': 24000}
 TAB = 'Lorca Settings'
 LOCK = threading.RLock()
 
@@ -24,6 +24,7 @@ def local_values():
     config = google.config()
     return {'candidate_profile': read('master_resume.md', DEFAULT_PROFILE),
             'search_preferences': read('preferences.md', DEFAULT_PREFERENCES),
+            'master_latex': read('master_resume.tex',''),
             **{key: config.get(key, '') for key in ('initial_template', 'followup_template')}}
 
 
@@ -86,6 +87,8 @@ def apply_values(values):
             atomic_text(tracker.ROOT / 'profile/master_resume.md', value or DEFAULT_PROFILE)
         elif field == 'search_preferences':
             atomic_text(tracker.ROOT / 'profile/preferences.md', value or DEFAULT_PREFERENCES)
+        elif field == 'master_latex':
+            atomic_text(tracker.ROOT / 'profile/master_resume.tex', value)
         else:
             config[field] = value
     if any(key in values for key in ('initial_template', 'followup_template')):
@@ -130,8 +133,6 @@ def sync(research_active=False):
         chosen, conflict = (value, False) if field not in remote else merge(baseline.get(field), value, remote[field], field in baseline)
         if conflict:
             found.append({'field': field, 'local_value': value, 'remote_value': remote[field]}); continue
-        if research_active and field in ('candidate_profile', 'search_preferences') and chosen != value:
-            deferred += 1; continue
         pending[field] = chosen
         if field not in remote or chosen != remote[field]:
             index = positions.get(field, next_row)
@@ -142,6 +143,14 @@ def sync(research_active=False):
     with LOCK:
         if local_values() != local:
             raise ValueError('Local settings changed during sync; retry without overwriting them')
+        # Recheck under the same lock used to start research: it may have
+        # started while the Google reads were in flight. Do not advance the
+        # baseline for a deferred incoming profile/preferences update.
+        active = research_active() if callable(research_active) else research_active
+        if active:
+            for field in ('candidate_profile', 'search_preferences'):
+                if field in pending and pending[field] != local[field]:
+                    del pending[field]; deferred += 1
         if changes:
             google.api('sheets', sid + '/values:batchUpdate', {'valueInputOption': 'RAW', 'data': changes})
         updates = {key: value for key, value in pending.items() if value != local[key]}
