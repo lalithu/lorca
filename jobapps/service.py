@@ -90,6 +90,8 @@ def dispatch(v):
         except ValueError:pass
         integrations.request_sync();return snapshot()
     if op=='prepare_email':outreach.prepare(int(v['id']),v.get('kind','initial'));return snapshot()
+    if op=='review_reply':
+        outreach.review_reply(int(v['id']),v.get('receipt',''));integrations.request_sync();return snapshot()
     if op=='load_thread':
         integrations.run(lambda:outreach.load_thread(int(v['id'])));return snapshot()
     if op=='edit_email':

@@ -1,4 +1,5 @@
 import Combine
+import Foundation
 import XCTest
 @testable import LorcaMac
 
@@ -52,8 +53,74 @@ private func jobResponse(notes: String = "Original notes") throws -> Data {
     ]])
 }
 
+private func queueResponse(stages: [String] = ["Ready for review", "Ready for review"], mailState: String? = nil, replyRevision: String = "", reviewed: String = "", due: String = "") throws -> Data {
+    var envelope = try JSONSerialization.jsonObject(with: jobResponse()) as! [String: Any]
+    var result = envelope["result"] as! [String: Any]
+    let template = (result["jobs"] as! [[String: Any]])[0]
+    result["jobs"] = stages.enumerated().map { offset, stage -> [String: Any] in
+        var job = template
+        job["id"] = offset + 7;job["number"] = [49, 2, 17][offset];job["stage"] = stage
+        return job
+    }
+    var messages: [[String: Any]] = []
+    if let mailState {
+        messages = [["id":"initial", "job_id":8, "kind":"initial", "recipient":"recruiter@example.test", "subject":"Role", "body":"Hello", "state":mailState,
+                     "sent_at": ["Sent", "Needs review"].contains(mailState) ? "2026-10-01T12:00:00Z" : "", "reply_revision":replyRevision]]
+    }
+    result["mail"] = ["messages":messages,"meta":[["job_id":8,"follow_up":due,"reviewed_reply":reviewed]],"conflicts":[]]
+    envelope["result"] = result
+    return try JSONSerialization.data(withJSONObject: envelope)
+}
+
 @MainActor
 final class JobAppsTests: XCTestCase {
+    func testQueueUsesDiscoveryOrderAndSkipNeverCompletesAJob() async throws {
+        let bridge = JobAppsTestTransport(response: try queueResponse(stages: ["Ready for review", "Ready for review", "Ready for review"]))
+        let store = JobAppsStore(bridge: bridge);await store.perform(["op":"snapshot"])
+        store.beginQueue()
+        XCTAssertEqual(store.queueJobs.map(\.displayNumber), [2,17,49]);XCTAssertEqual(store.selected,8)
+        store.skipQueueJob();XCTAssertEqual(store.selected,9)
+        await store.perform(["op":"snapshot"])
+        XCTAssertEqual(store.selected,9);XCTAssertEqual(store.snapshot?.jobs.first(where: { $0.id == 8 })?.stage,"Ready for review")
+        store.endQueue();store.beginQueue();XCTAssertEqual(store.selected,8)
+        await store.shutdown()
+    }
+    func testQueueKeepsApplicationAndOutreachIndependentAndWaitsForSendReceipt() async throws {
+        let bridge = JobAppsTestTransport(response: try queueResponse(mailState:"Sent"))
+        let store = JobAppsStore(bridge: bridge);await store.perform(["op":"snapshot"]);store.beginQueue()
+        XCTAssertEqual(store.attentionStep(store.selectedJob!),.application)
+        await bridge.replace(try queueResponse(stages:["Ready for review","Applied"],mailState:"Local draft"))
+        await store.perform(["op":"snapshot"])
+        XCTAssertEqual(store.selected,8);XCTAssertEqual(store.attentionStep(store.selectedJob!),.outreach)
+        await bridge.replace(try queueResponse(stages:["Ready for review","Applied"],mailState:"Needs send reconciliation"))
+        await store.perform(["op":"snapshot"])
+        XCTAssertEqual(store.selected,8);XCTAssertEqual(store.attentionStep(store.selectedJob!),.reconcile)
+        await bridge.replace(try queueResponse(stages:["Ready for review","Applied"],mailState:"Sent"))
+        await store.perform(["op":"snapshot"])
+        XCTAssertEqual(store.selected,7)
+        await store.shutdown()
+    }
+    func testQueueFinishesWithoutLoopingAndNewRepliesReturnWithoutInterruptingCurrentJob() async throws {
+        let bridge = JobAppsTestTransport(response: try queueResponse(stages:["Archived","Applied"],mailState:"Sent"))
+        let store = JobAppsStore(bridge: bridge);await store.perform(["op":"snapshot"]);store.beginQueue()
+        XCTAssertNil(store.selected);XCTAssertTrue(store.queueJobs.isEmpty)
+        await store.perform(["op":"snapshot"]);XCTAssertNil(store.selected)
+        await bridge.replace(try queueResponse(stages:["Ready for review","Applied"],mailState:"Needs review",replyRevision:"r1",reviewed:"initial:r1"))
+        await store.perform(["op":"snapshot"]);XCTAssertEqual(store.selected,7)
+        await bridge.replace(try queueResponse(stages:["Ready for review","Applied"],mailState:"Needs review",replyRevision:"r2",reviewed:"initial:r1"))
+        await store.perform(["op":"snapshot"])
+        XCTAssertEqual(store.selected,7);XCTAssertEqual(store.queueJobs.first?.id,8)
+        store.skipQueueJob();XCTAssertEqual(store.selected,8);XCTAssertEqual(store.attentionStep(store.selectedJob!),.reply)
+        await store.shutdown()
+    }
+    func testQueueFollowupDueReturnsAndFutureDueDateWaits() async throws {
+        let bridge = JobAppsTestTransport(response: try queueResponse(stages:["Archived","Applied"],mailState:"Sent",due:"2020-01-01"))
+        let store = JobAppsStore(bridge: bridge);await store.perform(["op":"snapshot"]);store.beginQueue()
+        XCTAssertEqual(store.selected,8);XCTAssertEqual(store.attentionStep(store.selectedJob!),.followUp)
+        await bridge.replace(try queueResponse(stages:["Archived","Applied"],mailState:"Sent",due:"2099-01-01"))
+        await store.perform(["op":"snapshot"]);XCTAssertNil(store.selected)
+        await store.shutdown()
+    }
     private func waitUntil(_ condition: () async -> Bool) async throws {
         for _ in 0..<1000 {
             if await condition() { return }

@@ -51,6 +51,10 @@ def init():
         CREATE TABLE IF NOT EXISTS sync_conflicts(job_id INTEGER NOT NULL,field TEXT NOT NULL,local_value TEXT NOT NULL,remote_value TEXT NOT NULL,PRIMARY KEY(job_id,field));
         ''')
     with tracker.db() as db:
+        if 'reply_revision' not in {row[1] for row in db.execute('PRAGMA table_info(outreach_messages)')}:
+            db.execute("ALTER TABLE outreach_messages ADD COLUMN reply_revision TEXT NOT NULL DEFAULT ''")
+        if 'reviewed_reply' not in {row[1] for row in db.execute('PRAGMA table_info(job_meta)')}:
+            db.execute("ALTER TABLE job_meta ADD COLUMN reviewed_reply TEXT NOT NULL DEFAULT ''")
         if 'application_data' not in {row[1] for row in db.execute('PRAGMA table_info(job_meta)')}:
             db.execute("ALTER TABLE job_meta ADD COLUMN application_data TEXT NOT NULL DEFAULT '{}'")
         if 'mail_data' not in {row[1] for row in db.execute('PRAGMA table_info(job_meta)')}:
@@ -225,7 +229,7 @@ def send_approved(identifier,token):
         raise
 
 def reconcile():
-    with tracker.db() as db:rows=[dict(r) for r in db.execute("SELECT * FROM outreach_messages WHERE state NOT IN ('Local draft','Needs review')")]
+    with tracker.db() as db:rows=[dict(r) for r in db.execute("SELECT * FROM outreach_messages WHERE state!='Local draft'")]
     for row in rows:
         # Only an already-linked thread or our unique RFC message ID is queried.
         thread=None
@@ -270,8 +274,9 @@ def reconcile():
         message=sent[0];stamp=datetime.fromtimestamp(int(message['internalDate'])/1000,timezone.utc).isoformat()
         incoming=[m for m in thread.get('messages',[]) if int(m.get('internalDate',0))>int(message['internalDate']) and not {'SENT','DRAFT','TRASH'}.intersection(m.get('labelIds',[])) and google.ACCOUNT not in [a.lower() for _,a in getaddresses([headers(m).get('from','')])]]
         state='Needs review' if incoming else 'Sent'
+        revision=hashlib.sha256(json.dumps(sorted((item['id'],str(item.get('internalDate',''))) for item in incoming)).encode()).hexdigest() if incoming else ''
         with tracker.db() as db:
-            db.execute('UPDATE outreach_messages SET state=?,sent_at=?,thread_id=?,rfc_id=?,error=? WHERE id=?',(state,stamp,thread['id'],headers(message).get('message-id',row['rfc_id']),'',row['id']))
+            db.execute('UPDATE outreach_messages SET state=?,sent_at=?,thread_id=?,rfc_id=?,error=?,reply_revision=? WHERE id=?',(state,stamp,thread['id'],headers(message).get('message-id',row['rfc_id']),'',revision,row['id']))
             db.execute('UPDATE jobs SET outreach_stage=?,updated_at=? WHERE id=?',('Replied' if incoming else 'Sent',tracker.now(),row['job_id']))
             if incoming:db.execute("UPDATE job_meta SET follow_up='' WHERE job_id=?",(row['job_id'],))
             elif row['kind']=='initial' and not row['sent_at']:db.execute('UPDATE job_meta SET follow_up=? WHERE job_id=?',(business_due(stamp),row['job_id']))
@@ -282,7 +287,7 @@ def snapshot():
     ensure_ids()
     with tracker.db() as db:
         return {'messages':[{**dict(r),'approval_token':approval_token(r)} for r in db.execute('SELECT * FROM outreach_messages ORDER BY created_at DESC')],
-                'meta':[dict(r) for r in db.execute('SELECT job_id,follow_up FROM job_meta')],
+                'meta':[dict(r) for r in db.execute('SELECT job_id,follow_up,reviewed_reply FROM job_meta')],
                 'conflicts':[dict(r) for r in db.execute('SELECT * FROM sync_conflicts')],'threads':dict(_threads)}
 
 def numbered_jobs():
@@ -300,7 +305,7 @@ def portable_mail(job_id):
 def import_mail(db,job_id,text):
     rows=json.loads(text)
     if not isinstance(rows,list) or len(rows)>2:raise ValueError('Invalid shared mail records')
-    allowed={'id','kind','recipient','subject','body','state','created_at','gmail_draft','thread_id','rfc_id','sent_at','provider_message','error'}
+    allowed={'id','kind','recipient','subject','body','state','created_at','gmail_draft','thread_id','rfc_id','sent_at','provider_message','error','reply_revision'}
     kinds=set()
     for row in rows:
         if not isinstance(row,dict) or set(row)-allowed or row.get('kind') not in ('initial','followup') or row['kind'] in kinds:raise ValueError('Invalid shared mail record')
@@ -318,3 +323,16 @@ def import_mail(db,job_id,text):
         db.execute('INSERT INTO outreach_messages('+','.join(fields)+') VALUES('+','.join('?' for _ in fields)+') ON CONFLICT(job_id,kind) DO UPDATE SET '+','.join(k+'=excluded.'+k for k in fields if k not in ('job_id','kind')),list(row.values()))
     for kind in ('initial','followup'):
         if kind not in kinds:db.execute("DELETE FROM outreach_messages WHERE job_id=? AND kind=? AND state='Local draft'",(job_id,kind))
+
+
+def reply_receipt(job_id):
+    with tracker.db() as db:rows=db.execute("SELECT kind,reply_revision,sent_at FROM outreach_messages WHERE job_id=? AND state='Needs review'",(job_id,)).fetchall()
+    return '|'.join(sorted(row['kind']+':'+(row['reply_revision'] or row['sent_at']) for row in rows))
+
+
+def review_reply(job_id,receipt):
+    current=reply_receipt(job_id)
+    if not current or receipt!=current:raise ValueError('The reply changed. Refresh the conversation before marking it reviewed.')
+    with tracker.db() as db:
+        db.execute('UPDATE job_meta SET reviewed_reply=? WHERE job_id=?',(current,job_id))
+        db.execute('INSERT INTO history(job_id,action,happened_at) VALUES(?,?,?)',(job_id,'Reply reviewed by you',tracker.now()))

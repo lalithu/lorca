@@ -105,6 +105,24 @@ class GoogleTests(unittest.TestCase):
         self.assertEqual(outreach.snapshot()['messages'][0]['state'],'Needs review')
         self.assertEqual(outreach.snapshot()['meta'][0]['follow_up'],'')
         with self.assertRaises(ValueError):outreach.prepare(self.job['id'],'followup')
+    def test_reviewed_reply_is_portable_and_a_new_reply_requires_review_again(self):
+        self.configure();row=outreach.prepare(self.job['id'])
+        with tracker.db() as db:
+            db.execute("UPDATE outreach_messages SET state='Needs review',sent_at='2026-10-01T12:00:00+00:00',reply_revision='r1' WHERE id=?",(row['id'],))
+        with self.assertRaisesRegex(ValueError,'changed'):outreach.review_reply(self.job['id'],'stale')
+        receipt=outreach.reply_receipt(self.job['id']);self.assertEqual(receipt,'initial:r1')
+        outreach.review_reply(self.job['id'],receipt)
+        state,api=self.fake_sheet()
+        with patch.object(google,'api',side_effect=api):sheets.sync()
+        with patch.object(tracker,'DB_PATH',self.root/'review-mac.sqlite3'):
+            tracker.init_db();research.init_research();outreach.init()
+            with patch.object(google,'api',side_effect=api):sheets.sync()
+            job=tracker.list_jobs()[0]
+            self.assertEqual(outreach.reply_receipt(job['id']),receipt)
+            self.assertEqual(outreach.snapshot()['meta'][0]['reviewed_reply'],receipt)
+        with tracker.db() as db:db.execute("UPDATE outreach_messages SET reply_revision='r2' WHERE id=?",(row['id'],))
+        self.assertNotEqual(outreach.reply_receipt(self.job['id']),receipt)
+        self.assertEqual(outreach.snapshot()['meta'][0]['reviewed_reply'],receipt)
     def test_three_way_merge_preserves_conflicts(self):
         self.assertEqual(sheets.merge_value('old','old','sheet'),('sheet',False))
         self.assertEqual(sheets.merge_value('old','local','old'),('local',False))
@@ -286,7 +304,7 @@ class GoogleTests(unittest.TestCase):
             self.assertEqual(state['rows'][2][1],'Acme')
             filters=[r['setBasicFilter']['filter']['range'] for r in state['layout'] if 'setBasicFilter' in r]
             self.assertEqual(filters[-1]['endRowIndex'],3)
-            self.assertEqual(filters[-1]['endColumnIndex'],29)
+            self.assertEqual(filters[-1]['endColumnIndex'],30)
 
     def test_second_mac_keeps_original_numbers_and_repairs_existing_import(self):
         import uuid

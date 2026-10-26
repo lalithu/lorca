@@ -122,3 +122,14 @@ Sheets uses read-before-write conflict checks, not distributed transactions; avo
 simultaneously sending the same message from both Macs. Only one research/model
 operation runs on each Mac. Zoom follows the existing chat-text shortcuts and
 reflows the Job Apps header without changing navigation elsewhere.
+
+### Guided Needs you queue
+
+Needs you selects the oldest remaining discovery number and opens its next step.
+Applications and outreach are independent: Mark applied opens outreach for the same
+job, and only a confirmed send finishes that step. Due follow-ups and unreviewed
+replies return to the queue. Done reviewing reply syncs a receipt for the current
+reply; a newer reply requires review again. Skip for now defers a job for the current
+pass without changing its stage, and Revisit skipped starts another pass. All jobs
+keeps its normal newest-first order. Incoming research never interrupts the current
+job while it still needs action.

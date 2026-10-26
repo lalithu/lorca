@@ -67,10 +67,11 @@ struct JobMailRecord: Decodable, Identifiable, Equatable {
     let sent_at: String?
     let error: String?
     let approval_token: String?
+    let reply_revision: String?
 }
 struct JobMailSnapshot: Decodable, Equatable {
     struct ThreadMessage: Decodable, Identifiable, Equatable { let id: String; let from: String; let body: String; let sent: Bool; let date: String }
-    struct Meta: Decodable, Equatable { let job_id: Int; let follow_up: String }
+    struct Meta: Decodable, Equatable { let job_id: Int; let follow_up: String; let reviewed_reply: String? }
     struct Conflict: Decodable, Identifiable, Equatable {
         let job_id: Int; let field: String; let local_value: String; let remote_value: String
         var id: String { "\(job_id)-\(field)" }
@@ -146,12 +147,21 @@ private actor JobAppsBridge: JobAppsTransport {
 
 @MainActor
 final class JobAppsStore: ObservableObject {
+    enum AttentionStep: String {
+        case application = "Complete application"
+        case outreach = "Complete outreach"
+        case reply = "Review reply"
+        case followUp = "Review follow-up"
+        case reconcile = "Check email status"
+    }
     struct EmailEdit { let subject: String; let body: String; let token: String }
     @Published var emailEdits: [String: EmailEdit] = [:]
     @Published private(set) var snapshot: JobSnapshot?
     @Published private(set) var busy = false
     @Published var error: String?
     @Published var selected: Int?
+    @Published private(set) var queueActive = false
+    @Published private(set) var queueSkipped = Set<Int>()
     @Published private(set) var history: [String] = []
     private let bridge: any JobAppsTransport
     private var poll: Task<Void, Never>?
@@ -161,8 +171,52 @@ final class JobAppsStore: ObservableObject {
     init(bridge: any JobAppsTransport = JobAppsBridge()) { self.bridge = bridge }
     var running: Bool { snapshot?.run?.active == true }
     var selectedJob: JobRecord? { snapshot?.jobs.first { $0.id == selected } }
+    var queueJobs: [JobRecord] {
+        (snapshot?.jobs ?? []).filter { needsAttention($0) && !queueSkipped.contains($0.id) }
+            .sorted { $0.displayNumber == $1.displayNumber ? $0.id < $1.id : $0.displayNumber < $1.displayNumber }
+    }
+    var attentionCount: Int { (snapshot?.jobs ?? []).filter { needsAttention($0) }.count }
+    func beginQueue() {
+        queueSkipped.removeAll();queueActive = true;selected = queueJobs.first?.id
+    }
+    func endQueue() {
+        queueActive = false;queueSkipped.removeAll()
+        if selected == nil { selected = snapshot?.jobs.max(by: { $0.displayNumber < $1.displayNumber })?.id }
+    }
+    func skipQueueJob() {
+        guard queueActive, let selected else { return }
+        queueSkipped.insert(selected);self.selected = queueJobs.first?.id
+    }
+    private func reconcileQueue() {
+        guard queueActive else { return }
+        if !queueJobs.contains(where: { $0.id == selected }) {
+            let next = queueJobs.first?.id
+            if selected != next { selected = next }
+        }
+    }
+    func replyReceipt(_ id: Int) -> String {
+        (snapshot?.mail?.messages ?? []).filter { $0.job_id == id && $0.state == "Needs review" }
+            .map { $0.kind + ":" + (($0.reply_revision?.isEmpty == false ? $0.reply_revision : $0.sent_at) ?? "") }.sorted().joined(separator: "|")
+    }
+    func attentionStep(_ job: JobRecord, now: Date = Date()) -> AttentionStep? {
+        guard !["Archived", "Rejected", "Offer"].contains(job.stage), job.verification != "Expired" else { return nil }
+        // Applications and outreach are independent. Sending first never hides an unapplied job.
+        if !["Applied", "Interviewing"].contains(job.stage) { return .application }
+        let mail = snapshot?.mail
+        let records = mail?.messages.filter { $0.job_id == job.id } ?? []
+        let receipt = replyReceipt(job.id)
+        let meta = mail?.meta.first { $0.job_id == job.id }
+        if !receipt.isEmpty && receipt != (meta?.reviewed_reply ?? "") { return .reply }
+        if records.contains(where: { ["Creating", "Sending", "Needs reconciliation", "Needs send reconciliation"].contains($0.state) }) { return .reconcile }
+        if let due = meta?.follow_up, !due.isEmpty {
+            let formatter = DateFormatter();formatter.dateFormat = "yyyy-MM-dd";formatter.timeZone = TimeZone(identifier: "America/New_York")
+            if due <= formatter.string(from: now) { return .followUp }
+        }
+        if records.contains(where: { $0.kind == "initial" && ["Sent", "Needs review"].contains($0.state) && !($0.sent_at ?? "").isEmpty }) { return nil }
+        return .outreach
+    }
     func needsAttention(_ job: JobRecord) -> Bool {
-        !["Archived", "Rejected", "Offer"].contains(job.stage) && actionLabel(job) != "Waiting for reply"
+        attentionStep(job) != nil
     }
     func actionLabel(_ job: JobRecord) -> String {
         if job.outreach_stage == "Replied" || snapshot?.mail?.messages.contains(where: { $0.job_id == job.id && $0.state == "Needs review" }) == true { return "Reply received" }
@@ -220,10 +274,11 @@ final class JobAppsStore: ObservableObject {
             if fields["op"] as? String == "detail" {
                 let detail = value["result"] as? [String: Any]
                 let history = (detail?["history"] as? [[String: Any]] ?? []).map { "\($0["happened_at"] ?? "") · \($0["action"] ?? "")" }
-                if self.history != history { self.history = history }
+                if fields["id"] as? Int == selected, self.history != history { self.history = history }
             } else if let snapshot = try? JSONDecoder().decode(JobSnapshot.self, from: result) {
                 if self.snapshot != snapshot { self.snapshot = snapshot }
-                if selected == nil { selected = snapshot.jobs.first?.id }
+                if selected == nil && !queueActive { selected = snapshot.jobs.first?.id }
+                reconcileQueue()
             }
             if error != nil, errorOperation == operation { dismissError() }
             return true

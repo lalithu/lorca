@@ -10,14 +10,13 @@ struct JobAppsView: View {
     @State private var filter = "All"
     @State private var settings = false
     @State private var confirmingUnload = false
-    @State private var needsYou = false
     private var modelToUnload: String? {
         store.snapshot?.run?.model ?? chat.modelSession.activeModel
     }
     private var jobs: [JobRecord] {
-        (store.snapshot?.jobs ?? []).sorted { $0.displayNumber > $1.displayNumber }.filter { job in
+        if store.queueActive { return store.queueJobs }
+        return (store.snapshot?.jobs ?? []).sorted { $0.displayNumber > $1.displayNumber }.filter { job in
             (query.isEmpty || "\(job.company) \(job.title) \(job.location)".localizedCaseInsensitiveContains(query))
-                && (!needsYou || store.needsAttention(job))
                 && (filter == "Follow-up due" && followUpDue(job.id) || filter == "All" || filter == "Verified" && job.verification == "Verified" || filter == "Needs review" && job.stage == "Ready for review" || filter == "With contact" && job.recruiter_contact.contains("@"))
         }
     }
@@ -74,17 +73,27 @@ struct JobAppsView: View {
                 }.font(.system(size: max(10, 11 + zoom))).foregroundStyle(.orange)
             }
             JobAppsErrorView(store: store)
-            HStack {
-                TextField("Search companies, roles, locations", text: $query).textFieldStyle(.roundedBorder)
-                Picker("Show", selection: $filter) { ForEach(["All", "Verified", "Needs review", "With contact", "Follow-up due"], id: \.self) { Text($0) } }.frame(width: 165)
-                Text("\(jobs.count)").font(.system(size: max(10, 11 + zoom))).foregroundStyle(.secondary).monospacedDigit()
-            }
-            if needsYou {
-                HStack {
-                    Text(jobs.isEmpty ? "You're caught up." : "Needs you · Add missing contacts, review drafts, or respond to replies.")
-                        .font(.system(size: max(10, 11 + zoom))).foregroundStyle(.secondary)
+            if store.queueActive {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(store.selectedJob.flatMap { store.attentionStep($0) }?.rawValue ?? (store.queueSkipped.isEmpty ? "You're caught up." : "You've reached the end of this pass."))
+                            .font(.system(size: max(10, 13 + zoom), weight: .medium))
+                        Text("Oldest first · \(store.queueJobs.count) remaining" + (store.queueSkipped.isEmpty ? "" : " · \(store.queueSkipped.count) skipped"))
+                            .font(.system(size: max(10, 11 + zoom))).foregroundStyle(.secondary)
+                    }
                     Spacer()
-                    Button("Show all jobs") { needsYou = false }.font(.system(size: max(10, 11 + zoom)))
+                    if store.selected != nil {
+                        Button("Skip for now") { store.skipQueueJob() }.disabled(store.busy)
+                    } else if !store.queueSkipped.isEmpty {
+                        Button("Revisit skipped") { store.beginQueue() }
+                    }
+                    Button("Show all jobs") { store.endQueue() }
+                }
+            } else {
+                HStack {
+                    TextField("Search companies, roles, locations", text: $query).textFieldStyle(.roundedBorder)
+                    Picker("Show", selection: $filter) { ForEach(["All", "Verified", "Needs review", "With contact", "Follow-up due"], id: \.self) { Text($0) } }.frame(width: 165)
+                    Text("\(jobs.count)").font(.system(size: max(10, 11 + zoom))).foregroundStyle(.secondary).monospacedDigit()
                 }
             }
             if store.snapshot?.jobs.isEmpty != false {
@@ -96,17 +105,25 @@ struct JobAppsView: View {
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 HSplitView {
-                    List(selection: $store.selected) {
-                        ForEach(jobs) { job in
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text("\(job.displayNumber). \(job.company)").font(.system(size: max(10, 13 + zoom), weight: .semibold))
-                                Text(job.title).font(.system(size: max(10, 12 + zoom))).lineLimit(2)
-                                Text(store.actionLabel(job)).font(.system(size: max(10, 11 + zoom))).foregroundStyle(store.actionColor(job))
-                            }.padding(.vertical, 5).tag(job.id)
-                        }
-                    }.listStyle(.inset).frame(minWidth: 185, idealWidth: 245, maxWidth: 310)
-                    if let job = store.selectedJob { detail(job).frame(minWidth: 230, maxWidth: .infinity) }
-                    else { Text("Select an opportunity").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity) }
+                    ScrollViewReader { proxy in
+                        List(selection: $store.selected) {
+                            ForEach(jobs) { job in
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text("\(job.displayNumber). \(job.company)").font(.system(size: max(10, 13 + zoom), weight: .semibold))
+                                    Text(job.title).font(.system(size: max(10, 12 + zoom))).lineLimit(2)
+                                    Text(store.actionLabel(job)).font(.system(size: max(10, 11 + zoom))).foregroundStyle(store.actionColor(job))
+                                }.padding(.vertical, 5).tag(job.id).id(job.id)
+                            }
+                        }.listStyle(.inset)
+                            .onChange(of: store.selected) { _, id in
+                                if store.queueActive, let id { withAnimation(.easeInOut(duration: 0.18)) { proxy.scrollTo(id, anchor: .top) } }
+                            }
+                            .onChange(of: store.queueActive) { _, active in
+                                if active, let id = store.selected { proxy.scrollTo(id, anchor: .top) }
+                            }
+                    }.frame(minWidth: 185, idealWidth: 245, maxWidth: 310)
+                    if let job = store.selectedJob { detail(job).id(job.id).frame(minWidth: 230, maxWidth: .infinity) }
+                    else { Text(store.queueActive ? (store.queueSkipped.isEmpty ? "All current actions are handled." : "Skipped jobs are saved for later.") : "Select an opportunity").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity) }
                 }.background(.primary.opacity(0.02), in: RoundedRectangle(cornerRadius: 10))
             }
             HStack {
@@ -125,10 +142,15 @@ struct JobAppsView: View {
         .font(.system(size: max(10, 13 + zoom)))
         .controlSize(zoom >= 5 ? .large : zoom >= 2 ? .regular : .small)
         .padding(.horizontal, 28).padding(.bottom, 22)
-        .task { await store.open() }
-        .onChange(of: store.selected) { _, id in if let id { Task { await store.perform(["op":"detail", "id":id]) } } }
+        .task { await store.open();routeQueueStep() }
+        .onChange(of: store.selected) { _, id in
+            routeQueueStep()
+            if let id { Task { await store.perform(["op":"detail", "id":id]) } }
+        }
+        .onChange(of: store.queueActive) { _, _ in routeQueueStep() }
+        .onChange(of: store.selectedJob.flatMap { store.attentionStep($0) }) { _, _ in routeQueueStep() }
         .onChange(of: jobs.map(\.id)) { _, ids in
-            if let selected = store.selected, !ids.contains(selected) { store.selected = ids.first }
+            if !store.queueActive, let selected = store.selected, !ids.contains(selected) { store.selected = ids.first }
         }
         .sheet(isPresented: $settings) { JobAppsSettings(store: store).environment(\.jobAppsZoom, zoom) }
         .confirmationDialog("Unload \(modelToUnload ?? chat.selectedModel)?", isPresented: $confirmingUnload) {
@@ -152,24 +174,32 @@ struct JobAppsView: View {
     }
     private var headerActions: some View {
         HStack {
-            Button("Needs you · \((store.snapshot?.jobs ?? []).filter { store.needsAttention($0) }.count)") {
-                needsYou.toggle();if needsYou { mode = .email;filter = "All" }
-            }.buttonStyle(.borderedProminent).tint(needsYou ? .accentColor : .secondary)
-                .accessibilityValue(needsYou ? "Showing jobs needing action" : "Off")
+            Button("Needs you · \(store.attentionCount)") {
+                if store.queueActive { store.endQueue() }
+                else { query = "";filter = "All";store.beginQueue() }
+            }.buttonStyle(.borderedProminent).tint(store.queueActive ? .yellow : .secondary)
+                .foregroundStyle(store.queueActive ? Color.black : Color.primary)
+                .accessibilityValue(store.queueActive ? "Oldest-first queue active" : "Off")
             Button("Unload model…") { confirmingUnload = true }
                 .disabled(!chat.canReloadModel || modelToUnload == nil || store.busy || store.running || store.snapshot?.resumes?.work.busy == true)
-            Button("Candidate profile") { settings = true }
+            Button { settings = true } label: { Image(systemName: "slider.horizontal.3") }
+                .help("Job Apps settings").accessibilityLabel("Job Apps settings")
         }.controlSize(zoom >= 5 ? .large : zoom >= 2 ? .regular : .small)
+    }
+    private func routeQueueStep() {
+        guard store.queueActive, let job = store.selectedJob, let step = store.attentionStep(job) else { return }
+        mode = step == .application ? .applying : .email
     }
     private func detail(_ job: JobRecord) -> some View {
         let dossier = store.snapshot?.dossiers.first { $0.job_id == job.id }
-        return ScrollView {
+        return ScrollViewReader { proxy in
+        ScrollView {
             VStack(alignment: .leading, spacing: 17) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(job.company).font(.system(size: max(10, 20 + zoom), weight: .semibold))
                     Text(job.title).font(.system(size: max(10, 14 + zoom)))
                     Text(job.location).font(.system(size: max(10, 11 + zoom))).foregroundStyle(.secondary)
-                }
+                }.id("queue-detail-top")
                 HStack {
                     if let url = URL(string: job.job_url), ["https","http"].contains(url.scheme ?? "") { Link("Open posting ↗", destination: url).font(.system(size: max(10, 11 + zoom))) }
                     Spacer()
@@ -203,6 +233,8 @@ struct JobAppsView: View {
                 JobNotesView(store: store, job: job)
                 DisclosureGroup("History") { ForEach(Array(store.history.enumerated()), id: \.offset) { _, entry in Text(entry).font(.system(size: max(10, 10 + zoom))).foregroundStyle(.secondary).textSelection(.enabled) } }.font(.system(size: max(10, 11 + zoom)))
             }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .onChange(of: mode) { _, _ in if store.queueActive { proxy.scrollTo("queue-detail-top", anchor: .top) } }
         }
     }
     @ViewBuilder private func section(_ title: String, _ text: String) -> some View {

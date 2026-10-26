@@ -10,9 +10,9 @@ import outreach
 import resumes
 from monitor_data import snapshot as monitor_snapshot, HEADERS
 
-FIELDS={'stage':4,'notes':19,'priority':20,'follow_up':21,'recruiter_name':10,'recruiter_contact':12,'contact_origin':26,'mail_data':27,'application_data':28}
-EXTRA=['Notes','Priority','Follow-up date','Lorca ID','Lorca record','Outreach detail','Found number','Contact origin','Mail workflow','Application resume']
-META_FIELDS={'follow_up','contact_origin','mail_data','application_data'}
+FIELDS={'stage':4,'notes':19,'priority':20,'follow_up':21,'recruiter_name':10,'recruiter_contact':12,'contact_origin':26,'mail_data':27,'application_data':28,'reviewed_reply':29}
+EXTRA=['Notes','Priority','Follow-up date','Lorca ID','Lorca record','Outreach detail','Found number','Contact origin','Mail workflow','Application resume','Reviewed reply']
+META_FIELDS={'follow_up','contact_origin','mail_data','application_data','reviewed_reply'}
 
 def contact_value(field,value):
     # The legacy phone monitor used a display label for a missing contact.
@@ -137,7 +137,7 @@ def sync():
         api(':batchUpdate',{'requests':[{'addSheet':{'properties':{'title':name}}} for name in missing]})
         metadata=api('?fields=sheets(properties(sheetId,title,gridProperties),basicFilter)')
         tabs={s['properties']['title']:s['properties'] for s in metadata['sheets']}
-    remote=api('/values/'+urllib.parse.quote("'Opportunities'!A:AC",safe='')).get('values',[])
+    remote=api('/values/'+urllib.parse.quote("'Opportunities'!A:AD",safe='')).get('values',[])
     by_uuid={};legacy={}
     for number,row in enumerate(remote[1:],2):
         if len(row)>22 and row[22]:
@@ -167,7 +167,7 @@ def sync():
         dossiers={r['job_id']:json.loads(r['payload']) for r in db.execute('SELECT job_id,payload FROM research_dossiers')}
     patches=[];baselines=[];next_row=max(2,len(remote)+1);conflict_count=0
     header=HEADERS+EXTRA
-    if not remote or remote[0]!=header:patches.append({'range':"'Opportunities'!A1:AC1",'values':[header]})
+    if not remote or remote[0]!=header:patches.append({'range':"'Opportunities'!A1:AD1",'values':[header]})
     projection=monitor_snapshot(tracker.ROOT)
     monitor={int(r[0]):r for r in projection['Opportunities'][1:]}
     for job in jobs:
@@ -192,7 +192,7 @@ def sync():
                 remote_value=str(remote_value);conflict=True;chosen=local
             else:
                 if field not in baseline and placeholder:chosen,conflict=local,False
-                elif field not in baseline and local in ('','[]','{}') and field in ('mail_data','contact_origin','application_data'):chosen,conflict=remote_value,False
+                elif field not in baseline and local in ('','[]','{}') and field in ('mail_data','contact_origin','application_data','reviewed_reply'):chosen,conflict=remote_value,False
                 else:chosen,conflict=merge_value(baseline.get(field),local,remote_value)
             if conflict:
                 with tracker.db() as db:db.execute('INSERT OR REPLACE INTO sync_conflicts(job_id,field,local_value,remote_value) VALUES(?,?,?,?)',(job['id'],field,local,remote_value))
@@ -215,7 +215,7 @@ def sync():
                 else:job[field]=chosen
         row=list(monitor[job['id']])
         row[0]=meta['discovery_number']
-        row[4]=job['stage'];row[10]=job['recruiter_name'];row[12]=job['recruiter_contact'];row+=[job['notes'],job['priority'],meta['follow_up'],identity,cloud_record(job,dossiers.get(job['id']),meta['discovery_number']),job['outreach_stage'],meta['discovery_number'],meta['contact_origin'],meta['mail_data'],meta['application_data']]
+        row[4]=job['stage'];row[10]=job['recruiter_name'];row[12]=job['recruiter_contact'];row+=[job['notes'],job['priority'],meta['follow_up'],identity,cloud_record(job,dossiers.get(job['id']),meta['discovery_number']),job['outreach_stage'],meta['discovery_number'],meta['contact_origin'],meta['mail_data'],meta['application_data'],meta['reviewed_reply']]
         # Write only changed cells. Conflicted editable cells are never overwritten.
         for col,value in enumerate(row):
             field=next((key for key,index in FIELDS.items() if index==col),None)
@@ -229,14 +229,14 @@ def sync():
     status=projection['Status'];status[2]=['Sync connection','Lorca two-way sync · notes, priority, stage, follow-up date']
     patches.append({'range':f"'Status'!A1:B{len(status)}",'values':status})
     requests=[]
-    for name,rows,cols in [('Opportunities',next_row+1,29),('Status',len(status)+1,2)]:
+    for name,rows,cols in [('Opportunities',next_row+1,30),('Status',len(status)+1,2)]:
         properties=tabs[name];grid=properties.get('gridProperties',{})
         if grid.get('rowCount',0)<rows or grid.get('columnCount',0)<cols:
             requests.append({'updateSheetProperties':{'properties':{'sheetId':properties['sheetId'],'gridProperties':{'rowCount':max(rows,grid.get('rowCount',0)),'columnCount':max(cols,grid.get('columnCount',0))}},'fields':'gridProperties'}})
     if requests:api(':batchUpdate',{'requests':requests})
     # Sheets has no compare-and-swap. Recheck before writing so a phone edit
     # made during this sync is retried instead of overwritten from an old read.
-    latest=api('/values/'+urllib.parse.quote("'Opportunities'!A:AC",safe='')).get('values',[])
+    latest=api('/values/'+urllib.parse.quote("'Opportunities'!A:AD",safe='')).get('values',[])
     if latest!=remote:raise ValueError('Sheet changed during sync; retrying on the next cycle without overwriting it')
     if patches:api('/values:batchUpdate',{'valueInputOption':'RAW','data':patches})
     # Sort complete rows after cell writes so UUIDs, evidence and phone edits
@@ -246,9 +246,9 @@ def sync():
     desired_ids=sorted((meta['discovery_number'] for meta in metas.values()),reverse=True)
     layout=[]
     if current_ids!=desired_ids:
-        layout.append({'sortRange':{'range':{'sheetId':properties['sheetId'],'startRowIndex':1,'endRowIndex':end_row,'startColumnIndex':0,'endColumnIndex':max(29,properties.get('gridProperties',{}).get('columnCount',29))},'sortSpecs':[{'dimensionIndex':0,'sortOrder':'DESCENDING'}]}})
+        layout.append({'sortRange':{'range':{'sheetId':properties['sheetId'],'startRowIndex':1,'endRowIndex':end_row,'startColumnIndex':0,'endColumnIndex':max(30,properties.get('gridProperties',{}).get('columnCount',30))},'sortSpecs':[{'dimensionIndex':0,'sortOrder':'DESCENDING'}]}})
     old_filter=next((sheet.get('basicFilter',{}) for sheet in metadata['sheets'] if sheet['properties']['title']=='Opportunities'),{})
-    filter_range={'sheetId':properties['sheetId'],'startRowIndex':0,'endRowIndex':end_row,'startColumnIndex':0,'endColumnIndex':29}
+    filter_range={'sheetId':properties['sheetId'],'startRowIndex':0,'endRowIndex':end_row,'startColumnIndex':0,'endColumnIndex':30}
     if old_filter.get('range')!=filter_range:
         layout.append({'setBasicFilter':{'filter':{**old_filter,'range':filter_range}}})
     if layout:api(':batchUpdate',{'requests':layout})

@@ -34,11 +34,14 @@ def status():
 
 def run(operation):
     if not _busy.acquire(blocking=False):raise ValueError('Google operation in progress; try again shortly')
+    previous_message=_state.get('message','Google connected')
     _state.update(busy=True,message='Working…')
     def work():
         try:operation()
         except Exception as exc:_state.update(message=str(exc)[:600])
-        finally:_state['busy']=False;_busy.release()
+        finally:
+            if _state.get('message')=='Working…':_state['message']=previous_message
+            _state['busy']=False;_busy.release()
     threading.Thread(target=work,daemon=True).start()
 
 

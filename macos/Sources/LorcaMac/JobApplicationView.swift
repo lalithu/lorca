@@ -111,21 +111,43 @@ private struct JobResumeChanges: View {
     }
 }
 
-private struct JobResumePDF: View {
+private struct JobResumePDF: NSViewRepresentable {
     let url: URL
     let version: String
-    @State private var pages: [NSImage] = []
-    var body: some View {
-        ScrollView {
-            VStack(spacing: 10) {
-                ForEach(Array(pages.enumerated()), id: \.offset) { _, page in
-                    Image(nsImage: page).resizable().scaledToFit()
-                }
-            }.frame(maxWidth: .infinity)
-        }
-        .task(id: url.path + version) {
-            guard let document = PDFDocument(url: url) else { pages = [];return }
-            pages = (0..<min(document.pageCount, 10)).compactMap { document.page(at: $0)?.thumbnail(of: NSSize(width: 1000, height: 1400), for: .mediaBox) }
-        }
+    func makeNSView(context: Context) -> JobResumePDFView {
+        let view = JobResumePDFView()
+        view.displayMode = .singlePageContinuous
+        view.displayDirection = .vertical
+        view.minScaleFactor = 0.1
+        view.maxScaleFactor = 8
+        return view
+    }
+    func updateNSView(_ view: JobResumePDFView, context: Context) {
+        view.load(url: url, version: version)
+    }
+}
+
+final class JobResumePDFView: PDFView {
+    private var loadedVersion = ""
+    private var needsInitialFit = false
+    func load(url: URL, version: String) {
+        let key = url.path + "|" + version
+        guard loadedVersion != key else { return }
+        loadedVersion = key
+        document = PDFDocument(url: url)
+        needsInitialFit = true
+        needsLayout = true
+    }
+    override func layout() {
+        super.layout()
+        guard needsInitialFit, bounds.width > 0, bounds.height > 0, document != nil else { return }
+        needsInitialFit = false
+        autoScales = true
+        scaleFactor = scaleFactorForSizeToFit
+        goToFirstPage(nil)
+    }
+    override func magnify(with event: NSEvent) {
+        autoScales = false
+        scaleFactor = min(maxScaleFactor, max(minScaleFactor, scaleFactor * (1 + event.magnification)))
     }
 }

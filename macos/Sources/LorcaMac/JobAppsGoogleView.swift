@@ -133,6 +133,13 @@ struct JobEmailDetail: View {
             if job.outreach_stage == "Replied" || messages.contains(where: { $0.state == "Needs review" }) {
                 Text("Reply received · Automatic follow-up cancelled.").font(.system(size: max(10, 11 + zoom))).foregroundStyle(.blue)
                 Link("Reply in Gmail ↗", destination: gmailURL).font(.system(size: max(10, 11 + zoom)))
+                let receipt = store.replyReceipt(job.id)
+                if !receipt.isEmpty && receipt != store.snapshot?.mail?.meta.first(where: { $0.job_id == job.id })?.reviewed_reply {
+                    Button("Done reviewing reply") { Task { await store.perform(["op":"review_reply","id":job.id,"receipt":receipt]) } }
+                        .disabled(store.busy)
+                } else {
+                    Text("Reply reviewed").font(.system(size: max(10, 11 + zoom))).foregroundStyle(.secondary)
+                }
             }
             DisclosureGroup(due.isEmpty ? "Follow-up schedule" : "Follow-up · " + due) {
                 HStack {
