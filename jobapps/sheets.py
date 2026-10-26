@@ -92,12 +92,12 @@ def sync():
     config=google.config();sid=google.sheet_id(config.get('sheet_url',''))
     prefix=sid
     def api(path,body=None):return google.api('sheets',prefix+path,body)
-    metadata=api('?fields=sheets(properties(sheetId,title,gridProperties))')
+    metadata=api('?fields=sheets(properties(sheetId,title,gridProperties),basicFilter)')
     tabs={s['properties']['title']:s['properties'] for s in metadata.get('sheets',[])}
     missing=[name for name in ('Opportunities','Status') if name not in tabs]
     if missing:
         api(':batchUpdate',{'requests':[{'addSheet':{'properties':{'title':name}}} for name in missing]})
-        metadata=api('?fields=sheets(properties(sheetId,title,gridProperties))')
+        metadata=api('?fields=sheets(properties(sheetId,title,gridProperties),basicFilter)')
         tabs={s['properties']['title']:s['properties'] for s in metadata['sheets']}
     remote=api('/values/'+urllib.parse.quote("'Opportunities'!A:Y",safe='')).get('values',[])
     by_uuid={};legacy={}
@@ -183,5 +183,18 @@ def sync():
     latest=api('/values/'+urllib.parse.quote("'Opportunities'!A:Y",safe='')).get('values',[])
     if latest!=remote:raise ValueError('Sheet changed during sync; retrying on the next cycle without overwriting it')
     if patches:api('/values:batchUpdate',{'valueInputOption':'RAW','data':patches})
+    # Sort complete rows after cell writes so UUIDs, evidence and phone edits
+    # stay attached to their job. New records must not sit below the old filter.
+    properties=tabs['Opportunities'];end_row=next_row-1
+    current_ids=[int(row[0]) for row in remote[1:] if row and str(row[0]).isdigit()]
+    desired_ids=sorted((job['id'] for job in jobs),reverse=True)
+    layout=[]
+    if current_ids!=desired_ids:
+        layout.append({'sortRange':{'range':{'sheetId':properties['sheetId'],'startRowIndex':1,'endRowIndex':end_row,'startColumnIndex':0,'endColumnIndex':max(25,properties.get('gridProperties',{}).get('columnCount',25))},'sortSpecs':[{'dimensionIndex':0,'sortOrder':'DESCENDING'}]}})
+    old_filter=next((sheet.get('basicFilter',{}) for sheet in metadata['sheets'] if sheet['properties']['title']=='Opportunities'),{})
+    filter_range={'sheetId':properties['sheetId'],'startRowIndex':0,'endRowIndex':end_row,'startColumnIndex':0,'endColumnIndex':25}
+    if old_filter.get('range')!=filter_range:
+        layout.append({'setBasicFilter':{'filter':{**old_filter,'range':filter_range}}})
+    if layout:api(':batchUpdate',{'requests':layout})
     with tracker.db() as db:db.executemany('UPDATE job_meta SET baseline=? WHERE job_id=?',baselines)
     return {'jobs':len(jobs),'changed_cells':len(patches)-1,'conflicts':conflict_count}

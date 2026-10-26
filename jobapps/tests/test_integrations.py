@@ -114,9 +114,14 @@ class GoogleTests(unittest.TestCase):
     def fake_sheet(self):
         import copy, re, urllib.parse
         from monitor_data import HEADERS
-        state={'rows':[HEADERS.copy()], 'writes':0}
+        state={'rows':[HEADERS.copy()], 'writes':0, 'layout':[]}
         def api(service,path,body=None):
             if '?fields=' in path:return {'sheets':[{'properties':{'sheetId':i,'title':n,'gridProperties':{'rowCount':1000,'columnCount':26}}} for i,n in enumerate(['Opportunities','Status'])]}
+            if path.endswith(':batchUpdate') and '/values:' not in path:
+                for request in body['requests']:
+                    state['layout'].append(request)
+                    if 'sortRange' in request:state['rows'][1:]=sorted(state['rows'][1:],key=lambda row:int(row[0]),reverse=True)
+                return {}
             if '/values/' in path:return {'values':copy.deepcopy(state['rows'])}
             if path.endswith('/values:batchUpdate'):
                 state['writes']+=1
@@ -148,6 +153,19 @@ class GoogleTests(unittest.TestCase):
             self.assertEqual(state['rows'][1][19],'Local edit')
             state['rows'][1][5]='Made-up verification';sheets.sync()
             self.assertEqual(state['rows'][1][5],'Verified')
+    def test_new_jobs_sort_above_existing_rows_and_expand_filter(self):
+        self.configure();state,api=self.fake_sheet()
+        with patch.object(google,'api',side_effect=api):
+            sheets.sync()
+            second=tracker.create_job({'company':'New company','title':'New job'})
+            sheets.sync()
+            self.assertEqual([int(row[0]) for row in state['rows'][1:]],[second['id'],self.job['id']])
+            self.assertEqual(state['rows'][1][1],'New company')
+            self.assertEqual(state['rows'][2][1],'Acme')
+            filters=[r['setBasicFilter']['filter']['range'] for r in state['layout'] if 'setBasicFilter' in r]
+            self.assertEqual(filters[-1]['endRowIndex'],3)
+            self.assertEqual(filters[-1]['endColumnIndex'],25)
+
     def test_sheet_changes_during_read_are_not_overwritten(self):
         self.configure();state,api=self.fake_sheet();reads=0
         def racing(service,path,body=None):
