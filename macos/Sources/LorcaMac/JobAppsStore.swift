@@ -68,6 +68,8 @@ struct JobMailRecord: Decodable, Identifiable, Equatable {
     let error: String?
     let approval_token: String?
     let reply_revision: String?
+    var provider_message: String? = nil
+    var needsTemplateFill: Bool { body.range(of: #"\[[A-Z][^\]\n]*\](?!\()|_{3,}"#, options: .regularExpression) != nil }
 }
 struct JobMailSnapshot: Decodable, Equatable {
     struct ThreadMessage: Decodable, Identifiable, Equatable { let id: String; let from: String; let body: String; let sent: Bool; let date: String }
@@ -163,6 +165,8 @@ final class JobAppsStore: ObservableObject {
     @Published private(set) var queueActive = false
     @Published private(set) var queueSkipped = Set<Int>()
     @Published private(set) var history: [String] = []
+    @Published private(set) var preparingOutreach: Int?
+    var openGmail: (URL) -> Void = { NSWorkspace.shared.open($0) }
     private let bridge: any JobAppsTransport
     private var poll: Task<Void, Never>?
     private var pendingRequests = 0
@@ -187,9 +191,11 @@ final class JobAppsStore: ObservableObject {
         guard queueActive, let selected else { return }
         queueSkipped.insert(selected);self.selected = queueJobs.first?.id
     }
+    func nextQueueJob() { selected = queueJobs.first?.id }
     private func reconcileQueue() {
         guard queueActive else { return }
-        if !queueJobs.contains(where: { $0.id == selected }) {
+        // Keep the completed job visible until Next; polling must not move focus.
+        if selectedJob == nil {
             let next = queueJobs.first?.id
             if selected != next { selected = next }
         }
@@ -219,12 +225,15 @@ final class JobAppsStore: ObservableObject {
         attentionStep(job) != nil
     }
     func actionLabel(_ job: JobRecord) -> String {
+        if ["Archived", "Rejected", "Offer"].contains(job.stage) { return job.stage }
+        if job.verification == "Expired" { return "Posting expired" }
+        if attentionStep(job) == .application { return "Complete application" }
         if job.outreach_stage == "Replied" || snapshot?.mail?.messages.contains(where: { $0.job_id == job.id && $0.state == "Needs review" }) == true { return "Reply received" }
         if let due = snapshot?.mail?.meta.first(where: { $0.job_id == job.id })?.follow_up, !due.isEmpty {
             let format = DateFormatter();format.dateFormat = "yyyy-MM-dd";format.timeZone = TimeZone(identifier: "America/New_York")
             if due <= format.string(from: Date()) { return "Follow-up due" }
         }
-        if job.outreach_stage == "Sent" || snapshot?.mail?.messages.contains(where: { $0.job_id == job.id && $0.state == "Sent" }) == true { return "Waiting for reply" }
+        if snapshot?.mail?.messages.contains(where: { $0.job_id == job.id && $0.state == "Sent" && !($0.sent_at ?? "").isEmpty }) == true { return "Waiting for reply" }
         if snapshot?.mail?.messages.contains(where: { $0.job_id == job.id && ["Creating", "Sending", "Needs reconciliation", "Needs send reconciliation"].contains($0.state) }) == true { return "Check email status" }
         if snapshot?.mail?.messages.contains(where: { $0.job_id == job.id && $0.state == "Gmail draft" }) == true { return "Review in Gmail" }
         if !job.recruiter_contact.contains("@") { return job.recruiter_name.isEmpty ? "Add recruiter" : "Add recruiter email" }
@@ -234,8 +243,50 @@ final class JobAppsStore: ObservableObject {
         switch actionLabel(job) {
         case "Add recruiter", "Add recruiter email", "Follow-up due": return .yellow
         case "Reply received": return .blue
+        case "Waiting for reply": return .green
         default: return .secondary
         }
+    }
+    func workflowStep(_ job: JobRecord) -> Int {
+        if attentionStep(job) == .application { return 0 }
+        if attentionStep(job) == nil { return 3 }
+        if !job.recruiter_contact.contains("@"), snapshot?.mail?.messages.contains(where: { $0.job_id == job.id }) != true { return 1 }
+        return 2
+    }
+    func waitingSummary(_ job: JobRecord) -> String {
+        guard actionLabel(job) == "Waiting for reply" else { return actionLabel(job) }
+        let due = snapshot?.mail?.meta.first { $0.job_id == job.id }?.follow_up ?? ""
+        return "Waiting for response" + (due.isEmpty ? "" : " · Follow-up due " + due)
+    }
+    static func gmailDraftURL(_ message: JobMailRecord) -> URL {
+        var url = URLComponents(string: "https://mail.google.com/mail/u/?authuser=lalithuriti%40gmail.com")!
+        // Use Gmail's message ID, not the API's separate draft container ID.
+        let id = message.provider_message ?? ""
+        url.fragment = id.isEmpty ? "drafts" : "drafts?compose=" + id
+        return url.url!
+    }
+    @discardableResult func prepareOutreach(_ job: Int, kind: String = "initial", fillTemplate: Bool = false) async -> Bool {
+        guard preparingOutreach == nil, !busy, snapshot?.integrations?.busy != true else { return false }
+        preparingOutreach = job
+        defer { preparingOutreach = nil }
+        guard await perform(["op":"prepare_outreach", "id":job, "kind":kind, "fillTemplate":fillTemplate]) else { return false }
+        let deadline = Date().addingTimeInterval(180)
+        while snapshot?.integrations?.busy == true {
+            do { try await Task.sleep(for: .milliseconds(300)) } catch { return false }
+            guard Date() < deadline else { error = "Gmail is still working. Refresh its status before retrying; no email was sent by lorca."; return false }
+            guard await perform(["op":"snapshot"]) else { return false }
+        }
+        guard let message = snapshot?.mail?.messages.first(where: { $0.job_id == job && $0.kind == kind }), message.state == "Gmail draft" else {
+            error = snapshot?.integrations?.message ?? "Couldn’t confirm the Gmail draft. Refresh its status before retrying."
+            return false
+        }
+        if fillTemplate && message.needsTemplateFill {
+            error = snapshot?.integrations?.message ?? "The draft could not be filled. Your Gmail draft was left untouched."
+            return false
+        }
+        dismissError()
+        openGmail(Self.gmailDraftURL(message))
+        return true
     }
     func open() async {
         observe()

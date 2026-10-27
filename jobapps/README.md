@@ -1,78 +1,70 @@
-# Job Apps
+# 🫍 Job Apps
 
-Native Research, manual Applying, and Email & Follow-ups share the existing local
-tracker. Research uses Lorca's Rust agent with a web-only tool registry; no Hermes
-runtime, application automation, or email sending is involved.
+A guided native workflow for research, manual applications, and recruiter outreach.
+SwiftUI talks to a private serialized Python companion; SQLite stores local progress.
+Research uses lorca's existing Rust runtime with web-only tools.
 
 ## Setup
 
-Build with `./macos/build.sh`, quit older Lorca instances, and open the rebuilt app.
-Existing records load automatically from `~/Library/Application Support/lorca/job-apps`,
-outside Git. On another Mac, connect Google and sync the same Sheet to download saved
-job records and shared profile/templates. Google sign-in and the approved PDF remain local.
-Review the factual candidate profile and editable research preferences in Settings.
-Start pins Lorca's selected local model for the shift. Research continues across tab
-changes; Pause it before chatting or switching models. Quit stops research. Job Apps also offers **Unload model…**, using the same
-confirmation and active-work safeguards as the chat model menu.
+1. Build with `./macos/build.sh`, quit the old app, and reopen it.
+2. In **Job Apps → Settings**, review Search preferences and your factual Candidate profile.
+3. Import an approved master résumé PDF in Profile; optionally supply its LaTeX source for tailoring.
+4. For Gmail/Sheets, configure a Google Desktop OAuth client with Gmail and Sheets APIs enabled, then connect Google and enter a private Sheet URL.
 
-## Google and outreach
+Python 3 must be installed. This personal build currently targets the author's Gmail account; it is not a general multi-account product. Credentials and private runtime data live outside Git in `~/Library/Application Support/lorca/job-apps/`.
 
-In Job Apps Settings → Google, connect the intended Gmail account using
-a Google Desktop OAuth client with Gmail API and Sheets API enabled. On the original
-Mac the existing Sheets client is reused; a new Mac needs its own Google sign-in and
-OAuth client configuration. Credentials, resumes and templates are never committed.
+## The daily flow
 
-Enter the existing Sheet URL and enable sync. This replaces the legacy launchd
-Sheets writer on the original Mac. While Job Apps' companion is running, sync checks
-every minute and writes changed job cells only; the Status timestamp refreshes too.
-Opening Job Apps or saving profile/preferences/templates requests an immediate sync
-when Google is connected and sync is enabled. Requests share the existing serialized
-worker and wait for current Google work rather than starting parallel syncs.
-Notes, priority, stage and ISO follow-up dates are editable on either side. Conflicts
-retain both values for review in Lorca. Evidence and Gmail status come from Lorca.
-Stable IDs and job/evidence summaries let a fresh local tracker download Sheet jobs;
-full browser logs, the approved resume PDF, credentials and Gmail thread links stay local. Sheets provides no atomic compare-and-swap: a second read checks for changes
-before writes, but simultaneous writers are not supported. Run one active Mac.
+- **Research:** start explicitly with the selected model. Pause before chatting or switching models. Research keeps progress across tabs and stops on quit.
+- **Applying:** open the posting, review/tailor the résumé, apply on the employer's site, then mark Applied.
+- **Recruiter:** add published contact evidence or enter a contact yourself, labeled Provided by you.
+- **Review in Gmail:** Prepare outreach fills the saved template, attaches the approved master PDF, and opens the draft. Review and send manually in Gmail.
+- **Waiting:** a confirmed send turns the job green, removes it from the actionable queue, and schedules follow-up five weekdays later. No manual date entry is needed.
 
-The **Lorca Settings** tab syncs the candidate profile, search preferences, initial
-email template, and follow-up template. Sync first on the Mac with the completed
-profile/templates, then sync the other Mac. Default placeholders do not overwrite
-saved settings. Different edits are retained for review in **Google**;
-choose Keep this Mac or Use Sheet, then sync again. Incoming profile changes wait
-until research is paused, including when research starts during an in-flight sync.
-Settings errors remain visible without blocking job or Gmail updates. This tab
-contains your personal profile, so use the same
-private Sheet on both Macs. Google tokens, OAuth clients, API keys, PDF files,
-connection/enable state, and local paths are never included in settings sync.
+**Needs you** focuses on the oldest remaining discovery number and keeps the current job visible until **Next job**. **Skip for now** defers it for the current pass. **All jobs** retains newest-first order. Due follow-ups and unreviewed replies return to the queue; **Done reviewing reply** records a synced receipt until a newer reply arrives.
 
-Templates may be left blank until later. Start each with `Subject: ...`, then the
-body. Supported placeholders: `{{first_name}}`, `{{contact_name}}`, `{{company}}`,
-`{{role}}`, `{{job_url}}`, `{{job_specific}}`, `{{your_name}}`. Personalization uses
-stored research facts; template wording is preserved, without another model rewrite.
-Local initial drafts are prepared for verified roles with published email evidence.
-Select one approved PDF before creating initial Gmail drafts. Review/edit locally,
-then choose Approve & send, or Create Gmail draft to finish manually in Gmail.
-Sending requires a fresh review of the recipient, message and master PDF; uncertain sends are reconciled rather than retried automatically.
+Notes are always visible and editable in one live Markdown surface. Save also requests sync. Priority and application stage remain editable.
 
-Only linked drafts, resulting threads and Lorca's unique message IDs are checked.
-A missing draft is not treated as sent. Provider-confirmed sends schedule one
-follow-up after five weekdays in Eastern time (public holidays are not excluded).
-Use Follow-up due to find those jobs, prepare one follow-up, and send it manually.
-Replies clear the due date and mark Needs review. Uncertain draft creation is held
-for reconciliation instead of retried, preventing duplicate outreach. Arbitrary
-inbox search, autonomous sending and application automation are unavailable.
+## Templates, drafts, and tracking
 
-## Research and implementation
+- Default subject: `Role @ Company`. An optional `Subject:` line in the template overrides it.
+- Supported fields: `{{first_name}}`, `{{contact_name}}`, `{{company}}`, `{{role}}`, `{{job_url}}`, `{{job_specific}}`, `{{your_name}}`.
+- Common bracket fields such as `[NAME]`, `[ROLE]`, `[COMPANY]`, skills, and an experience sentence fill from saved facts without loading a model. Unknown fields or missing facts stop preparation.
+- `[ATTACH RESUME]` is replaced by the actual attachment, not left in the email body.
+- Repeated preparation reuses the linked draft. **Fill template & open Gmail** repairs an old placeholder draft while preserving attachments; it refuses to overwrite a body already edited in Gmail.
+- Lorca checks linked drafts/threads for provider-confirmed sends and replies. A missing draft alone is never evidence of sending.
+- Confirmed replies clear the due date and mark Needs review. Follow-up uses five weekdays in Eastern time, excluding weekends but not public holidays.
+- Uncertain Gmail writes require reconciliation; writes are never replayed automatically. Interrupted Google reads retry once. TLS verification remains enabled.
+- No automatic email sending or application submission. The normal workflow ends at Gmail review/send; any retained backend send operation still requires explicit approval.
 
-SwiftUI → private serialized stdio Python companion → SQLite/evidence/checkpoints.
-A bundled `lorca-core job-session` uses the existing Rust Agent and Ollama Inference.
-Only web_search and web_extract are exposed, with discovery limited to two searches;
-research sessions allow five searches and seven extracts. Extracted official-source
-quotes, not search snippets, establish verification. Exa free transport is rate
-limited; errors are visible and bounded retries/checkpoints retain progress.
+## Two-Mac sync
 
-The companion uses Python's standard library; Python 3 must be installed. Exa
-transport is adapted from Hermes' MIT implementation; attribution is in vendor/.
+Connect both Macs to the same private Sheet and enable sync. Opening Job Apps, returning to the app, or saving settings requests sync; the running companion also checks roughly every minute. Requests use one serialized worker.
+
+| Synced through Sheets | Stays on each Mac |
+| --- | --- |
+| Job records, stable IDs, notes, priority, stage, contacts | Google sign-in, OAuth client, tokens, API keys |
+| Draft/tracking references and follow-up dates | Connection/enable state and local paths |
+| Candidate profile, preferences, email templates | Full research/browser logs and local caches |
+| Master LaTeX source and approved master PDF | Chat conversations and attachments |
+
+- **Lorca Settings** holds shared text; hidden **Lorca Resume** holds the approved PDF in verified chunks. PDF transfer is hash-based, with a 15 MB limit.
+- Import/replace the PDF inside lorca; changing an external original file does not update its approved copy. PDF import is picked up by the next background/manual sync. Let sync finish before closing.
+- PDF, LaTeX source, and candidate profile are separate. Changing one does not rewrite the others. Tailored PDFs can be rebuilt from synced job source.
+- Conflicts retain both values for review; defaults do not overwrite completed settings. Choose Keep this Mac or Use Sheet, then sync again.
+- Sheets uses read-before-write checks, not atomic distributed transactions. Use one active Mac at a time, especially for sending or conflicting résumé edits.
+- After pulling code updates, rebuild and restart both Macs. Git carries code; Sheets carries Job Apps data. Each Mac signs in separately.
+
+## Résumé tailoring
+
+Applying keeps a separate LaTeX copy per job. Automatic tailoring reorders existing bullets for relevance without inventing claims; manual LaTeX edits allow wording changes. Tectonic compiles in untrusted mode and is installed into lorca's local tools folder on first use if needed. The master source stays separate. Application forms remain manual.
+
+## Research limits
+
+- Exa search/extraction transport is adapted from Hermes' MIT implementation; no Hermes runtime is bundled. See [attribution](vendor/NOTICE.md).
+- Discovery allows two searches; research sessions allow five searches and seven extracts. Official-source quotes establish verification; snippets are leads only.
+- Searches/extraction use external services. Errors are bounded and checkpoints retain progress; missing or unverifiable facts stay unknown.
+- One research/model operation per Mac. Research does not control a browser, apply for jobs, or send outreach.
 
 ## Verification
 
@@ -80,56 +72,8 @@ transport is adapted from Hermes' MIT implementation; attribution is in vendor/.
 python3 -B -m unittest discover -s jobapps/tests
 cargo test
 cargo clippy --all-targets -- -D warnings
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swift test --package-path macos
 ./macos/build.sh
 ```
 
-Tests cover source validation, research transport/lifecycle, template preservation,
-PDF approval, duplicate-draft prevention, provider-confirmed send/reply tracking,
-field conflicts, Sheet round trips, shared settings/credential exclusion, and record bootstrap. Native SwiftUI acceptance
-and live Google draft/Sheets checks were also run on the development Mac.
-
-Settings has separate Search, Profile, Email and Google sections. Text supports
-Markdown preview and a plain editor; Preview never alters saved wording. Drop one
-PDF into Profile → Resume, or choose it with the file picker, to approve the local
-attachment for initial outreach. This does not rewrite the candidate profile.
-
-## Job Apps workflow
-
-Needs you opens actionable outreach: missing recruiter emails (yellow), replies,
-follow-ups, and messages awaiting review. Recruiter details supplied in Lorca are
-labeled Provided by you. Real conflicting edits remain available for review;
-legacy Not publicly established contact labels are treated as empty values.
-
-Outreach attaches the approved master PDF. Approve & send binds approval to the
-recipient, text and PDF fingerprint. Ambiguous sends require reconciliation and
-are not automatically retried. Existing Gmail drafts are edited/sent in Gmail.
-Linked conversations can be refreshed inside Job Apps; replies cancel the due date.
-
-Applying keeps a separate LaTeX copy for each job. Automatic tailoring reorders
-existing bullets for relevance without creating new claims. Edit LaTeX supports
-manual wording changes; compilation uses Tectonic in untrusted mode. The compiler
-is installed into Lorca's local tools folder on first use if needed. The master
-source remains separate. Save the PDF, apply on the employer's site, then Mark
-applied. Application forms remain manual.
-
-The existing minute-based Sheet worker also transfers local drafts, tracking
-references, resume source/selection and the approved master PDF. The PDF is stored
-in a hidden Lorca Resume tab in verified chunks and transferred only when its hash
-changes. Concurrent master edits require a choice. Credentials stay local. On a
-second Mac, connect the same account/Sheet; tailored PDFs can be built from the
-synced source. Both Macs need this version before using the new editable fields.
-Sheets uses read-before-write conflict checks, not distributed transactions; avoid
-simultaneously sending the same message from both Macs. Only one research/model
-operation runs on each Mac. Zoom follows the existing chat-text shortcuts and
-reflows the Job Apps header without changing navigation elsewhere.
-
-### Guided Needs you queue
-
-Needs you selects the oldest remaining discovery number and opens its next step.
-Applications and outreach are independent: Mark applied opens outreach for the same
-job, and only a confirmed send finishes that step. Due follow-ups and unreviewed
-replies return to the queue. Done reviewing reply syncs a receipt for the current
-reply; a newer reply requires review again. Skip for now defers a job for the current
-pass without changing its stage, and Revisit skipped starts another pass. All jobs
-keeps its normal newest-first order. Incoming research never interrupts the current
-job while it still needs action.
+Tests cover research validation, templates, PDF approval, shared settings/PDF transfer, two-Mac round trips, schema compatibility, conflicts, duplicate-draft protection, and confirmed send/reply tracking. Native workflow, Gmail draft repair/send tracking, and live Sheets sync were verified on the development Mac. This checkpoint still needs a physical second-Mac acceptance check.

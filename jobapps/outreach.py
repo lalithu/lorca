@@ -2,6 +2,7 @@
 import base64
 from datetime import datetime,timedelta,timezone
 from email.message import EmailMessage
+from email import message_from_bytes, policy
 from email.utils import getaddresses
 import hashlib
 import json
@@ -12,9 +13,13 @@ import uuid
 import html
 from zoneinfo import ZoneInfo
 import google_connections as google
+import outreach_template
 import jobtracker as tracker
 
 _threads={}
+MAIL_REQUIRED={'id','kind','recipient','subject','body','state','created_at'}
+MAIL_DEFAULTS={key:'' for key in ('gmail_draft','thread_id','rfc_id','sent_at','provider_message','error','reply_revision','resume_choice','resume_sha256','resume_version')}
+MAIL_FIELDS=MAIL_REQUIRED|set(MAIL_DEFAULTS)
 
 def plain_body(payload):
     parts=[payload,*payload.get('parts',[])]
@@ -51,7 +56,10 @@ def init():
         CREATE TABLE IF NOT EXISTS sync_conflicts(job_id INTEGER NOT NULL,field TEXT NOT NULL,local_value TEXT NOT NULL,remote_value TEXT NOT NULL,PRIMARY KEY(job_id,field));
         ''')
     with tracker.db() as db:
-        if 'reply_revision' not in {row[1] for row in db.execute('PRAGMA table_info(outreach_messages)')}:
+        columns={row[1] for row in db.execute('PRAGMA table_info(outreach_messages)')}
+        for field in ('resume_choice','resume_sha256','resume_version'):
+            if field not in columns:db.execute(f"ALTER TABLE outreach_messages ADD COLUMN {field} TEXT NOT NULL DEFAULT ''")
+        if 'reply_revision' not in columns:
             db.execute("ALTER TABLE outreach_messages ADD COLUMN reply_revision TEXT NOT NULL DEFAULT ''")
         if 'reviewed_reply' not in {row[1] for row in db.execute('PRAGMA table_info(job_meta)')}:
             db.execute("ALTER TABLE job_meta ADD COLUMN reviewed_reply TEXT NOT NULL DEFAULT ''")
@@ -112,34 +120,83 @@ def save_contact(job_id,name,email):
         db.execute('INSERT INTO history(job_id,action,happened_at) VALUES(?,?,?)',(job_id,'Recruiter supplied by you; unsent local drafts reset',tracker.now()))
 
 
+def draft_content(job,kind):
+    settings=google.config();template=settings.get('initial_template' if kind=='initial' else 'followup_template','').strip()
+    if not template:raise ValueError('Add your '+kind+' template in Job Apps settings first')
+    who,data=contact(job)
+    profile=tracker.ROOT/'profile/master_resume.md'
+    subject,body=outreach_template.render(template,job,who,data,profile.read_text() if profile.exists() else '',kind)
+    return subject,body,who['email']
+
+
 def prepare(job_id,kind='initial'):
     if kind not in ('initial','followup'):raise ValueError('Unknown draft type')
     job=tracker.get_job(job_id)
     if not job:raise ValueError('Job not found')
-    settings=google.config();template=settings.get('initial_template' if kind=='initial' else 'followup_template','').strip()
-    if not template:raise ValueError('Add your '+kind+' template in Job Apps settings first')
     with tracker.db() as db:
         existing=db.execute('SELECT * FROM outreach_messages WHERE job_id=? AND kind=?',(job_id,kind)).fetchone()
         if existing:return dict(existing)
         if kind=='followup':
             initial=db.execute("SELECT * FROM outreach_messages WHERE job_id=? AND kind='initial'",(job_id,)).fetchone()
             if not initial or initial['state']!='Sent':raise ValueError('Follow-up requires an actually sent initial message without a detected reply')
-    who,data=contact(job)
-    fields={'first_name':who.get('name','').split(' ')[0],'contact_name':who.get('name',''),
-        'company':job['company'],'role':job['title'],'job_url':job['job_url'],
-        'job_specific':data.get('role',{}).get('fit',''),'your_name':'Lalith Uriti'}
-    unknown=set(re.findall(r'\{\{\s*(\w+)\s*\}\}',template))-set(fields)
-    if unknown:raise ValueError('Unknown template placeholders: '+', '.join(sorted(unknown)))
-    rendered=re.sub(r'\{\{\s*(\w+)\s*\}\}',lambda m:fields[m[1]],template)
-    first,sep,body=rendered.partition('\n')
-    if not sep or not first.lower().startswith('subject:'):raise ValueError('Start the template with Subject: followed by the subject, then the email body')
-    subject=first[8:].strip();body=body.strip()
-    if not subject or not body or len(subject)>240 or len(body)>20000:raise ValueError('Template subject/body is empty or too long')
+    subject,body,recipient=draft_content(job,kind)
     with tracker.db() as db:identity=db.execute('SELECT sync_id FROM job_meta WHERE job_id=?',(job_id,)).fetchone()[0]
-    record={'id':str(uuid.uuid5(uuid.UUID(identity),kind)),'job_id':job_id,'kind':kind,'recipient':who['email'],'subject':subject,'body':body,'state':'Local draft','created_at':tracker.now()}
+    record={'id':str(uuid.uuid5(uuid.UUID(identity),kind)),'job_id':job_id,'kind':kind,'recipient':recipient,'subject':subject,'body':body,'state':'Local draft','created_at':tracker.now()}
     with tracker.db() as db:
         db.execute('INSERT INTO outreach_messages('+','.join(record)+') VALUES('+','.join('?' for _ in record)+')',list(record.values()))
     return record
+
+
+def prepare_gmail(job_id,kind='initial',fill=False):
+    """Explicit user action: create a draft, never send; reuse shared receipts."""
+    import sheets
+    if google.config().get('enabled'):sheets.sync()
+    with tracker.db() as db:
+        conflict=db.execute("SELECT 1 FROM sync_conflicts WHERE job_id=? AND field IN ('mail_data','recruiter_name','recruiter_contact')",(job_id,)).fetchone()
+    if conflict:raise ValueError('Resolve the Sheet changes for this job before preparing outreach')
+    record=prepare(job_id,kind)
+    if record['state']=='Local draft':
+        if outreach_template.has_markers(record['body']):
+            subject,body,_=draft_content(tracker.get_job(job_id),kind)
+            with tracker.db() as db:db.execute('UPDATE outreach_messages SET subject=?,body=? WHERE id=?',(subject,body,record['id']))
+        create_gmail(record['id'])
+    elif record['state']=='Gmail draft' and fill:
+        fill_gmail(record)
+    elif record['state']!='Gmail draft':
+        raise ValueError('This email is already sent or needs checking. Refresh its Gmail status before preparing another draft.')
+    # Publish the confirmed draft identity before handing off to Gmail, so a
+    # switch to the other Mac reuses it rather than preparing another email.
+    if google.config().get('enabled'):sheets.sync()
+
+
+def fill_gmail(record):
+    """Repair only an unchanged, unsent Gmail draft; preserve its attachments."""
+    if record['state']!='Gmail draft':raise ValueError('Only an unsent Gmail draft can be filled')
+    subject,body,_=draft_content(tracker.get_job(record['job_id']),record['kind'])
+    draft=google.api('gmail','drafts/'+urllib.parse.quote(record['gmail_draft'],safe='')+'?format=raw')
+    if draft.get('id')!=record['gmail_draft']:raise ValueError('Gmail did not confirm this draft. Refresh its status before retrying.')
+    raw=draft.get('message',{}).get('raw','')
+    message=message_from_bytes(base64.urlsafe_b64decode(raw+'='*(-len(raw)%4)),policy=policy.default)
+    plain=message.get_body(preferencelist=('plain',))
+    recipients={address.lower() for _,address in getaddresses(message.get_all('To',[]))}
+    if plain is None or plain.get_content().replace('\r\n','\n').strip()!=record['body'].replace('\r\n','\n').strip() or recipients!={record['recipient'].lower()}:
+        raise ValueError('This Gmail draft has been edited. Lorca left it untouched; finish editing it in Gmail.')
+    # Keep an explicitly edited subject and every attachment already in Gmail.
+    if str(message.get('Subject',''))!=record['subject']:subject=str(message.get('Subject',''))
+    message.replace_header('Subject',subject)
+    html_part=message.get_body(preferencelist=('html',))
+    plain.set_content(body)
+    if html_part is not None:html_part.set_content('<div>'+html.escape(body).replace('\n','<br>')+'</div>',subtype='html')
+    payload={'message':{'raw':base64.urlsafe_b64encode(message.as_bytes()).decode()}}
+    try:
+        result=google.api('gmail','drafts/'+urllib.parse.quote(record['gmail_draft'],safe=''),payload,method='PUT')
+        if result.get('id')!=record['gmail_draft'] or not result.get('message',{}).get('threadId'):
+            raise ValueError('Gmail did not confirm the updated draft. Refresh its status before retrying.')
+        with tracker.db() as db:
+            db.execute("UPDATE outreach_messages SET subject=?,body=?,thread_id=?,provider_message=?,error='' WHERE id=?",(subject,body,result['message']['threadId'],result['message'].get('id',''),record['id']))
+    except Exception as exc:
+        with tracker.db() as db:db.execute("UPDATE outreach_messages SET state='Needs reconciliation',error=? WHERE id=?",(str(exc)[:500],record['id']))
+        raise
 
 
 def edit(identifier,subject,body,expected_token=None):
@@ -265,18 +322,25 @@ def reconcile():
         if not thread:
             with tracker.db() as db:db.execute("UPDATE outreach_messages SET state='Needs reconciliation',error='Draft missing; no linked sent message was confirmed' WHERE id=?",(row['id'],))
             continue
-        sent=[]
+        sent=[];linked=[]
         for message in thread.get('messages',[]):
             if 'SENT' not in message.get('labelIds',[]):continue
             if int(message.get('internalDate','0'))<int(datetime.fromisoformat(row['created_at']).timestamp()*1000):continue
             if headers(message).get('message-id')==row['rfc_id'] or message.get('id')==row['provider_message']:sent.append(message)
+            h=headers(message)
+            recipients={address.lower() for _,address in getaddresses([h.get('to','')])}
+            senders={address.lower() for _,address in getaddresses([h.get('from','')])}
+            if row['recipient'].lower() in recipients and google.ACCOUNT.lower() in senders:linked.append(message)
+        # Gmail can replace both the API ID and RFC Message-ID on send. An
+        # unambiguous new SENT message in our linked thread is still evidence.
+        if not sent and len(linked)==1:sent=linked
         if not sent:continue
         message=sent[0];stamp=datetime.fromtimestamp(int(message['internalDate'])/1000,timezone.utc).isoformat()
         incoming=[m for m in thread.get('messages',[]) if int(m.get('internalDate',0))>int(message['internalDate']) and not {'SENT','DRAFT','TRASH'}.intersection(m.get('labelIds',[])) and google.ACCOUNT not in [a.lower() for _,a in getaddresses([headers(m).get('from','')])]]
         state='Needs review' if incoming else 'Sent'
         revision=hashlib.sha256(json.dumps(sorted((item['id'],str(item.get('internalDate',''))) for item in incoming)).encode()).hexdigest() if incoming else ''
         with tracker.db() as db:
-            db.execute('UPDATE outreach_messages SET state=?,sent_at=?,thread_id=?,rfc_id=?,error=?,reply_revision=? WHERE id=?',(state,stamp,thread['id'],headers(message).get('message-id',row['rfc_id']),'',revision,row['id']))
+            db.execute('UPDATE outreach_messages SET state=?,sent_at=?,thread_id=?,rfc_id=?,provider_message=?,error=?,reply_revision=? WHERE id=?',(state,stamp,thread['id'],headers(message).get('message-id',row['rfc_id']),message['id'],'',revision,row['id']))
             db.execute('UPDATE jobs SET outreach_stage=?,updated_at=? WHERE id=?',('Replied' if incoming else 'Sent',tracker.now(),row['job_id']))
             if incoming:db.execute("UPDATE job_meta SET follow_up='' WHERE job_id=?",(row['job_id'],))
             elif row['kind']=='initial' and not row['sent_at']:db.execute('UPDATE job_meta SET follow_up=? WHERE job_id=?',(business_due(stamp),row['job_id']))
@@ -298,21 +362,35 @@ def numbered_jobs():
 
 def portable_mail(job_id):
     with tracker.db() as db:
-        rows=[{k:v for k,v in dict(row).items() if k!='job_id'} for row in db.execute('SELECT * FROM outreach_messages WHERE job_id=? ORDER BY kind',(job_id,))]
+        rows=[{k:row[k] for k in MAIL_FIELDS} for row in db.execute('SELECT * FROM outreach_messages WHERE job_id=? ORDER BY kind',(job_id,))]
     return json.dumps(rows,sort_keys=True,separators=(',',':'))
 
 
-def import_mail(db,job_id,text):
+def decode_mail(text):
     rows=json.loads(text)
     if not isinstance(rows,list) or len(rows)>2:raise ValueError('Invalid shared mail records')
-    allowed={'id','kind','recipient','subject','body','state','created_at','gmail_draft','thread_id','rfc_id','sent_at','provider_message','error','reply_revision'}
-    kinds=set()
+    kinds=set();result=[]
     for row in rows:
-        if not isinstance(row,dict) or set(row)-allowed or row.get('kind') not in ('initial','followup') or row['kind'] in kinds:raise ValueError('Invalid shared mail record')
-        kinds.add(row['kind']);uuid.UUID(row['id']);datetime.fromisoformat(row['created_at'])
+        if not isinstance(row,dict):raise ValueError('Invalid shared mail record')
+        unknown=set(row)-MAIL_FIELDS
+        if unknown:raise ValueError('Unsupported shared mail fields: '+', '.join(sorted(unknown))+'. Update lorca on both Macs.')
+        if MAIL_REQUIRED-set(row) or row.get('kind') not in ('initial','followup') or row['kind'] in kinds:raise ValueError('Invalid shared mail record')
         if not all(isinstance(v,str) for v in row.values()) or len(row.get('body',''))>20000:raise ValueError('Invalid shared mail values')
+        kinds.add(row['kind']);uuid.UUID(row['id']);datetime.fromisoformat(row['created_at'])
         if not re.fullmatch(r'[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+',row.get('recipient','')):raise ValueError('Invalid shared recipient')
         if row.get('state') not in ('Local draft','Creating','Gmail draft','Needs reconciliation','Sending','Needs send reconciliation','Sent','Needs review'):raise ValueError('Invalid shared mail state')
+        if any(len(row.get(key,''))>200 for key in ('resume_choice','resume_sha256','resume_version')):raise ValueError('Invalid shared resume metadata')
+        result.append({**MAIL_DEFAULTS,**row})
+    return sorted(result,key=lambda row:row['kind'])
+
+
+def normalize_mail(text):
+    return json.dumps(decode_mail(text or '[]'),sort_keys=True,separators=(',',':'))
+
+
+def import_mail(db,job_id,text):
+    rows=decode_mail(text);kinds={row['kind'] for row in rows}
+    for row in rows:
         # Import is tracking data only. It never grants permission to create/send mail.
         existing=db.execute('SELECT id FROM outreach_messages WHERE job_id=? AND kind=?',(job_id,row['kind'])).fetchone()
         if existing:row={**row,'id':existing[0]}

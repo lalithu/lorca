@@ -10,6 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import google_oauth as oauth
+from google_http import request_json, GoogleNetworkError
 from jobtracker import ROOT
 
 ACCOUNT='lalithuriti@gmail.com'
@@ -62,16 +63,17 @@ def api(service,path,body=None,method=None,approved_send=False):
     if service=='gmail':
         verb=method or ('POST' if body is not None else 'GET')
         sending=path=='drafts/send' and verb=='POST' and approved_send and isinstance(body,dict) and bool(body.get('id'))
-        if verb!='GET' and not sending and not (path=='drafts' and verb=='POST' and body is not None):
-            raise ValueError('Only Gmail draft creation is allowed')
+        updating=verb=='PUT' and path!='drafts/send' and re.fullmatch(r'drafts/[\w-]+',path) and isinstance(body,dict)
+        if verb!='GET' and not sending and not updating and not (path=='drafts' and verb=='POST' and body is not None):
+            raise ValueError('Only Gmail draft creation or updates are allowed')
         if not sending and not re.match(r'^(profile|drafts(?:/[\w-]+)?|threads/[\w-]+|messages(?:/[\w-]+)?)(?:\?|$)',path):raise ValueError('Unsupported Gmail operation')
         url='https://gmail.googleapis.com/gmail/v1/users/me/'+path
     elif service=='sheets':url='https://sheets.googleapis.com/v4/spreadsheets/'+path
     else:raise ValueError('Unsupported Google service')
     data=None if body is None else json.dumps(body).encode()
-    request=urllib.request.Request(url,data,{'Authorization':'Bearer '+oauth.access_token(),'Content-Type':'application/json'},method=method)
     try:
-        with urllib.request.urlopen(request,timeout=25) as response:return json.load(response)
+        request=urllib.request.Request(url,data,{'Authorization':'Bearer '+oauth.access_token(),'Content-Type':'application/json'},method=method)
+        return request_json(request)
     except urllib.error.HTTPError as exc:
         try:message=json.loads(exc.read()).get('error',{}).get('message','Google request failed')
         except Exception:message='Google request failed'

@@ -47,6 +47,102 @@ class GoogleTests(unittest.TestCase):
         mime=message_from_bytes(base64.urlsafe_b64decode(captured[0][2]['message']['raw']))
         self.assertEqual(mime['To'],'jane@acme.test');self.assertEqual(len(mime.get_payload()),2)
         self.assertEqual(mime.get_payload()[1].get_content_type(),'application/pdf')
+    def test_body_only_template_gets_subject_without_changing_wording(self):
+        self.configure();config=google.config()
+        config['initial_template']='Hello {{first_name}},\n\nMy original wording.\nLalith'
+        google.save_config(config)
+        record=outreach.prepare(self.job['id'])
+        self.assertEqual(record['subject'],'Engineer @ Acme')
+        self.assertEqual(record['body'],'Hello Jane,\n\nMy original wording.\nLalith')
+    def test_prepare_outreach_creates_only_one_draft_even_after_ambiguous_failure(self):
+        self.configure()
+        with patch.object(google,'api',side_effect=TimeoutError('Network lost')) as api:
+            with self.assertRaises(TimeoutError):outreach.prepare_gmail(self.job['id'])
+            with self.assertRaisesRegex(ValueError,'needs checking'):outreach.prepare_gmail(self.job['id'])
+            self.assertEqual(api.call_count,1)
+        self.assertEqual(outreach.snapshot()['messages'][0]['state'],'Needs reconciliation')
+    def test_gmail_handoff_and_automatic_followup_survive_second_mac(self):
+        self.configure();config=google.config();config['enabled']=True;google.save_config(config)
+        state,sheet_api=self.fake_sheet();created=[]
+        def api(service,path,body=None):
+            if service=='sheets':return sheet_api(service,path,body)
+            self.assertEqual(path,'drafts');created.append(body)
+            return {'id':'gmail-draft','message':{'id':'draft-message','threadId':'linked-thread'}}
+        with patch.object(google,'api',side_effect=api):
+            outreach.prepare_gmail(self.job['id']);sheets.sync()
+        record=outreach.snapshot()['messages'][0]
+        self.assertEqual(record['state'],'Gmail draft')
+        self.assertEqual(outreach.snapshot()['meta'][0]['follow_up'],'')
+        with patch.object(tracker,'DB_PATH',self.root/'second-mac.sqlite3'):
+            tracker.init_db();research.init_research();outreach.init()
+            with patch.object(google,'api',side_effect=api):
+                sheets.sync();other=tracker.list_jobs()[0]
+                outreach.prepare_gmail(other['id'])
+            self.assertEqual(len(created),1)
+            self.assertEqual(outreach.snapshot()['messages'][0]['gmail_draft'],'gmail-draft')
+            sent_time=int(datetime.now(timezone.utc).timestamp()*1000)+1000
+            sent={'id':'sent-message','labelIds':['SENT'],'internalDate':str(sent_time),
+                  'payload':{'headers':[{'name':'Message-ID','value':record['rfc_id']},{'name':'From','value':google.ACCOUNT}]}}
+            def sent_api(service,path,body=None):
+                if service=='sheets':return sheet_api(service,path,body)
+                if path.startswith('drafts/'):
+                    exc=RuntimeError('Draft was sent');exc.status=404;raise exc
+                self.assertTrue(path.startswith('threads/'))
+                return {'id':'linked-thread','messages':[sent]}
+            with patch.object(google,'api',side_effect=sent_api):
+                outreach.reconcile();sheets.sync()
+            expected=outreach.business_due(datetime.fromtimestamp(sent_time/1000,timezone.utc).isoformat())
+            self.assertEqual(outreach.snapshot()['meta'][0]['follow_up'],expected)
+        with patch.object(google,'api',side_effect=sheet_api):sheets.sync()
+        self.assertEqual(outreach.snapshot()['messages'][0]['state'],'Sent')
+        self.assertEqual(outreach.snapshot()['meta'][0]['follow_up'],expected)
+    def broken_template_draft(self):
+        self.configure();config=google.config()
+        config['initial_template']='Hi ___,\nMy name is [NAME]. Interested in [ROLE] at [COMPANY].\n[ATTACH RESUME]'
+        google.save_config(config);record=outreach.prepare(self.job['id'])
+        with tracker.db() as db:db.execute('UPDATE outreach_messages SET body=? WHERE id=?',(config['initial_template'],record['id']))
+        captured=[]
+        def create(service,path,body=None):
+            captured.append(body['message']['raw']);return {'id':'draft','message':{'id':'message','threadId':'thread'}}
+        with patch.object(google,'api',side_effect=create):outreach.create_gmail(record['id'])
+        return outreach.snapshot()['messages'][0],captured[0]
+
+    def test_fill_existing_gmail_draft_preserves_id_pdf_and_custom_subject(self):
+        from email import policy
+        record,raw=self.broken_template_draft();mime=message_from_bytes(base64.urlsafe_b64decode(raw),policy=policy.default)
+        mime.replace_header('Subject','My custom subject');raw=base64.urlsafe_b64encode(mime.as_bytes()).decode();calls=[]
+        def api(service,path,body=None,method=None):
+            calls.append((path,method,body))
+            if body is None:return {'id':'draft','message':{'raw':raw}}
+            return {'id':'draft','message':{'id':'updated-message','threadId':'thread'}}
+        with patch.object(google,'api',side_effect=api):outreach.fill_gmail(record)
+        self.assertEqual([call[1] for call in calls],[None,'PUT'])
+        updated=message_from_bytes(base64.urlsafe_b64decode(calls[1][2]['message']['raw']),policy=policy.default)
+        self.assertEqual(str(updated['Subject']),'My custom subject')
+        self.assertIn('Hi Jane,',updated.get_body(preferencelist=('plain',)).get_content())
+        self.assertIn('Lalith Uriti',updated.get_body(preferencelist=('plain',)).get_content())
+        self.assertEqual(list(updated.iter_attachments())[0].get_payload(decode=True),(self.root/'profile/approved-resume.pdf').read_bytes())
+        saved=outreach.snapshot()['messages'][0]
+        self.assertEqual(saved['gmail_draft'],'draft');self.assertEqual(saved['provider_message'],'updated-message')
+        self.assertNotIn('[NAME]',saved['body'])
+
+    def test_fill_refuses_to_overwrite_gmail_body_edits(self):
+        from email import policy
+        record,raw=self.broken_template_draft();mime=message_from_bytes(base64.urlsafe_b64decode(raw),policy=policy.default)
+        mime.get_body(preferencelist=('plain',)).set_content('My own reviewed email')
+        with patch.object(google,'api',return_value={'id':'draft','message':{'raw':base64.urlsafe_b64encode(mime.as_bytes()).decode()}}) as api:
+            with self.assertRaisesRegex(ValueError,'edited'):outreach.fill_gmail(record)
+            self.assertEqual(api.call_count,1)
+        self.assertEqual(outreach.snapshot()['messages'][0]['body'],record['body'])
+
+    def test_ambiguous_draft_update_keeps_tracking_without_replay(self):
+        record,raw=self.broken_template_draft()
+        with patch.object(google,'api',side_effect=[{'id':'draft','message':{'raw':raw}},TimeoutError('Connection lost')]) as api:
+            with self.assertRaises(TimeoutError):outreach.fill_gmail(record)
+            self.assertEqual(api.call_count,2)
+        self.assertEqual(outreach.snapshot()['messages'][0]['state'],'Needs reconciliation')
+        self.assertEqual(outreach.snapshot()['messages'][0]['gmail_draft'],'draft')
+
     def test_changed_pdf_is_not_uploaded(self):
         self.configure();row=outreach.prepare(self.job['id']);(self.root/'profile/approved-resume.pdf').write_bytes(b'%PDF-different')
         with patch.object(google,'api') as api:
@@ -105,6 +201,31 @@ class GoogleTests(unittest.TestCase):
         self.assertEqual(outreach.snapshot()['messages'][0]['state'],'Needs review')
         self.assertEqual(outreach.snapshot()['meta'][0]['follow_up'],'')
         with self.assertRaises(ValueError):outreach.prepare(self.job['id'],'followup')
+    def test_gmail_rewritten_message_ids_require_a_unique_confirmed_send_to_the_recipient(self):
+        self.configure();record=outreach.prepare(self.job['id'])
+        with patch.object(google,'api',return_value={'id':'draft','message':{'id':'draft-message','threadId':'linked-thread'}}):outreach.create_gmail(record['id'])
+        sent_time=int(datetime.now(timezone.utc).timestamp()*1000)+1000
+        sent={'id':'new-sent-id','labelIds':['SENT'],'internalDate':str(sent_time),
+              'payload':{'headers':[{'name':'Message-ID','value':'<rewritten@gmail.test>'},{'name':'From','value':google.ACCOUNT},{'name':'To','value':'someone-else@example.test'}]}}
+        thread={'id':'linked-thread','messages':[sent]}
+        def api(service,path,*_):
+            if path.startswith('drafts/'):
+                exc=RuntimeError('Draft no longer exists');exc.status=404;raise exc
+            return thread
+        with patch.object(google,'api',side_effect=api):outreach.reconcile()
+        self.assertEqual(outreach.snapshot()['messages'][0]['state'],'Gmail draft')
+        self.assertEqual(outreach.snapshot()['meta'][0]['follow_up'],'')
+        sent['payload']['headers'][-1]['value']='jane@acme.test'
+        thread['messages'].append({**sent,'id':'ambiguous-second-send'})
+        with patch.object(google,'api',side_effect=api):outreach.reconcile()
+        self.assertEqual(outreach.snapshot()['messages'][0]['state'],'Gmail draft')
+        thread['messages']=thread['messages'][:1]
+        with patch.object(google,'api',side_effect=api):outreach.reconcile()
+        saved=outreach.snapshot()['messages'][0]
+        self.assertEqual(saved['state'],'Sent');self.assertEqual(saved['provider_message'],'new-sent-id')
+        self.assertEqual(saved['rfc_id'],'<rewritten@gmail.test>')
+        expected=outreach.business_due(datetime.fromtimestamp(sent_time/1000,timezone.utc).isoformat())
+        self.assertEqual(outreach.snapshot()['meta'][0]['follow_up'],expected)
     def test_reviewed_reply_is_portable_and_a_new_reply_requires_review_again(self):
         self.configure();row=outreach.prepare(self.job['id'])
         with tracker.db() as db:
@@ -177,6 +298,55 @@ class GoogleTests(unittest.TestCase):
             with patch.object(google,'api',side_effect=api):sheets.sync()
         with patch.object(google,'api',side_effect=api):sheets.sync()
         self.assertEqual(json.loads(resumes.portable(self.job['id']))['selection'],'master')
+
+    def test_shared_resume_mail_metadata_imports_over_legacy_baseline_and_survives_both_macs(self):
+        self.configure();draft=outreach.prepare(self.job['id']);state,api=self.fake_sheet()
+        with patch.object(google,'api',side_effect=api):sheets.sync()
+        legacy=json.loads(outreach.portable_mail(self.job['id']))
+        for record in legacy:
+            for key in ('resume_choice','resume_sha256','resume_version'):record.pop(key)
+        with tracker.db() as db:
+            baseline=json.loads(db.execute('SELECT baseline FROM job_meta WHERE job_id=?',(self.job['id'],)).fetchone()[0])
+            baseline['mail_data']=json.dumps(legacy)
+            db.execute('UPDATE job_meta SET baseline=? WHERE job_id=?',(json.dumps(baseline),self.job['id']))
+        shared=[{**legacy[0],'resume_choice':'tailored','resume_sha256':'a'*64,'resume_version':'saved-version'}]
+        state['rows'][1][27]=json.dumps(shared)
+        with patch.object(google,'api',side_effect=api):result=sheets.sync()
+        self.assertEqual(result['conflicts'],0)
+        current=json.loads(outreach.portable_mail(self.job['id']))[0]
+        for key in ('resume_choice','resume_sha256','resume_version'):self.assertEqual(current[key],shared[0][key])
+        self.assertEqual(current['id'],draft['id'])
+        with patch.object(tracker,'DB_PATH',self.root/'metadata-other-mac.sqlite3'):
+            tracker.init_db();research.init_research();outreach.init()
+            with patch.object(google,'api',side_effect=api):result=sheets.sync()
+            self.assertEqual(result['conflicts'],0)
+            other=tracker.list_jobs()[0]
+            self.assertEqual(json.loads(outreach.portable_mail(other['id']))[0],current)
+        # A notes update must not strip the other Mac's attachment tracking.
+        tracker.update_job(self.job['id'],{'notes':'A later local edit'})
+        with patch.object(google,'api',side_effect=api):sheets.sync()
+        self.assertEqual(json.loads(state['rows'][1][27])[0],current)
+
+    def test_legacy_mail_schema_migrates_without_losing_draft_or_adding_actions(self):
+        self.configure();draft=outreach.prepare(self.job['id'])
+        with tracker.db() as db:
+            for key in ('resume_choice','resume_sha256','resume_version'):db.execute('ALTER TABLE outreach_messages DROP COLUMN '+key)
+        with patch.object(google,'api') as api:
+            outreach.init();outreach.init()
+            api.assert_not_called()
+        record=json.loads(outreach.portable_mail(self.job['id']))[0]
+        self.assertEqual(record['id'],draft['id']);self.assertEqual(record['body'],draft['body'])
+        self.assertEqual(record['resume_choice'],'')
+
+    def test_shared_mail_still_rejects_unknown_fields_and_does_not_export_local_columns(self):
+        self.configure();outreach.prepare(self.job['id'])
+        with tracker.db() as db:db.execute("ALTER TABLE outreach_messages ADD COLUMN local_secret TEXT DEFAULT 'not-portable'")
+        record=json.loads(outreach.portable_mail(self.job['id']))[0]
+        self.assertNotIn('local_secret',record)
+        with self.assertRaisesRegex(ValueError,'Unsupported shared mail fields'):
+            outreach.decode_mail(json.dumps([{**record,'unexpected_action':'send'}]))
+        with self.assertRaisesRegex(ValueError,'Invalid shared mail values'):
+            outreach.decode_mail(json.dumps([{**record,'resume_choice':True}]))
     def test_send_requires_current_review_and_never_retries_ambiguity(self):
         self.configure();row=outreach.prepare(self.job['id'])
         with patch.object(google,'api') as api:

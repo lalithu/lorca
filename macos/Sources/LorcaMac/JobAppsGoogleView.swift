@@ -24,7 +24,7 @@ struct JobGoogleSettings: View {
                 JobMarkdownEditor(title: followup ? "Follow-up template" : "Outreach template",
                                   text: followup ? $draft.followup : $draft.initial)
                 DisclosureGroup("Template fields") {
-                    MarkdownText(text: "Start with `Subject: Your subject`, then the body. Use `{{first_name}}`, `{{company}}`, `{{role}}`, `{{job_url}}`, `{{job_specific}}`, `{{contact_name}}` or `{{your_name}}`.", size: max(10, 12 + zoom))
+                    MarkdownText(text: "Write your email body. Lorca adds a subject from the role and company. To customize it, start with `Subject: Your subject`. Use `{{first_name}}`, `{{company}}`, `{{role}}`, `{{job_url}}`, `{{job_specific}}`, `{{contact_name}}` or `{{your_name}}`.", size: max(10, 12 + zoom))
                         .padding(.top, 6)
                 }.font(.system(size: max(10, 11 + zoom)))
             }
@@ -88,7 +88,6 @@ struct JobEmailDetail: View {
     private var messages: [JobMailRecord] { store.snapshot?.mail?.messages.filter { $0.job_id == job.id } ?? [] }
     private var conversation: [JobMailSnapshot.ThreadMessage] { store.snapshot?.mail?.threads?[String(job.id)] ?? [] }
     private var due: String { store.snapshot?.mail?.meta.first { $0.job_id == job.id }?.follow_up ?? "" }
-    @State private var dueEdit = ""
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
@@ -123,12 +122,25 @@ struct JobEmailDetail: View {
                 JobEmailEditor(store: store, message: message)
             }
             if !messages.contains(where: { $0.kind == "initial" }), job.recruiter_contact.contains("@") {
-                Button("Prepare outreach") { prepare("initial") }.buttonStyle(.borderedProminent).disabled(store.busy)
+                Button("Prepare outreach · Open Gmail") { prepare("initial") }.buttonStyle(.borderedProminent).disabled(preparingDisabled)
             } else if store.actionLabel(job) == "Follow-up due", !messages.contains(where: { $0.kind == "followup" }) {
-                Button("Prepare follow-up") { prepare("followup") }.buttonStyle(.borderedProminent).disabled(store.busy)
+                Button("Prepare follow-up · Open Gmail") { prepare("followup") }.buttonStyle(.borderedProminent).disabled(preparingDisabled)
             }
             if messages.isEmpty, !job.recruiter_contact.contains("@") {
                 Text("Add the recruiter's email above. Other jobs keep moving.").font(.system(size: max(10, 11 + zoom))).foregroundStyle(.secondary)
+            }
+            if store.preparingOutreach == job.id {
+                HStack { ProgressView().controlSize(.small);Text("Preparing your Gmail draft…") }
+                    .font(.system(size: max(10, 11 + zoom))).foregroundStyle(.secondary)
+            }
+            if store.actionLabel(job) == "Waiting for reply" {
+                Label(store.waitingSummary(job), systemImage: "checkmark.circle.fill")
+                    .font(.system(size: max(10, 12 + zoom))).foregroundStyle(.green)
+                Text(due.isEmpty ? "Initial outreach is complete." : "Five business days after the confirmed send · Follow-ups are prepared for your review, never sent automatically.")
+                    .font(.system(size: max(10, 11 + zoom))).foregroundStyle(.secondary)
+            } else if messages.isEmpty || messages.contains(where: { $0.state == "Local draft" }) {
+                Text("Prepare creates a Gmail draft with your subject, template body, and master resume. Review and send in Gmail; lorca tracks the result.")
+                    .font(.system(size: max(10, 11 + zoom))).foregroundStyle(.secondary)
             }
             if job.outreach_stage == "Replied" || messages.contains(where: { $0.state == "Needs review" }) {
                 Text("Reply received · Automatic follow-up cancelled.").font(.system(size: max(10, 11 + zoom))).foregroundStyle(.blue)
@@ -141,20 +153,17 @@ struct JobEmailDetail: View {
                     Text("Reply reviewed").font(.system(size: max(10, 11 + zoom))).foregroundStyle(.secondary)
                 }
             }
-            DisclosureGroup(due.isEmpty ? "Follow-up schedule" : "Follow-up · " + due) {
-                HStack {
-                    TextField("YYYY-MM-DD", text: $dueEdit).textFieldStyle(.roundedBorder)
-                    Button("Save") { Task { await store.perform(["op":"follow_up","id":job.id,"value":dueEdit]) } }
-                }.controlSize(zoom >= 5 ? .large : zoom >= 2 ? .regular : .small).padding(.top, 8)
-            }.font(.system(size: max(10, 11 + zoom)))
+            if due.isEmpty, !messages.contains(where: { $0.kind == "initial" && !($0.sent_at ?? "").isEmpty }) {
+                Text("Follow-up is scheduled automatically, five business days after you send in Gmail.")
+                    .font(.system(size: max(10, 11 + zoom))).foregroundStyle(.secondary)
+            }
         }
-        .onAppear { dueEdit = due }
-        .onChange(of: job.id) { _, _ in dueEdit = due }
         .task(id: job.id) { if store.snapshot?.integrations?.connected == true && store.snapshot?.integrations?.busy != true && !messages.isEmpty { refresh() } }
     }
     private var gmailURL: URL { URL(string:"https://mail.google.com/mail/u/?authuser=lalithuriti%40gmail.com#inbox")! }
     private func refresh() { Task { await store.perform(["op":"load_thread","id":job.id]) } }
-    private func prepare(_ kind: String) { Task { await store.perform(["op":"prepare_email","id":job.id,"kind":kind]) } }
+    private var preparingDisabled: Bool { store.busy || store.preparingOutreach != nil || store.snapshot?.integrations?.busy == true || store.snapshot?.integrations?.connected != true }
+    private func prepare(_ kind: String) { Task { await store.prepareOutreach(job.id, kind: kind) } }
 }
 
 private struct JobEmailEditor: View {
@@ -182,20 +191,23 @@ private struct JobEmailEditor: View {
                         .font(.system(size: max(10, 11 + zoom))).foregroundStyle(.secondary)
                 }
                 HStack {
-                    Button("Approve & send") { Task {
-                        if await save(), let current = store.snapshot?.mail?.messages.first(where: { $0.id == message.id }), let approval = current.approval_token {
-                            await store.perform(["op":"send_email","id":message.id,"approval_token":approval])
-                        }
-                    } }.buttonStyle(.borderedProminent)
+                    Button("Prepare outreach · Open Gmail") { Task {
+                        if await save() { await store.prepareOutreach(message.job_id, kind: message.kind) }
+                    } }.buttonStyle(.borderedProminent).disabled(store.preparingOutreach != nil)
                     Button(dirty ? "Save draft" : "Saved") { Task { await save() } }.disabled(!dirty)
                     Spacer()
-                    Menu("More") {
-                        Button("Create Gmail draft") { Task { if await save() { await store.perform(["op":"gmail_draft","id":message.id]) } } }
-                    }
                 }.controlSize(zoom >= 5 ? .large : zoom >= 2 ? .regular : .small).disabled(store.busy || store.snapshot?.integrations?.busy == true || store.snapshot?.integrations?.connected != true)
             } else if message.state == "Gmail draft" {
                 Text(message.body).font(.system(size: max(10, 12 + zoom))).textSelection(.enabled)
-                Link("Review & send in Gmail ↗", destination: URL(string:"https://mail.google.com/mail/u/?authuser=lalithuriti%40gmail.com#drafts")!).font(.system(size: max(10, 11 + zoom)))
+                if message.needsTemplateFill {
+                    Button("Fill template & open Gmail") {
+                        Task { await store.prepareOutreach(message.job_id, kind: message.kind, fillTemplate: true) }
+                    }.buttonStyle(.borderedProminent)
+                        .disabled(store.busy || store.preparingOutreach != nil || store.snapshot?.integrations?.busy == true)
+                        .help("Fills this unsent draft without creating another. Body edits made in Gmail are preserved.")
+                }
+                Link("Review & send in Gmail ↗", destination: JobAppsStore.gmailDraftURL(message)).font(.system(size: max(10, 11 + zoom)))
+                Link("All Gmail drafts ↗", destination: URL(string:"https://mail.google.com/mail/u/?authuser=lalithuriti%40gmail.com#drafts")!).font(.system(size: max(10, 11 + zoom))).foregroundStyle(.secondary)
             } else {
                 Text("Checking Gmail before any retry. This message will not be sent again automatically.").font(.system(size: max(10, 11 + zoom))).foregroundStyle(.secondary)
             }

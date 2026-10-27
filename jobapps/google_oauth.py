@@ -11,6 +11,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
+from google_http import request_json
 
 PRIVATE = Path.home() / '.config' / 'lalith-job-search'
 TOKEN = PRIVATE / 'google_token.json'
@@ -35,8 +36,7 @@ def write_json(path, value, private=False):
 
 def oauth_post(values):
     request = urllib.request.Request(TOKEN_URL, data=urllib.parse.urlencode(values).encode())
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.load(response)
+    return request_json(request,timeout=30)
 
 
 def authorize(client_path, quiet=False):

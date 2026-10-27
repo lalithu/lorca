@@ -49,7 +49,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "Quit & Unload")
         alert.addButton(withTitle: "Keep Loaded & Quit")
         alert.addButton(withTitle: "Cancel")
-        let choice: NSApplication.ModalResponse = models.isEmpty ? .alertSecondButtonReturn : alert.runModal()
+        if models.isEmpty {
+            alert.informativeText = "Lorca hasn’t loaded a model in this session. Your conversations and Job Apps progress are saved."
+        }
+        sender.activate(ignoringOtherApps: true)
+        let choice = alert.runModal()
         guard choice != .alertThirdButtonReturn else { return .terminateCancel }
         isQuitting = true
         store.stop()
@@ -93,7 +97,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsItem.target = self
         application.addItem(.separator())
         application.addItem(withTitle: "Hide lorca", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
-        application.addItem(withTitle: "Quit lorca", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let quitItem = application.addItem(withTitle: "Quit lorca", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quitItem.target = NSApp
         let appItem = NSMenuItem()
         appItem.submenu = application
         menu.addItem(appItem)

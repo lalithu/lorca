@@ -85,15 +85,19 @@ def sync():
         return bool(current and current['status'] in ('starting','running','stopping'))
     warnings=[]
     try:shared_resume.sync()
+    except google.GoogleNetworkError:raise
     except Exception as exc:warnings.append('Master resume: '+str(exc)[:200])
     try:
         settings=shared_settings.sync(research_active=research_active)
         if settings['conflicts']:warnings.append(f"{settings['conflicts']} profile/template conflicts: review Google settings")
         if settings['deferred']:warnings.append('Pause research to receive shared profile changes')
+    except google.GoogleNetworkError:raise
     except Exception as exc:warnings.append('Settings need attention: '+str(exc)[:250])
     try:outreach.reconcile()
+    except google.GoogleNetworkError:raise
     except Exception as exc:warnings.append('Gmail needs attention: '+str(exc)[:250])
     try:result=sheets.sync()
+    except google.GoogleNetworkError:raise
     except Exception as exc:
         _state['message']=' · '.join([*warnings,'Jobs need attention: '+str(exc)[:250]])
         return

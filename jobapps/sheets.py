@@ -18,6 +18,11 @@ def contact_value(field,value):
     # The legacy phone monitor used a display label for a missing contact.
     # It carries no contact data and must compare equal to an empty cell.
     if field=='recruiter_contact' and isinstance(value,str) and value.strip()=='Not publicly established':return ''
+    if field=='mail_data':
+        # Optional metadata added on one Mac must not look like simultaneous
+        # edits to the whole email record on an older baseline.
+        try:return outreach.normalize_mail(value)
+        except (ValueError,TypeError):return value
     return value
 
 def column(index):
@@ -42,8 +47,7 @@ def validate(field,value):
     if field=='recruiter_contact' and value and len(value)>1024:raise ValueError('Contact is too long')
     if len(value)>(45000 if field in ('mail_data','application_data') else 20000):raise ValueError('Sheet value exceeds limit')
     if field=='mail_data':
-        parsed=json.loads(value or '[]')
-        if not isinstance(parsed,list):raise ValueError('Invalid mail workflow')
+        return outreach.normalize_mail(value)
     if field=='application_data' and not isinstance(json.loads(value or '{}'),dict):raise ValueError('Invalid application resume')
     return contact_value(field,value)
 

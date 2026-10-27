@@ -19,7 +19,7 @@ struct JobContactView: View {
                 TextField("Email · optional", text: $email).textFieldStyle(.roundedBorder)
                 Text("Provided by you · Used for future outreach. Existing Gmail messages keep their recipient.").font(.system(size: max(10, 11 + zoom))).foregroundStyle(.secondary)
                 HStack {
-                    Button("Save & prepare email") {
+                    Button("Save recruiter") {
                         Task { if await store.perform(["op":"save_contact", "id":job.id,"name":name,"email":email]) { editing = false } }
                     }.buttonStyle(.borderedProminent).disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || store.busy)
                     Button("Cancel") { editing = false }

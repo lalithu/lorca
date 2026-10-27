@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 private enum JobMode: String, CaseIterable { case research = "Research", applying = "Applying", email = "Email & Follow-ups" }
@@ -76,14 +77,18 @@ struct JobAppsView: View {
             if store.queueActive {
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(store.selectedJob.flatMap { store.attentionStep($0) }?.rawValue ?? (store.queueSkipped.isEmpty ? "You're caught up." : "You've reached the end of this pass."))
+                        Text(store.selectedJob.map { store.needsAttention($0) ? store.attentionStep($0)!.rawValue : store.waitingSummary($0) } ?? (store.queueSkipped.isEmpty ? "You're caught up." : "You've reached the end of this pass."))
                             .font(.system(size: max(10, 13 + zoom), weight: .medium))
                         Text("Oldest first · \(store.queueJobs.count) remaining" + (store.queueSkipped.isEmpty ? "" : " · \(store.queueSkipped.count) skipped"))
                             .font(.system(size: max(10, 11 + zoom))).foregroundStyle(.secondary)
                     }
                     Spacer()
-                    if store.selected != nil {
-                        Button("Skip for now") { store.skipQueueJob() }.disabled(store.busy)
+                    if let job = store.selectedJob {
+                        if store.needsAttention(job) {
+                            Button("Skip for now") { store.skipQueueJob() }.disabled(store.busy || store.preparingOutreach != nil)
+                        } else {
+                            Button("Next job →") { store.nextQueueJob() }.buttonStyle(.borderedProminent)
+                        }
                     } else if !store.queueSkipped.isEmpty {
                         Button("Revisit skipped") { store.beginQueue() }
                     }
@@ -105,29 +110,31 @@ struct JobAppsView: View {
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 HSplitView {
-                    ScrollViewReader { proxy in
-                        List(selection: $store.selected) {
-                            ForEach(jobs) { job in
-                                VStack(alignment: .leading, spacing: 5) {
-                                    Text("\(job.displayNumber). \(job.company)").font(.system(size: max(10, 13 + zoom), weight: .semibold))
-                                    Text(job.title).font(.system(size: max(10, 12 + zoom))).lineLimit(2)
-                                    Text(store.actionLabel(job)).font(.system(size: max(10, 11 + zoom))).foregroundStyle(store.actionColor(job))
-                                }.padding(.vertical, 5).tag(job.id).id(job.id)
-                            }
-                        }.listStyle(.inset)
-                            .onChange(of: store.selected) { _, id in
-                                if store.queueActive, let id { withAnimation(.easeInOut(duration: 0.18)) { proxy.scrollTo(id, anchor: .top) } }
-                            }
-                            .onChange(of: store.queueActive) { _, active in
-                                if active, let id = store.selected { proxy.scrollTo(id, anchor: .top) }
-                            }
-                    }.frame(minWidth: 185, idealWidth: 245, maxWidth: 310)
+                    if !store.queueActive {
+                        ScrollViewReader { proxy in
+                            List(selection: $store.selected) {
+                                ForEach(jobs) { job in
+                                    VStack(alignment: .leading, spacing: 5) {
+                                        Text("\(job.displayNumber). \(job.company)").font(.system(size: max(10, 13 + zoom), weight: .semibold))
+                                        Text(job.title).font(.system(size: max(10, 12 + zoom))).lineLimit(2)
+                                        Text(store.waitingSummary(job)).font(.system(size: max(10, 11 + zoom))).foregroundStyle(store.actionColor(job))
+                                    }.padding(.vertical, 5).tag(job.id).id(job.id)
+                                }
+                            }.listStyle(.inset)
+                                .onChange(of: store.selected) { _, id in
+                                    if store.queueActive, let id { withAnimation(.easeInOut(duration: 0.18)) { proxy.scrollTo(id, anchor: .top) } }
+                                }
+                                .onChange(of: store.queueActive) { _, active in
+                                    if active, let id = store.selected { proxy.scrollTo(id, anchor: .top) }
+                                }
+                        }.frame(minWidth: 185, idealWidth: 245, maxWidth: 310)
+                    }
                     if let job = store.selectedJob { detail(job).id(job.id).frame(minWidth: 230, maxWidth: .infinity) }
                     else { Text(store.queueActive ? (store.queueSkipped.isEmpty ? "All current actions are handled." : "Skipped jobs are saved for later.") : "Select an opportunity").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity) }
                 }.background(.primary.opacity(0.02), in: RoundedRectangle(cornerRadius: 10))
             }
             HStack {
-                Text("Manual applications · Emails sent only after approval").font(.system(size: max(10, 10 + zoom))).foregroundStyle(.secondary)
+                Text("Apply manually · Review and send emails in Gmail").font(.system(size: max(10, 10 + zoom))).foregroundStyle(.secondary)
                 Spacer()
                 if let value = store.snapshot?.integrations?.sheet_url,
                    let url = URL(string: value), url.scheme == "https", url.host == "docs.google.com" {
@@ -143,6 +150,10 @@ struct JobAppsView: View {
         .controlSize(zoom >= 5 ? .large : zoom >= 2 ? .regular : .small)
         .padding(.horizontal, 28).padding(.bottom, 22)
         .task { await store.open();routeQueueStep() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            // Returning from Gmail should pick up the send without a manual refresh.
+            Task { await store.perform(["op":"google_auto_sync"]) }
+        }
         .onChange(of: store.selected) { _, id in
             routeQueueStep()
             if let id { Task { await store.perform(["op":"detail", "id":id]) } }
@@ -200,6 +211,7 @@ struct JobAppsView: View {
                     Text(job.title).font(.system(size: max(10, 14 + zoom)))
                     Text(job.location).font(.system(size: max(10, 11 + zoom))).foregroundStyle(.secondary)
                 }.id("queue-detail-top")
+                if store.queueActive { JobWorkflowView(store: store, job: job) }
                 HStack {
                     if let url = URL(string: job.job_url), ["https","http"].contains(url.scheme ?? "") { Link("Open posting ↗", destination: url).font(.system(size: max(10, 11 + zoom))) }
                     Spacer()
@@ -241,29 +253,5 @@ struct JobAppsView: View {
         if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             VStack(alignment: .leading, spacing: 6) { Text(title).font(.system(size: max(10, 12 + zoom), weight: .semibold));Text(text).font(.system(size: max(10, 12 + zoom))).lineSpacing(3).textSelection(.enabled) }
         }
-    }
-}
-
-private struct JobNotesView: View {
-    @Environment(\.jobAppsZoom) private var zoom
-    @ObservedObject var store: JobAppsStore
-    let job: JobRecord
-    @State private var notes = ""
-    var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack {
-                Text("Notes").font(.system(size: max(10, 12 + zoom), weight: .semibold))
-                Spacer()
-                Menu(job.priority + " priority") {
-                    ForEach(store.snapshot?.priorities ?? [], id: \.self) { value in
-                        Button(value) { store.update(job, field: "priority", value: value) }
-                    }
-                }.font(.system(size: max(10, 11 + zoom))).controlSize(zoom >= 5 ? .large : zoom >= 2 ? .regular : .small)
-            }
-            TextEditor(text: $notes).font(.system(size: max(10, 12 + zoom))).frame(minHeight: 70).border(.secondary.opacity(0.15))
-            if notes != job.notes {
-                Button("Save notes") { store.update(job, field: "notes", value: notes) }.controlSize(zoom >= 5 ? .large : zoom >= 2 ? .regular : .small).disabled(store.busy)
-            }
-        }.onAppear { notes = job.notes }.onChange(of: job.id) { _, _ in notes = job.notes }
     }
 }

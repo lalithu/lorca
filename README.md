@@ -1,207 +1,149 @@
-# lorca
+<div align="center">
 
-A compact local Ollama chat client: Rust terminal chat, plus a native macOS
-dashboard and floating Mini. Both interfaces use one Rust core; conversations
-and images are saved locally.
+# 🫍 lorca
 
-See [FUNCTIONALITY.md](FUNCTIONALITY.md) for the complete feature reference.
+**A local AI workspace. One Rust core. Native on your Mac.**
 
-## Install and run
+Chat, work on code, and manage job applications—with a floating orca at your side.
 
-Install [Ollama](https://ollama.com), start it, and download a model:
+**v0.4.0 · Rust · SwiftUI · AppKit · Ollama · Python**
+
+[Quick start](#quick-start) · [Features](FUNCTIONALITY.md) · [macOS](macos/README.md) · [Agent runtime](AGENT.md) · [Job Apps](jobapps/README.md)
+
+</div>
+
+---
+
+## A look inside
+
+### Chats
+
+![lorca Chats dashboard with the standard welcome hero](docs/screenshots/chats.jpg)
+
+### Job Apps
+
+![Needs you application workflow with résumé preview for an example job](docs/screenshots/job-apps.jpg)
+
+### Mini
+
+<img src="docs/screenshots/mini.jpg" alt="Floating orca Mini with an open coding conversation and live model metrics" width="384">
+
+Screenshots use an isolated demo profile. The résumé preview is the author's approved example; Mini shows a real local-model response.
+
+## Features
+
+- **Chats:** streamed responses, Markdown, images, saved conversations, and a shared Dashboard/Mini experience.
+- **Coding:** workspace tools, live activity, readable diffs, terminal output, and exact-action approvals in the same conversation.
+- **Mini:** a draggable floating orca with a compact chat panel, shared history, and quick access to the dashboard.
+- **Job Apps:** evidence-backed research, guided applications, Gmail drafts with résumé attachments, reply tracking, and automatic follow-up dates.
+- **Local models:** installed Ollama models, context and speed metrics, cancellation, and manual unload/reload controls.
+- **Two Macs:** optional Google Sheets sync for Job Apps records, profile, templates, résumé source, and approved master PDF.
+- **Runtime:** authenticated loopback API, NDJSON event streaming, atomic JSON saves, SQLite job state, per-session model leases, and exact-action permission tokens.
+
+Built as a personal workspace by **Lalith Uriti**. The native app is an evolving prototype; coding tools and integrations have deliberate limits.
+
+## Quick start
+
+Requires **macOS 14+**, Rust/Cargo, Xcode or Swift command-line tools, and [Ollama](https://ollama.com). Job Apps also requires Python 3. Full Xcode is needed for Swift tests.
+
+Start Ollama and install a model, then build lorca:
 
 ```sh
-ollama serve
-# In another terminal:
-ollama pull qwen3.5:9b
-```
-
-Install lorca from this repository, then launch the built command:
-
-```sh
+ollama pull qwen3.5:9b  # Keep the Ollama app/server running.
+git clone https://github.com/lalithu/lorca.git
+cd lorca
 cargo install --path . --locked --force
-lorca
+./macos/build.sh
 ```
 
 ```sh
-lorca        # Terminal chat (TUI)
-lorca main   # macOS dashboard + Mini
-lorca agent --workspace "$PWD" "Inspect this repository"  # Agent testing CLI
+lorca main   # Native dashboard + optional floating Mini
+lorca        # Terminal chat
 ```
 
-Build the macOS app once with `./macos/build.sh` before using `lorca main`.
-Mini is off by default. In the GUI, `⌘W` closes the dashboard; `⌘2` toggles Mini.
-Use `⌘1` to reopen the dashboard and `⌘Q` to quit both.
-See [macOS instructions](macos/README.md). Launching either mode does not build
-or print Cargo output.
+The app bundle is also available at `macos/build/lorca.app`. Launching an existing build does not run Cargo. Models are installed separately; lorca does not download them or start Ollama.
 
-## Saved chats and images (macOS)
+## Chat and code
 
-- Create and switch chats in **Chats → Recents**; use `…` to rename or delete.
-- Mini’s history menu opens the same chats; drafts and messages stay synchronized.
-- Attach images with `+`, drop them on the composer, or paste with `⌘V`.
-- Up to four images per message; vision requires a compatible installed model.
-- Stored in `~/Library/Application Support/lorca/`: chat JSON in `conversations/`,
-  optimized images in `attachments/`. Replies save during streaming and on stop/quit.
-- Images: 20 MB input maximum each; optimized to JPEG, at most 4,096 pixels on the
-  longest edge and 8 MB each. Requests allow 24 MB of image data across history.
+1. Open **Chats** and choose an installed model in the composer.
+2. Send a question or attach images with `+`, drag-and-drop, or paste. Vision needs a compatible model.
+3. For coding tasks, select a workspace in the same composer. Expand live activity to inspect actual tools, changes, and output.
+4. Review each proposed edit or command, then **Allow Once**, **Deny**, or **Cancel Task**.
 
-## One conversation, with optional workspace tools
+Scroll upward to read while lorca works; return to the bottom to resume following. Chats, drafts, images, partial replies, and execution activity save locally. Mini shares the same conversation state.
 
-- Send ordinary questions, images, or coding requests in the same composer.
-- Select a workspace to make native tools available; the model chooses when to use them.
-- Text streams directly from Ollama, including turns that also contain structured tools.
-- Expand activity for actual file reads, diffs, commands, exit codes, and outputs.
-- Approve each exact edit/command with **Allow Once**, **Deny**, or **Cancel Task**.
-  A pending approval also remains accessible above the composer.
-- Discover unknown paths first; Rust rejects unverified existing-file references.
-- Follow-ups retain conversation, images, and structured tool results. Completed
-  operations and partial responses are saved locally with the original conversation.
-- Working context compacts automatically near 78% of the allocated window. Full
-  saved history remains intact; Rust keeps execution evidence and pending permissions.
-- Context metrics use confirmed Ollama prompt/generated tokens and actual allocated
-  capacity. During generation, **ctx · last** means the last confirmed measurement.
-- Dashboard and Mini share messages, cancellation, model selection, and status.
-- Scroll upward to read freely; return to the bottom to resume following.
-- One active tool/conversation run at a time. Cancellation stops future execution
-  without undoing already approved changes. See [AGENT.md](AGENT.md).
+| Shortcut | Action |
+| --- | --- |
+| `⌘N` | New chat |
+| `⌘1` / `⌘2` | Show dashboard / toggle Mini |
+| `⌘W` | Close dashboard; Mini keeps its current visibility |
+| `⌘Q` | Quit with model unload/keep-loaded options |
+| `⌘=` / `⌘−` | Increase / decrease chat text size |
+| `Esc` | Stop a response |
 
-The sections below describe the Rust terminal interface. The GUI keeps its model
-and appearance preferences separately in macOS preferences.
+The GUI loads a model when work starts, rather than on launch, and requests `keep_alive: -1`. Manual unload/reload warns about other Ollama clients; Rust protects other lorca sessions. The terminal preloads its model and uses two-step Ctrl+C to exit. See [model lifecycle and terminal controls](macos/README.md#terminal-chat).
 
 ## Job Apps
 
-The native sidebar includes continuous, source-backed job research using Lorca’s
-selected local model and Exa free search/extraction, manual application tracking,
-Gmail drafts and linked follow-ups, and two-way Google Sheets monitoring. Templates
-and an approved resume PDF can be configured later. No emails or applications are
-sent automatically. See [Job Apps setup and limitations](jobapps/README.md).
+Work through **Apply → Recruiter → Review in Gmail → Waiting**. Lorca prepares a draft with a `Role @ Company` subject, your filled template, and the approved master résumé. You review and send in Gmail. Confirmed sends schedule follow-up five weekdays later; replies return the job to your attention.
 
-## Configuration
+Google setup is optional and separate from local chat. See [setup, sync, and limitations](jobapps/README.md).
 
-On first launch lorca creates `~/.config/lorca/config.json` (or
-`$XDG_CONFIG_HOME/lorca/config.json` when set):
-
-```json
-{
-  "model": "qwen3.5:9b",
-  "base_url": "http://127.0.0.1:11434"
-}
-```
-
-Edit that file to save a different model or Ollama server. Use a model name shown
-by `ollama list`. Overrides affect only the current launch:
-
-```sh
-lorca --model another-installed-model
-lorca --host http://localhost:11434
-lorca --config /path/to/config.json
-lorca --help
-```
-
-On another computer, install Ollama and lorca, download your preferred model,
-and set its name in the configuration file. Lorca does not download models or
-start Ollama automatically.
-
-## Model lifecycle
-
-In Dashboard or Mini, use the model menu’s **Reload model…** to unload and reload
-a stalled model. Stop active work first. A warning explains that other apps may
-be affected; the Rust core protects models leased by another lorca session.
-
-Lorca preloads the selected model on launch with an indeterminate animated bar
-and elapsed time, then sends `keep_alive: -1` with every chat request to keep it
-loaded for the session. The animation shows activity, not a loading percentage.
-
-Switch to another installed model at the input prompt:
+## How it fits together
 
 ```text
-/model MODEL_NAME
+SwiftUI Dashboard + Mini ─┐
+                         ├─ Rust core ─ Ollama
+Rust terminal client ────┘    ├─ conversations, images, model leases
+                             └─ agent loop, tools, permissions
+
+Job Apps SwiftUI ─ Python companion ─ SQLite / Google Sheets / Gmail
+                     └─ bundled Rust research session
 ```
 
-Lorca loads the replacement first, then unloads the previous model. The current
-conversation is retained, and saved configuration is unchanged. A failed or
-cancelled switch keeps the previous model selected. `/model NAME` with the
-already selected model does not reload it.
+| Directory | Responsibility |
+| --- | --- |
+| `src/core/`, `src/agent/` | Shared conversation runtime, execution, and permissions |
+| `src/provider/`, `src/context.rs` | Ollama streaming, tools, and working context |
+| `src/storage.rs`, `src/transport.rs` | Atomic local persistence and authenticated loopback transport |
+| `macos/` | Native views, shared state, Mini, and app packaging |
+| `jobapps/` | Research, application workflow, Google integrations, and sync |
 
-On `/exit` or double Ctrl+C, lorca requests `keep_alive: 0`. After server-confirmed
-unloading, it prints:
+One active conversational run at a time. Tools are bounded; commands support a limited Cargo allowlist under the macOS sandbox. Working context compacts automatically while saved history remains intact. Interrupted tasks are not automatically replayed. [Runtime contract and limits →](AGENT.md)
 
-```text
-● model unloaded
-● session closed
-```
+## Data and privacy
 
-Ollama shares loaded models across clients and does not provide per-client
-ownership information. Lorca warns before every unload because another client
-may be using that model. The shared core refuses to unload a model held by
-another active lorca session. It cannot track other applications or prevent
-Ollama’s scheduler from changing model lifetime.
+- Chats and Job Apps data live under `~/Library/Application Support/lorca/`, outside the repository.
+- Chat/model inference uses your configured Ollama server. Job research uses external search/extraction; Gmail and Sheets require Google access.
+- Optional Sheets sync contains personal Job Apps data, including the approved résumé PDF. Use a private Sheet and one active Mac at a time.
+- OAuth credentials, API keys, local trackers, résumé files, and templates are excluded from Git; the approved screenshot above includes a résumé preview. This personal build includes the author's Gmail address in its Job Apps integration.
+- Chat history does **not** sync through Sheets. Keep a backup of the Application Support folder.
 
-Loading has a 120-second timeout. Unloading has a five-second request timeout
-(with up to one additional second for status verification when needed).
-Failures are reported without claiming the model was unloaded. Failed retirements
-are retried once when the session exits. A startup loading failure leaves the
-prompt available so you can retry with a message or `/model NAME`.
-
-During loading, Esc cancels the operation; two Ctrl+C presses exit. During an
-unload, Ctrl+C or Esc skips waiting and reports that cleanup is unconfirmed.
-
-## Conversation
-
-- Enter sends your message. Replies stream into normal terminal scrollback.
-- Each submitted message has an elapsed timer that updates while the reply is
-  generated and freezes on completion or cancellation. It scrolls naturally with
-  the conversation.
-- Follow-up messages include the conversation so far.
-- The cyan status line above the prompt shows a context usage bar and generation
-  tokens/second after each completed reply. Usage includes prompt and generated
-  tokens capped at the active window; capacity comes from Ollama's running model, and speed uses its generation
-  token count and duration. `--` means unavailable (including cancelled replies).
-- Ctrl+C during generation stops the reply and returns to the prompt. Any
-  partial reply remains visible and in the conversation context.
-- At the prompt, Ctrl+C shows the red exit warning; press it again to exit.
-- `/exit` exits. The next terminal launch starts a fresh conversation; earlier terminal chats remain available in the dashboard.
-
-## Architecture
-
-- `src/lib.rs`: reusable Rust core, independent of terminal and SwiftUI rendering.
-- `core/`: conversations, generation/cancellation, and per-client model leases.
-- `storage.rs`, `types.rs`: compatible JSON, atomic saves, attachment files, and shared data.
-- `provider.rs`: Ollama requests, NDJSON streaming, and confirmed model operations.
-- `transport.rs`, `client.rs`: authenticated local commands and streamed state snapshots.
-- `model.rs`, `lifecycle.rs`, `ui.rs`, `timer.rs`: terminal adapter and presentation; `config.rs`: CLI settings.
-- `macos/`: existing SwiftUI/AppKit views; `BackendClient` connects to Rust and `ChatStore` projects its state.
-
-`lorca main` uses the backend bundled by `macos/build.sh`; the CLI uses its own
-executable in internal `serve` mode. A process lock makes them reuse one backend.
-It binds only to a random port on `127.0.0.1`; a private runtime file supplies its
-bearer token. Browser-origin requests are rejected. No service installation is needed.
-
-The backend expires disconnected sessions after 60 seconds and exits 30 seconds
-after the last session ends. Unexpected disconnects preserve partial replies and
-leave models loaded. The GUI reconnects automatically; the terminal reconnects
-before its next model operation or message. Accepted prompts are never replayed
-automatically. CLI and GUI retain separate model preferences and client sessions.
-
-Existing macOS JSON, UUIDs, Foundation timestamps, drafts, and image files remain
-compatible. Before Rust first writes, it copies original data once to
-`~/Library/Application Support/lorca/backups/pre-rust-core/`. Keep that backup until
-you have verified your history. `LORCA_DATA_DIR` overrides the data root for testing
-or an independent profile; use the same root to share a backend.
-
-## Development checks
+## Development
 
 ```sh
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
 cargo test
+cargo clippy --all-targets -- -D warnings
+python3 -B -m unittest discover -s jobapps/tests
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swift test --package-path macos
 ./macos/build.sh
 ```
 
-The core and transport tests use isolated storage and local test servers; they do
-not unload your real Ollama models. Agent tests use temporary workspaces and explicit mock approvals; real subprocess tests verify the macOS sandbox. See [AGENT.md](AGENT.md) for the runtime, limits, commands, and Chats integration.
+After pulling updates, rebuild the app and quit/reopen lorca. To update the installed terminal command, rerun `cargo install --path . --locked --force`. Google credentials remain local on each Mac; Job Apps data travels through the configured Sheet.
+
+## Versions and direction
+
+Current package version: **0.4.0**. Future milestones below are plans, not shipped features or release dates.
+
+| Version | Focus |
+| --- | --- |
+| **0.4.x · current** | Unified Rust core, native Chats/Mini, local coding tools, persistence/vision, and Job Apps; continued reliability and polish |
+| **0.5 · planned** | MCP integrations using the existing runtime and permission boundaries |
+| **0.6 · planned** | A2A (Agent-to-Agent) interface and scoped collaboration |
+
+The direction stays the same: a modular Rust execution core, native macOS UI, local models, and visible user control over actions.
 
 ---
-Copyright © 2026 Lalith Uriti
+
+[Apache 2.0](LICENSE) · Copyright © 2026 Lalith Uriti · [Third-party attribution](jobapps/vendor/NOTICE.md)

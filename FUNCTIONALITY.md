@@ -1,31 +1,17 @@
-# lorca functionality
+# 🫍 lorca · functionality
 
-- `lorca`: terminal chat; `lorca main`: macOS dashboard + Mini.
-- GUI chat history: create, switch, rename, delete, and restore local conversations.
-- Images: picker, drag/drop, paste, previews, local storage, and Ollama vision.
-- Shared Dashboard/Mini chats, Markdown, manual scrolling, and `⌘=` / `⌘−` text sizing.
-- One Rust core for both interfaces: saved chats, images, Ollama, streaming, and cancellation.
-- Terminal sessions start fresh; their history remains available in the dashboard.
-- Automatic model preloading; animated loading bar with elapsed time.
-- Models stay loaded during the session (`keep_alive: -1`).
-- `/model NAME`: load a replacement, then unload the previous model.
-- `/exit` or double Ctrl+C: unload the model and close the session.
-- Ctrl+C stops generation; Esc cancels loading.
-- Shared-model warnings; lorca session leases prevent unloading another session’s model.
-- Authenticated local backend, automatic startup/reuse, reconnect, and original-data backup.
-- Unload success requires server confirmation.
-- Cyan context bar: usage percentage, token count, capacity, and tokens/second.
-- Live elapsed timer beside each submitted message.
-- ASCII orca, compact header, title emoji, bold amber labels, natural scrollback.
-- Saved settings in `~/.config/lorca/config.json` (supports `XDG_CONFIG_HOME`).
-- Launch overrides: `--model`, `--host`, `--config`; help: `--help`.
-- Error recovery, cancellable loading/unloading, and terminal-state restoration.
-- Confirmed `● model unloaded`, followed by red `● session closed`.
+- **Interfaces:** Rust terminal chat, resizable native dashboard, floating Mini; shared Rust core.
+- **Chats:** create, rename, switch, delete; saved messages, drafts, partial replies, and tool activity.
+- **Responses:** streaming Markdown, free scrolling with bottom-follow, text zoom, cancellation.
+- **Images:** picker, drop, paste, previews, persistence; compatible Ollama vision models.
+- **Coding:** optional workspace, file discovery/reads/search, proposed patches, bounded Cargo commands, diffs/output, per-action approvals.
+- **Models:** selection, lazy GUI loading, terminal preload, session keep-alive, confirmed unload/reload, shared-session protection.
+- **Metrics:** context usage, allocated capacity, tokens/second, loading and response timers.
+- **Terminal:** compact ASCII orca, scrollback, `/model`, `/exit`, two-step Ctrl+C, restored terminal state.
+- **Job Apps:** source-backed research, guided application/outreach queue, recruiter contacts, live Markdown notes, résumé tailoring.
+- **Gmail:** filled templates, automatic subjects, résumé drafts, confirmed send/reply tracking, five-weekday follow-up dates; manual sending.
+- **Cross-Mac:** Job Apps records, profile, preferences, templates, LaTeX source, approved master PDF via private Google Sheets; conflict review.
+- **Recovery:** atomic chat saves, authenticated local transport, reconnect without replay, interrupted task handling.
+- **Limits:** one conversational run, bounded tools, local Ollama only; chat history and Google credentials remain local. Overview, Pipelines, and Scheduled are placeholders.
 
-- One Chats composer: conversations, images, optional workspace tools, streamed text, live diffs/output, exact-action approvals, and cancellation.
-- Requests, partial replies, structured tools/results, and activity saved in the same chat; Mini shares status; reconnect never replays tasks.
-- Automatic model-context compaction; confirmed per-turn usage and actual allocated capacity.
-- Discovery-backed file references, revalidated across follow-ups; bounded read excerpts can expand via nextOffset.
-- `lorca agent --workspace PATH "TASK"`: native tool loop, explicit action approvals, cancellation, and live events ([details](AGENT.md)).
-
-- Model menu → **Reload model…**: unload/reload a stalled model after a shared-model warning. Stop active work first; Rust protects other lorca sessions.
+[Setup](README.md) · [macOS](macos/README.md) · [Agent limits](AGENT.md) · [Job Apps](jobapps/README.md)

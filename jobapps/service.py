@@ -86,9 +86,12 @@ def dispatch(v):
     if op=='save_contact':
         if integrations.status()['busy']:raise ValueError('Wait for the Google operation before editing the recruiter')
         outreach.save_contact(int(v['id']),v.get('name',''),v.get('email',''))
-        try:outreach.prepare(int(v['id']))
-        except ValueError:pass
         integrations.request_sync();return snapshot()
+    if op=='prepare_outreach':
+        def prepare():
+            try:outreach.prepare_gmail(int(v['id']),v.get('kind','initial'),v.get('fillTemplate') is True)
+            finally:integrations.request_sync()
+        integrations.run(prepare);return snapshot()
     if op=='prepare_email':outreach.prepare(int(v['id']),v.get('kind','initial'));return snapshot()
     if op=='review_reply':
         outreach.review_reply(int(v['id']),v.get('receipt',''));integrations.request_sync();return snapshot()
@@ -133,7 +136,7 @@ def dispatch(v):
     if op=='pause':pause_and_wait();return snapshot()
     if op=='update':
         if v.get('field') not in ('stage','priority','notes','outreach_stage'):raise ValueError('Unsupported field')
-        tracker.update_job(int(v['id']),{v['field']:v.get('value','')});return snapshot()
+        tracker.update_job(int(v['id']),{v['field']:v.get('value','')});integrations.request_sync();return snapshot()
     if op=='detail':return {'job':tracker.get_job(int(v['id'])),'history':tracker.get_history(int(v['id']))}
     if op=='quit':pause_and_wait();return {'closed':True}
     raise ValueError('Unknown Job Apps operation')

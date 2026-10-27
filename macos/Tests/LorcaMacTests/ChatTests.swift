@@ -38,6 +38,7 @@ class MockBackend: BackendTransport {
         switch fields["op"] as? String {
         case "draft": chats[index].draft = fields["text"] as! String
         case "prepare": model = fields["model"] as! String; activeModel = model
+        case "selectModel": model = fields["model"] as! String
         case "release":
             activeModel = nil; emit()
             return Data(#"{"unloaded":true}"#.utf8)
@@ -81,6 +82,32 @@ class MockBackend: BackendTransport {
 }
 @MainActor
 final class ChatTests: XCTestCase {
+    func testStartupRefreshAndSelectionDoNotPrepareAModel() async throws {
+        let backend = MockBackend()
+        let suite = "lorca.lazy-model-test.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("qwen3.5:9b", forKey: "model")
+        let store = ChatStore(backend: backend, defaults: defaults)
+        await store.refreshConnection()
+        await store.refreshConnection()
+        store.selectedModel = "other"
+        for _ in 0..<200 {
+            if backend.requests.contains(where: { $0["op"] as? String == "selectModel" }) { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(store.selectedModel, "other")
+        XCTAssertTrue(backend.requests.contains { $0["op"] as? String == "selectModel" })
+        XCTAssertFalse(backend.requests.contains { $0["op"] as? String == "prepare" })
+        store.draft = "Hello"
+        store.send()
+        for _ in 0..<200 {
+            if backend.requests.contains(where: { $0["op"] as? String == "agent_start" }) { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(backend.requests.last(where: { $0["op"] as? String == "agent_start" })?["model"] as? String, "other")
+        _ = await store.modelSession.close(unload: false)
+    }
     func testDraftIsSentBeforePromptAndNeverReplayedAfterFailure() async throws {
         let backend = MockBackend()
         let store = ChatStore(backend: backend)

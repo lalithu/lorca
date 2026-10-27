@@ -35,8 +35,7 @@ final class ChatStore: ObservableObject {
             defaults.set(selectedModel, forKey: "model")
             guard oldValue != selectedModel, !applying else { return }
             stop()
-            let loading = modelSession.prepare(selectedModel)
-            Task { _ = await loading.value }
+            enqueue(["op": "selectModel", "model": selectedModel])
         }
     }
     @Published var appearance: Appearance {
@@ -124,7 +123,7 @@ final class ChatStore: ObservableObject {
             guard isConnected else { return }
             if models.isEmpty { error = "No local models yet. Run ‘ollama pull qwen3.5:9b’ to get started."; return }
             let chosen = models.contains(selectedModel) ? selectedModel : models.contains("qwen3.5:9b") ? "qwen3.5:9b" : models[0]
-            _ = await modelSession.prepare(chosen).value
+            if selectedModel != chosen { selectedModel = chosen }
         } catch { ready = false; isConnected = false; self.error = friendlyError(error) }
     }
     private func observeEvents() {

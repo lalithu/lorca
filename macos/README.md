@@ -1,59 +1,90 @@
-# lorca for macOS
+# 🫍 lorca for macOS
 
-- Requires macOS 14+, Rust/Cargo, Xcode or Swift command-line tools, and a running Ollama server.
-- Launch: `cd ~/Downloads/lorca/macos && ./run.sh`
-- Launch an existing build: `lorca main` (after installing the Rust command with `cargo install --path . --locked --force` from the repository root).
-- Terminal chat: `lorca`. Both commands work from any directory.
-- Build only: `./build.sh` → `build/lorca.app` (can be opened in Finder).
-- Test: `swift test` with full Xcode/XCTest installed. Open `Package.swift` in Xcode to edit.
-- If command-line tools report a missing SwiftUI macro plugin, use the installed older SDK: `SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk ./build.sh`.
-- Dashboard starts at 880 × 600 and remembers your window size and position. Bringing it forward preserves full screen. **Show Dashboard** (`⌘1`) restores it; **Full Screen Dashboard** (`⌃⌘F`) enters native full screen.
-- Click the emoji to open/collapse Mini; drag it to move. **Show / Hide Mini**: `⌘2`.
-- Mini’s glass controls: new chat, open dashboard, collapse. Its chat stays anchored beside the pet.
-- Blue GUI accents; expanded Mini moves together with the pet and fits back onscreen after dragging.
-- Dashboard’s native top bar: toggle sidebar, new chat, current section.
-- Mini is off by default; `⌘W` closes the dashboard without showing Mini. `⌘1` restores the dashboard; `⌘Q` quits both.
-- `⌘=` / `⌘−`: increase / decrease chat text size in Dashboard and Mini.
-- Scroll back freely during replies; return to the bottom to resume following. Headings, lists, quotes, tables, and code render as Markdown.
-- Both views share saved conversations and drafts. Recents in the sidebar supports create/open/rename/delete; Mini has a history menu. **New Chat**: `⌘N`; stop a reply with Escape or the stop button.
-- Both chats show a cyan context bar and response speed from Ollama; unavailable measurements display `—`.
-- The selected model preloads at startup and stays loaded (`keep_alive: -1`). A temporary loading bar and timer appear under `ctx` in both chats.
-- Model switching offers to unload the old model before loading the next, or explicitly keep both loaded. The core keeps any model still held by another lorca session. A failed replacement tries to restore the previous model. `⌘Q` offers **Quit & Unload** or **Keep Loaded & Quit**, warning that Ollama models are shared with other apps.
-- Model menu → **Reload model…**: unload/reload a stalled model after a shared-model warning. Stop active work first; Rust protects other lorca sessions.
-- Settings: installed Ollama models and System/Dark/Light appearance. Defaults to `qwen3.5:9b` at `http://127.0.0.1:11434`.
-- Chats composer: choose **Agent**, select a workspace, and submit a coding task. Expand real tool activity, diffs, and command output inline; approve exact actions once, deny them, or cancel.
-- One task at a time; switching chats does not cancel it. Mini links to the dashboard for activity and approvals. Use the same chat for ordinary questions and images.
-- Agent requests and final results are saved; activity is temporary. Reconnection restores the latest backend snapshot without replaying the request. Backend restarts mark unfinished requests interrupted.
-- Overview, Tasks, Pipelines, Scheduled are placeholders.
-- Dashboard, Mini, and terminal chat use one Rust backend. The app starts its bundled backend automatically; a lock prevents duplicate runtimes.
+Native SwiftUI/AppKit dashboard and floating Mini, backed by the existing Rust core.
 
-## Local storage and images
+## Build and launch
 
-- Chat JSON: `~/Library/Application Support/lorca/conversations/`; images: `attachments/` alongside it.
-- Streaming saves every 200 ms; stop, switching chats, and quit flush immediately. Force-killing can lose the last checkpoint interval.
-- Existing saved data stays compatible. Original files are backed up once to `backups/pre-rust-core/`; unreadable chats remain untouched. Keep the whole `lorca` folder when backing up or restoring.
-- Add images with `+`, drop on the composer, or paste (`⌘V`); click a preview to open the stored image.
-- Four images/message, 20 MB input/image. Images normalize to JPEG (maximum 4,096-pixel edge, 8 MB each); total request image data is limited to 24 MB.
-- A vision-capable model is required for chats containing images. Missing images or unsupported models produce a friendly error.
-- Deleting a chat or draft image removes only files unused by other saved chats. Cleanup pauses if any chat metadata is unreadable.
+Requires macOS 14+, Rust/Cargo, Xcode or Swift command-line tools, and a running Ollama server with an installed model. Python 3 is needed for Job Apps.
 
-## Files
+From the repository root:
 
-- `App.swift`, `WindowManager.swift`: application, menus, desktop/full-screen and Mini windows.
-- `DashboardView.swift`, `MiniView.swift`, `ChatView.swift`: native views and basic Markdown.
-- `ChatStore.swift`, `ModelSession.swift`, `BackendClient.swift`: UI state, loading presentation, authenticated Rust connection.
-- `Resources/orca.txt`: copy of the repository’s existing emoji asset.
-- `ConversationLibrary.swift`, `Conversation.swift`: observable history projection and compatible data types. Rust owns persistence.
-- `ChatComposer.swift`, `AttachmentStrip.swift`, `ImageInput.swift`, `AttachmentStore.swift`: native image input, JPEG normalization, and read-only previews. Rust validates and stores attachments.
-- `ChatInput.swift`, `ClipboardImages.swift`: native text editing and image paste/drop handling.
+```sh
+./macos/build.sh
+cargo install --path . --locked --force
+lorca main
+```
 
-- `AgentClient.swift`, `AgentStore.swift`: authenticated agent commands, event projection, and reconnect.
-- `AgentActivity*.swift`, `AgentApprovalView.swift`, `AgentDiffView.swift`, `AgentComposerControls.swift`: inline tools, approval, diffs, and task input.
+Or run `./macos/run.sh` to build and open the app. Open `macos/Package.swift` in Xcode to edit. Full Xcode is required for `swift test`.
 
-- Chats has one composer for conversation, images, and tools. Select a workspace to enable file operations; greetings need no tools. Text streams while tools are enabled, and working context compacts automatically. Pending approvals remain accessible above the composer.
+The build script selects full Xcode when installed. On affected command-line-tools installations, its macOS 26.5 SDK fallback avoids a missing SwiftUI macro plugin. The bundle is `macos/build/lorca.app`, containing the Swift executable, Rust core, and Job Apps companion.
 
-## Job Apps
+## Dashboard and Mini
 
-See [Job Apps setup](../jobapps/README.md) for research, local templates, Gmail drafts,
-linked follow-ups and two-way Sheets. Pause research before chatting; quitting the
-app stops research and background Google checks.
+- Dashboard starts at 880 × 600, remembers its frame, and supports resizing/native full screen.
+- `⌘1`: show dashboard; `⌃⌘F`: full screen; `⌘2`: toggle Mini.
+- `⌘W`: close dashboard without changing Mini visibility; `⌘Q`: quit both with unload/keep-loaded options.
+- Mini starts hidden. Click its emoji to expand/collapse; drag to move. Its controls open the dashboard, create chats, and select history.
+- Dashboard and Mini share conversations, drafts, images, selected model, cancellation, and execution status.
+- `⌘N`: new chat; `⌘=` / `⌘−`: text size. Settings supports System/Dark/Light appearance.
+
+## Chats
+
+- Recents supports create, open, rename, and delete. Responses render headings, lists, quotes, tables, and code.
+- Scroll upward during streaming to pause following; return to the bottom to follow again.
+- Select a workspace in the existing composer to enable tools. There is no separate agent chat mode.
+- Expand real activity for calls, results, diffs, and terminal output. Approve exact actions once, deny, or cancel; pending approvals stay accessible.
+- Mini shows basic task status and links to the dashboard for detailed activity and approvals.
+- One conversational run at a time; switching chats does not cancel it. Partial text, structured tools/results, and execution activity persist with the originating chat.
+- Reconnection restores backend state without resubmitting work. Backend restarts mark unfinished requests interrupted.
+
+## Model lifecycle
+
+- Default: `qwen3.5:9b` at `http://127.0.0.1:11434`; choose installed models in the composer or Settings.
+- Opening the app or selecting a model does not load it. Submitted work prepares it and requests `keep_alive: -1`.
+- A temporary indeterminate loading bar and elapsed time appear under `ctx`. Context and speed use confirmed Ollama measurements; unavailable values show `—`.
+- **Unload model…** frees memory; **Reload model…** helps recover a stalled model. Stop active work first. Shared-model warnings and Rust session leases apply.
+- `⌘Q` offers **Quit & Unload**, **Keep Loaded & Quit**, and **Cancel**, even before a model has loaded.
+- Explicit Job Apps research/tailoring can also load a model. Pause research before chatting or switching models.
+
+## Storage and images
+
+- `~/Library/Application Support/lorca/conversations/`: chat JSON; `attachments/`: stored images.
+- Streaming checkpoints save about every 200 ms; stop/switch/quit flush. Force-killing can lose the latest checkpoint interval.
+- Rust backs up pre-migration data once to `backups/pre-rust-core/`. Unreadable chats remain untouched; back up the whole data folder.
+- Add images using `+`, drop, or `⌘V`; click previews to open. Four per message, 20 MB input each, normalized to JPEG up to 4,096 pixels/8 MB; request history allows 24 MB of image data.
+- Vision needs a compatible model. Deletion cleans only unreferenced images and pauses cleanup when metadata is unreadable.
+- `LORCA_DATA_DIR` selects an independent data root for testing. Conversation IDs and saved data remain compatible.
+
+## Terminal chat
+
+```sh
+lorca
+lorca --model another-installed-model
+lorca --host http://localhost:11434
+lorca --config /path/to/config.json
+```
+
+Terminal settings live in `~/.config/lorca/config.json` (or `$XDG_CONFIG_HOME/lorca/config.json`):
+
+```json
+{"model":"qwen3.5:9b","base_url":"http://127.0.0.1:11434"}
+```
+
+The terminal preloads its selected model. `/model NAME` loads the replacement before retiring the old model. Ctrl+C stops generation; at the prompt, the first Ctrl+C shows a red warning and the second exits. `/exit` also exits. Esc cancels loading. Confirmed unloading prints `● model unloaded`, followed by red `● session closed` in natural scrollback. Unload failures are reported without claiming success.
+
+Terminal sessions start fresh; their saved conversations remain accessible in the dashboard. CLI and GUI preferences are separate. Both reuse the authenticated loopback backend, which expires disconnected sessions after 60 seconds and exits 30 seconds after its last client.
+
+## Modules and checks
+
+- `App`, `WindowManager`, `MiniPlacement`: application, menus, native windows, positioning.
+- `ChatView`, `ChatComposer`, `ChatInput`, `MarkdownText`: conversation presentation and editing.
+- `ChatStore`, `BackendClient`, `ConversationLibrary`: shared state and Rust transport/persistence projection.
+- `AgentClient`, `AgentStore`, `AgentActivity*`, `AgentApprovalView`, `AgentDiffView`: live execution UI.
+- `JobApps*`, `JobWorkflowView`, `MarkdownNoteEditor`: Job Apps workflow and Notes.
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swift test --package-path macos
+./macos/build.sh
+```
+
+[Job Apps setup](../jobapps/README.md) · [Agent contract](../AGENT.md) · [Native acceptance](Acceptance/README.md)

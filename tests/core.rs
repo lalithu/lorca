@@ -247,6 +247,38 @@ fn images_are_bounded_separate_and_cleanup_respects_shared_and_corrupt_metadata(
     assert!(repo.load().unwrap().2.is_some());
 }
 #[tokio::test]
+async fn opening_and_selecting_models_is_lazy_until_a_message_is_sent() {
+    let temp = Temp::new();
+    let (host, fake, server) = mock().await;
+    let core = Core::new(Repository::new(temp.0.clone()).unwrap()).unwrap();
+    let s = connect(&core, &host).await;
+    op(&core, &s, "refresh", json!({})).await;
+    op(&core, &s, "selectModel", json!({"model":"second"})).await;
+    let snapshot = core.snapshot();
+    let session = snapshot.sessions.iter().find(|v| v.id == s).unwrap();
+    assert_eq!(session.model, "second");
+    assert!(session.active_model.is_none());
+    assert!(session.models_to_release.is_empty());
+    assert!(fake.requests.lock().unwrap().is_empty());
+    op(&core, &s, "draft", json!({"text":"Hello"})).await;
+    op(
+        &core,
+        &s,
+        "send",
+        json!({"requestId":id(),"conversationId":selected(&core,&s)}),
+    )
+    .await;
+    done(&core).await;
+    assert!(
+        fake.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|v| v["model"] == "second" && v["keep_alive"] == -1)
+    );
+    server.abort();
+}
+#[tokio::test]
 async fn streaming_history_usage_and_duplicate_send_are_authoritative() {
     let temp = Temp::new();
     let (host, fake, server) = mock().await;

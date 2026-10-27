@@ -1,7 +1,7 @@
-# Unified conversation runtime (v0.4)
+# 🫍 lorca · Rust runtime and interface contract (v0.4)
 
 - One Rust core, one active task; agent execution is embedded in existing Chats.
-- Tasks stays untouched. No MCP, subagents, or background service installation.
+- The Job Apps sidebar has a separate research workflow; this runtime contract covers Chats. No MCP, subagents, or background service installation.
 
 ## Try it
 
@@ -49,7 +49,7 @@ cargo build
 - Requests, streamed partial text, final results, structured calls/results, and execution activity save in the originating conversation. Drafts, images, and IDs remain compatible.
 - The live backend snapshot is bounded; saved activity can be restored from conversation metadata. Swift keeps an eight-run presentation cache and batches updates every 100 ms.
 - Backend restarts mark unfinished saved requests interrupted; they are never resumed or resubmitted automatically.
-- Model menu → Reload model unloads/reloads after a shared-model warning; active work must be stopped first. It reuses Rust leases and loading UI; no automatic reload.
+- GUI model selection is lazy: opening the app or changing selection does not preload. Submitted work prepares the model. Model menu → Unload model / Reload model uses shared-model warnings and Rust leases; stop active work first. No automatic reload.
 - GUI safeguards remain 24 model turns, 120 seconds per inference request, 120 seconds per command. Context compacts between complete turns; actual time/iteration limits remain explicit.
 
 ## v0.4B interface contract
@@ -108,27 +108,32 @@ Use the existing authenticated local backend (`Endpoint`, bearer token, no brows
   mutation invalidates command-result reuse, allowing tests to run again after a fix.
   Repeated unchanged failures stop early; denials remain task scoped.
 
-## Verification on this machine
+## Verification and reproduction
 
-- The original 44 Rust tests passed before changes. The expanded suite passes,
-  including genuine streaming, UTF-8/tool fragments, no-workspace conversation,
-  saved follow-ups/images, discovery recovery, partial cancellation, interrupted
-  tool groups, metrics, and repeated automatic compaction without duplicate writes.
-- `cargo fmt --check`, `cargo test`, and strict Clippy are the required Rust checks.
-- Native macOS builds pass using the installed macOS 26.5 SDK. With this machine's
-  command-line tools, set `SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk`
-  before `./macos/build.sh`: its newer SDK references a missing SwiftUI macro plugin.
-- The existing Swift XCTest suite was attempted before and after the change. This
-  command-line-tools installation does not contain XCTest; the suite cannot run here.
-  A full Xcode installation is needed for that check. No test pass is claimed for it.
-- Real local `qwen3.5:9b-q4_K_M` completed greeting → source discovery/architecture →
-  an approved fix → approved sandboxed `cargo test` (exit 0) → a tool-free contextual
-  explanation in an isolated Rust fixture. All four answers streamed before completion;
-  allocated capacity was 32,768 and usage/speed came from actual Ollama measurements.
-- The deterministic long-task regression forces multiple compactions, keeps the
-  objective and discovered references, and executes its approved patch exactly once.
-- After updating, relaunch app/CLI clients to load the rebuilt core. No commits,
-  pushes, merges, release tags, or additional agent frameworks are created.
+Required checks:
+
+```sh
+cargo fmt --check
+cargo test
+cargo clippy --all-targets -- -D warnings
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swift test --package-path macos
+python3 -B -m unittest discover -s jobapps/tests
+./macos/build.sh
+```
+
+Rust checks, the Swift XCTest suite, Python tests, and native app builds have passed
+on the development Mac with full Xcode. Tests use isolated storage, temporary
+workspaces, local servers, and deterministic approvals where appropriate; they do
+not unload real Ollama models.
+
+Earlier live acceptance with local Qwen verified streaming, discovery, an approved
+fixture edit, approved sandboxed Cargo tests, and contextual follow-up. Those runs
+are distinct from deterministic tests and do not guarantee arbitrary model output.
+See [native acceptance](macos/Acceptance/README.md) for the reproducible runner.
+
+Relaunch app/CLI clients after rebuilding so they use the current protocol and core.
+The build script selects full Xcode when available and handles the known macOS 26.5
+command-line-tools SDK fallback. No background service installation is required.
 
 ## Reliability stop checks
 
