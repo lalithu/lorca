@@ -14,22 +14,6 @@ Chat, work on code, and manage job applications—with a floating orca at your s
 
 ---
 
-## A look inside
-
-### Chats
-
-![lorca Chats dashboard with the standard welcome hero](docs/screenshots/chats.jpg)
-
-### Job Apps
-
-![Needs you application workflow with résumé preview for an example job](docs/screenshots/job-apps.jpg)
-
-### Mini
-
-<img src="docs/screenshots/mini.jpg" alt="Floating orca Mini with an open coding conversation and live model metrics" width="384">
-
-Screenshots use an isolated demo profile. The résumé preview is the author's approved example; Mini shows a real local-model response.
-
 ## Features
 
 - **Chats:** streamed responses, Markdown, images, saved conversations, and a shared Dashboard/Mini experience.
@@ -116,7 +100,7 @@ One active conversational run at a time. Tools are bounded; commands support a l
 - Chats and Job Apps data live under `~/Library/Application Support/lorca/`, outside the repository.
 - Chat/model inference uses your configured Ollama server. Job research uses external search/extraction; Gmail and Sheets require Google access.
 - Optional Sheets sync contains personal Job Apps data, including the approved résumé PDF. Use a private Sheet and one active Mac at a time.
-- OAuth credentials, API keys, local trackers, résumé files, and templates are excluded from Git; the approved screenshot above includes a résumé preview. This personal build includes the author's Gmail address in its Job Apps integration.
+- OAuth credentials, API keys, local trackers, résumé files, and templates are excluded from Git. This personal build includes the author's Gmail address in its Job Apps integration.
 - Chat history does **not** sync through Sheets. Keep a backup of the Application Support folder.
 
 ## Development
