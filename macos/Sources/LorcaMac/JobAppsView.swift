@@ -3,7 +3,7 @@ import SwiftUI
 
 private enum JobMode: String, CaseIterable { case research = "Research", applying = "Applying", email = "Email & Follow-ups" }
 struct JobAppsView: View {
-    private var zoom: CGFloat { chat.chatTextZoom }
+    private let zoom: CGFloat = 0 // Baseline metrics; the shared AppKit host scales the whole interface.
     @ObservedObject var store: JobAppsStore
     @ObservedObject var chat: ChatStore
     @State private var mode: JobMode = .research
@@ -163,7 +163,9 @@ struct JobAppsView: View {
         .onChange(of: jobs.map(\.id)) { _, ids in
             if !store.queueActive, let selected = store.selected, !ids.contains(selected) { store.selected = ids.first }
         }
-        .sheet(isPresented: $settings) { JobAppsSettings(store: store).environment(\.jobAppsZoom, zoom) }
+        .sheet(isPresented: $settings) {
+            ZoomContent(zoom: chat.uiZoom) { JobAppsSettings(store: store).environment(\.jobAppsZoom, zoom) }
+        }
         .confirmationDialog("Unload \(modelToUnload ?? chat.selectedModel)?", isPresented: $confirmingUnload) {
             Button("Unload model", role: .destructive) {
                 Task { await chat.unloadModel(model: modelToUnload); if let error = chat.error { store.error = error } }

@@ -20,9 +20,9 @@ struct ChatComposer: View {
             ZStack(alignment: .topLeading) {
                 if store.draft.isEmpty {
                     Text("Message lorca…").foregroundStyle(.tertiary)
-                        .font(.system(size: (compact ? 12 : 14) + store.chatTextZoom)).allowsHitTesting(false)
+                        .font(.system(size: (compact ? 12 : 14))).allowsHitTesting(false)
                 }
-                ChatInput(text: $store.draft, size: (compact ? 12 : 14) + store.chatTextZoom,
+                ChatInput(text: $store.draft, size: (compact ? 12 : 14),
                     maxLines: compact ? 3 : 5,
                     identifier: compact ? "mini-message-input" : "dashboard-message-input",
                     send: send, attach: store.attachImages)

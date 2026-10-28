@@ -86,8 +86,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func fullScreen() { windows.showFullScreen() }
     @objc private func mini() { windows.toggleMini() }
     @objc private func settings() { windows.page = .settings; windows.showDashboard() }
-    @objc private func increaseChatText() { store.resizeChatText(by: 1) }
-    @objc private func decreaseChatText() { store.resizeChatText(by: -1) }
     @objc private func newChat() { store.newChat(); windows.page = .chats }
 
     private func installMenus() {
@@ -114,10 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(editItem)
 
         let view = NSMenu(title: "View")
-        let increaseItem = view.addItem(withTitle: "Increase Chat Text Size", action: #selector(increaseChatText), keyEquivalent: "=")
-        increaseItem.target = self
-        let decreaseItem = view.addItem(withTitle: "Decrease Chat Text Size", action: #selector(decreaseChatText), keyEquivalent: "-")
-        decreaseItem.target = self
+        store.uiZoom.addCommands(to: view)
         let viewItem = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
         viewItem.submenu = view
         menu.addItem(viewItem)

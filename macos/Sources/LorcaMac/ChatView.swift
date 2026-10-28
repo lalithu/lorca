@@ -6,7 +6,7 @@ struct ChatView: View {
     var openDashboard: (() -> Void)?
     @State private var followsResponse = true
     @State private var reviewApproval = true
-    private var textSize: CGFloat { (compact ? 12 : 14) + store.chatTextZoom }
+    private var textSize: CGFloat { compact ? 12 : 14 }
 
     var body: some View {
         VStack(spacing: compact ? 10 : 16) {
@@ -41,7 +41,7 @@ struct ChatView: View {
                     followsResponse = true
                     proxy.scrollTo("conversation-bottom", anchor: .bottom)
                 }
-                .onChange(of: store.chatTextZoom) { _, _ in
+                .onChange(of: store.uiZoom.percent) { _, _ in
                     if followsResponse { proxy.scrollTo("conversation-bottom", anchor: .bottom) }
                 }
                 .onChange(of: store.agent.latest) { _, current in

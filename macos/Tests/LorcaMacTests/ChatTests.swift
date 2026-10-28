@@ -137,9 +137,12 @@ final class ChatTests: XCTestCase {
         backend.fail = false
         _ = await store.modelSession.close(unload: false)
     }
-    func testSharedProjectionSwitchingAndFontZoomDoNotReloadModel() async throws {
+    func testSharedProjectionSwitchingAndUIZoomDoNotReloadModel() async throws {
         let backend = MockBackend()
-        let store = ChatStore(backend: backend)
+        let name = "lorca.zoom-chat-test.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        let store = ChatStore(backend: backend, defaults: defaults)
         await store.refreshConnection()
         let first = store.library.selectedID
         let loads = backend.requests.filter { $0["op"] as? String == "prepare" }.count
@@ -150,8 +153,8 @@ final class ChatTests: XCTestCase {
         XCTAssertEqual(store.library.selectedID, first)
         XCTAssertEqual(store.library.conversations.count, 2)
         XCTAssertEqual(backend.requests.filter { $0["op"] as? String == "prepare" }.count, loads)
-        store.resizeChatText(by: 1)
-        XCTAssertEqual(store.chatTextZoom, 1)
+        store.uiZoom.zoomIn()
+        XCTAssertEqual(store.uiZoom.percent, 110)
         _ = await store.modelSession.close(unload: false)
     }
     func testStreamedSnapshotsUpdateSharedChatWithoutAddingMessagesTwice() async throws {

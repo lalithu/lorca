@@ -64,7 +64,7 @@ struct DashboardView: View {
                 Text(LorcaAsset.emoji).font(.system(size: 27))
                 Text("lorca").font(.system(size: 25, weight: .semibold, design: .rounded))
             }
-            .padding(.bottom, 32)
+            .padding(.bottom, 18)
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(SidebarPage.allCases.filter { $0 != .settings }) { page in navigation(page) }
@@ -87,7 +87,7 @@ struct DashboardView: View {
             }
             .padding(.horizontal, 9)
         }
-        .padding(.horizontal, 18).padding(.top, 22).padding(.bottom, 24)
+        .padding(.horizontal, 18).padding(.top, 14).padding(.bottom, 24)
     }
 
     private func navigation(_ page: SidebarPage) -> some View {
@@ -120,7 +120,7 @@ struct DashboardView: View {
                 if windows.page == .chats { ConnectionBadge(store: store) }
             }
         }
-        .padding(.horizontal, 32).padding(.top, 22).padding(.bottom, 27)
+        .padding(.horizontal, 32).padding(.top, 14).padding(.bottom, 27)
     }
 
     private var miniToggle: some View {

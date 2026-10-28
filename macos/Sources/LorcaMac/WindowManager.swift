@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import QuartzCore
 import SwiftUI
 
@@ -19,6 +20,7 @@ final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolb
     private var mini: MiniPanel!
     private var miniChat: MiniPanel!
     private var miniAnimationID = UUID()
+    private var zoomObservation: AnyCancellable?
     private let toolbarTitle = NSTextField(labelWithString: "lorca · Chats")
 
     init(store: ChatStore) { self.store = store }
@@ -43,9 +45,8 @@ final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolb
         dashboard.toolbar = toolbar
         dashboard.toolbarStyle = .unifiedCompact
         dashboard.titlebarSeparatorStyle = .none
-        let dashboardContent = NSHostingView(rootView: DashboardView(store: store, windows: self))
+        let dashboardContent = ZoomHostingView(rootView: DashboardView(store: store, windows: self), zoom: store.uiZoom)
         // AppKit owns window geometry; SwiftUI must not replace it with a fitting size.
-        dashboardContent.sizingOptions = []
         dashboard.contentView = dashboardContent
         if !dashboard.setFrameUsingName("lorca.dashboard") { dashboard.center() }
         dashboard.setFrameAutosaveName("lorca.dashboard")
@@ -62,12 +63,12 @@ final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolb
         mini.level = .floating
         mini.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         mini.appearance = NSAppearance(named: .darkAqua)
-        mini.contentView = NSHostingView(rootView:
+        mini.contentView = ZoomHostingView(rootView:
             PetHandle(
                 toggle: { [weak self] in self?.toggleMiniExpansion() },
                 dragEnded: { [weak self] in self?.finishMiniDrag() }
             )
-                .frame(width: 160, height: 160).padding(.bottom, 4)
+                .frame(width: 160, height: 160).padding(.bottom, 4), zoom: store.uiZoom
         )
         if let screen = NSScreen.main?.visibleFrame {
             mini.setFrameOrigin(NSPoint(x: screen.maxX - 190, y: screen.minY + 35))
@@ -84,12 +85,38 @@ final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolb
         miniChat.level = .floating
         miniChat.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         miniChat.appearance = NSAppearance(named: .darkAqua)
-        let chatContent = NSHostingView(rootView: MiniView(store: store, windows: self))
-        chatContent.sizingOptions = []
+        let chatContent = ZoomHostingView(rootView: MiniView(store: store, windows: self), zoom: store.uiZoom)
         miniChat.contentView = chatContent
         store.appearanceChanged = { [weak self] in self?.applyAppearance() }
         applyAppearance()
+        applyZoom(percent: store.uiZoom.percent)
+        zoomObservation = store.uiZoom.$percent.dropFirst().sink { [weak self] in self?.applyZoom(percent: $0) }
         showDashboard()
+    }
+
+    private func applyZoom(percent: Int) {
+        let scale = CGFloat(percent) / 100
+        // Keep the existing logical minimum; avoid clipping fixed-size forms at
+        // large zoom while leaving the titlebar and toolbar in native points.
+        dashboard.minSize = NSSize(width: 740 * scale, height: 500 * scale)
+        if dashboard.frame.width < dashboard.minSize.width || dashboard.frame.height < dashboard.minSize.height {
+            var frame = dashboard.frame
+            let height = max(frame.height, dashboard.minSize.height)
+            frame.origin.y -= height - frame.height
+            frame.size = NSSize(width: max(frame.width, dashboard.minSize.width), height: height)
+            dashboard.setFrame(frame, display: true)
+        }
+        var pet = mini.frame
+        let petSize = NSSize(width: 160 * scale, height: 168 * scale)
+        pet.origin.y += pet.height - petSize.height
+        pet.size = petSize
+        if let screen = mini.screen?.visibleFrame ?? NSScreen.main?.visibleFrame {
+            pet.origin.x = min(max(pet.minX, screen.minX), screen.maxX - pet.width)
+            pet.origin.y = min(max(pet.minY, screen.minY), screen.maxY - pet.height)
+        }
+        mini.setFrame(pet, display: mini.isVisible)
+        miniChat.setContentSize(NSSize(width: 384 * scale, height: 400 * scale))
+        if miniExpanded { positionMiniChat(preserveSide: true) }
     }
 
     func showDashboard() {
@@ -146,7 +173,7 @@ final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolb
             miniChat.orderFrontRegardless()
             miniChat.makeKey()
         }
-        // The pet never resizes. Animate only this fixed-size chat panel's opacity.
+        // Expansion preserves both panel sizes; animate only the chat panel's opacity.
         NSAnimationContext.runAnimationGroup { context in
             context.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.18
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)

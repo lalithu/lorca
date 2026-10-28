@@ -22,7 +22,7 @@ final class ChatStore: ObservableObject {
     var canSend: Bool { canSendChat && !agent.busy && !jobs.running }
     var canSendChat: Bool { ready && !closing && !isManagingModel && !agent.submitting && !currentAgentActive && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftImages.isEmpty)
         && !isGenerating && !isImportingImages && !modelSession.isLoading && !modelSession.isClosing }
-    @Published private(set) var chatTextZoom: CGFloat = 0
+    let uiZoom: AppZoom
     @Published var isImportingImages = false
     @Published private(set) var isReloadingModel = false
     @Published private(set) var isUnloadingModel = false
@@ -66,10 +66,11 @@ final class ChatStore: ObservableObject {
     init(backend: BackendTransport? = nil, defaults: UserDefaults = .standard) {
         self.backend = backend ?? BackendClient()
         self.defaults = defaults
+        uiZoom = AppZoom(defaults: defaults)
         agent = AgentStore(backend: self.backend)
         selectedModel = defaults.string(forKey: "model") ?? "qwen3.5:9b"
         appearance = Appearance(rawValue: defaults.string(forKey: "appearance") ?? "Dark") ?? .dark
-        for source in [modelSession.objectWillChange, library.objectWillChange, agent.objectWillChange, jobs.objectWillChange] {
+        for source in [uiZoom.objectWillChange, modelSession.objectWillChange, library.objectWillChange, agent.objectWillChange, jobs.objectWillChange] {
             source.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &updates)
         }
         library.recoverDrafts(at: self.backend.root.appendingPathComponent("pending-drafts.json"))
@@ -279,7 +280,6 @@ final class ChatStore: ObservableObject {
         stopReply()
     }
     private func stopReply() { guard ready, !closing else { return }; enqueue(["op": "cancel", "conversationId": library.selectedID.uuidString]) }
-    func resizeChatText(by amount: CGFloat) { chatTextZoom = min(10, max(-4, chatTextZoom + amount)) }
     func newChat() { stopReply(); enqueue(["op": "new"]) }
     func openConversation(_ id: UUID) {
         guard id != library.selectedID else { return }
