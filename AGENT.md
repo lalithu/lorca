@@ -68,7 +68,7 @@ Use the existing authenticated local backend (`Endpoint`, bearer token, no brows
 
 ## Layout
 
-- `src/agent/`: provider-independent runtime, permissions, tools, workspace access, command sandbox, event/task types.
+- `src/agentloop/`: provider-independent runtime, permissions, tools, workspace access, command sandbox, event/task types.
 - `src/provider/agent.rs`: native Ollama tool-call adapter.
 - `src/core/agent.rs`, `agent_chats.rs`: existing model lifecycle/session integration, saved request/result association, and interruption recovery.
 - `src/agent_cli.rs`: temporary testing interface.
@@ -78,7 +78,7 @@ Use the existing authenticated local backend (`Endpoint`, bearer token, no brows
 
 - New Swift agent modules: `AgentTypes`, `AgentClient`, `AgentStore`, `AgentActivity`, `AgentActivityView`, `AgentApprovalView`, `AgentDiffView`, `AgentComposerControls` in `macos/Sources/LorcaMac/`.
 - Existing Swift integration: `BackendClient.swift`, `ChatStore.swift`, `Conversation.swift`, `ChatView.swift`, `ChatComposer.swift`, `ChatScrollObserver.swift`, `MiniView.swift`, `ModelPicker.swift`. ModelPicker includes manual reload; Rust lifecycle commands are reused.
-- Rust: `src/agent/types.rs`, `runtime.rs`; `src/core/agent.rs`, new `agent_chats.rs`, `mod.rs`, `conversations.rs`, `generation.rs`.
+- Rust: `src/agentloop/types.rs`, `runtime.rs`; `src/core/agent.rs`, new `agent_chats.rs`, `mod.rs`, `conversations.rs`, `generation.rs`.
 - Tests: new `macos/Tests/LorcaMacTests/AgentTests.swift`; updated `BackendTests.swift`, `ChatTests.swift`, `ChatScrollTests.swift`, and `tests/agent_core.rs`.
 - Docs: `README.md`, `macos/README.md`, `FUNCTIONALITY.md`, and this contract.
 
@@ -174,3 +174,32 @@ Reference mechanisms: [Codex turn-stop continuation](https://github.com/openai/c
 No agent framework, dependency, model router or second verifier was added.
 
 The local transport protocol is now 3 because Incomplete/Denied extend the native outcome contract. Relaunch app/CLI clients after rebuilding; older backends are rejected before accepting a task.
+
+## Four-pillar task contract
+
+The existing loop initializes one Rust-owned TaskContract per task, retaining the
+original instruction, objective requirements, bounded context references and task
+restrictions. Authority checks run before tool preparation/approval; all existing
+workspace and approval enforcement remains. Verification reports real execution
+records, never model claims; a nonzero required command does not satisfy success.
+The additive task_contract and task_verification events use existing audit storage.
+No wire fields, conversation IDs or persisted message schema were removed.
+
+`src/tools/` now owns native tool definitions, registry, validation, workspace and
+command execution. `lorca::agent` remains an API alias. See
+[architecture and limitations](docs/architecture.md) for module responsibilities,
+compaction behavior and the deliberately limited restriction recognizer.
+
+### Small-window checkpoint representation
+
+Compaction pins the original instruction once and projects compact per-file read
+facts and operation metadata rather than re-serializing the full contract. Full
+objective/restrictions, approvals, execution caches and verification history stay
+in Rust and the saved audit. Old generated checkpoints are not recursively
+summarized; narrative yields space to essential state. Initial discovery inventory
+is replaced by a compact verified-file index, while capability references remain
+in Rust. Provider and context manager share the generation reserve: an allocated
+8192-token window leaves 6144 input tokens after reserving 2048 for output, including
+schemas and system text. UI usage is the last confirmed measurement, not a guarantee
+that the next prompt fits. Genuine essential-state overflow remains an error with
+explicit budget diagnostics; it is not silently truncated.

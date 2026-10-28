@@ -1,4 +1,4 @@
-use super::types::Result;
+use crate::agent_types::Result;
 use cap_std::{
     ambient_authority,
     fs::{Dir, OpenOptions},

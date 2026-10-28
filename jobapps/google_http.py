@@ -7,6 +7,10 @@ import urllib.error
 import urllib.request
 
 
+stopping = lambda: False
+shutdown_deadline = None
+
+
 class GoogleNetworkError(RuntimeError):
     pass
 
@@ -14,8 +18,10 @@ class GoogleNetworkError(RuntimeError):
 def request_json(request,timeout=25):
     reading=request.get_method()=='GET'
     for attempt in range(2 if reading else 1):
+        remaining = shutdown_deadline - time.monotonic() if shutdown_deadline is not None else timeout
+        if stopping() or remaining <= 0:raise GoogleNetworkError("Lorca is closing. Unsynced changes are saved locally for the next sync.")
         try:
-            with urllib.request.urlopen(request,timeout=timeout) as response:return json.load(response)
+            with urllib.request.urlopen(request,timeout=min(timeout,remaining)) as response:return json.load(response)
         except urllib.error.HTTPError:
             raise  # Keep provider status codes, especially Gmail draft 404s.
         except (urllib.error.URLError,ssl.SSLError,TimeoutError,ConnectionError,http.client.HTTPException) as exc:

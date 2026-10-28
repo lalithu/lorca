@@ -627,3 +627,50 @@ async fn image_limits_and_failed_writes_do_not_corrupt_saved_chats() {
     fs::rename(repo.root.join("saved"), repo.root.join("conversations")).unwrap();
     assert_eq!(repo.load().unwrap().0[0].draft_images.len(), 4);
 }
+
+#[tokio::test]
+async fn closing_has_a_shared_unload_deadline_without_killing_other_clients() {
+    let temp = Temp::new();
+    let (host, fake, server) = mock().await;
+    let core = Core::new(Repository::new(temp.0.clone()).unwrap()).unwrap();
+    let a = connect(&core, &host).await;
+    let b = connect(&core, &host).await;
+    op(&core, &a, "prepare", json!({"model":"orca"})).await;
+    let loading = {
+        let core = core.clone();
+        let b = b.clone();
+        tokio::spawn(async move { op(&core, &b, "prepare", json!({"model":"slow"})).await })
+    };
+    for _ in 0..200 {
+        if fake
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|v| v["model"] == "slow")
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let closed = tokio::time::timeout(
+        Duration::from_secs(10),
+        op(&core, &a, "close", json!({"unload":true})),
+    )
+    .await
+    .expect("quit waited indefinitely for another client's load");
+    assert_eq!(closed["failures"], json!(["orca"]));
+    assert_eq!(core.client_count(), 1);
+    assert!(core.snapshot().sessions.iter().any(|s| s.id == b));
+    assert!(
+        !fake
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|v| v["keep_alive"] == 0)
+    );
+    op(&core, &b, "close", json!({"unload":false})).await;
+    let _ = loading.await;
+    server.abort();
+}

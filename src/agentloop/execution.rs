@@ -1,4 +1,4 @@
-use super::{Agent, Registry, Workspace, permissions, types::*};
+use super::{Agent, Registry, Workspace, authority, types::*};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
@@ -26,7 +26,13 @@ impl Agent {
             bounded(&w.map(|w|w.references()).unwrap_or_default().join(", "),6000))}),
         ];
         let prior_history = history.clone();
-        let requirements = super::completion::Requirements::new(&task);
+        let contract = super::TaskContract::new(
+            &task,
+            w.map(|w| w.root.display().to_string()),
+            history.len(),
+        );
+        self.emit("task_contract", json!(contract));
+        let requirements = &contract.objective.completion;
         messages.extend(history);
         if messages.last().is_none_or(|m| m["role"] != "user") {
             messages.push(json!({"role":"user","content":task}));
@@ -59,10 +65,20 @@ impl Agent {
             if *cancel.borrow() {
                 return Err("Cancelled".into());
             }
-            let operational = json!({"workspace":w.map(|w|&w.root),"verifiedFiles":w.map(|w|w.references()).unwrap_or_default(),
-                "operations":evidence,"requirements":requirements,"outstanding":requirements.missing(&self.snapshot().unwrap().transcript),"completedActionIds":completed.keys().collect::<Vec<_>>(),"unresolved":unresolved.keys().collect::<Vec<_>>(),"denied":denied});
-            if context.fit(&mut messages, &schemas, capacity, &task, &operational)? {
-                self.emit("context_compacted",json!({"count":context.compactions,"estimatedTokens":context.tokens(&messages,&schemas),"capacity":capacity}));
+            let mut operational = super::context::operational(&contract, &evidence);
+            if let Some(w) = w {
+                let references = w.references();
+                operational["verifiedFiles"] =
+                    json!(references.iter().rev().take(32).collect::<Vec<_>>());
+                operational["otherVerifiedFiles"] = json!(references.len().saturating_sub(32));
+            }
+            operational["outstanding"] =
+                json!(requirements.missing(&self.snapshot().unwrap().transcript));
+            operational["unresolved"] = json!(unresolved.keys().collect::<Vec<_>>());
+            operational["denied"] = json!(denied);
+            let offered = if finalizing { &[][..] } else { &schemas[..] };
+            if context.fit(&mut messages, offered, capacity, &task, &operational)? {
+                self.emit("context_compacted",json!({"count":context.compactions,"estimatedTokens":context.tokens(&messages,offered),"capacity":capacity,"outputReserve":crate::context::generation_reserve(capacity),"inputBudget":capacity.saturating_sub(crate::context::generation_reserve(capacity))}));
                 let mut s = self.state.lock().unwrap();
                 let limit = s.view.as_ref().unwrap().usage.context_limit;
                 s.view.as_mut().unwrap().usage = crate::types::Usage {
@@ -70,7 +86,6 @@ impl Agent {
                     ..Default::default()
                 };
             }
-            let offered = if finalizing { &[][..] } else { &schemas[..] };
             let estimated = context.tokens(&messages, offered);
             {
                 let mut s = self.state.lock().unwrap();
@@ -119,6 +134,14 @@ impl Agent {
             }
             if turn.calls.is_empty() {
                 let current = self.snapshot().unwrap().transcript;
+                let mut report = requirements.report(&current);
+                if !unresolved.is_empty() {
+                    report.satisfied = false;
+                    report
+                        .unsatisfied
+                        .push("Tool failures remain unresolved".into());
+                }
+                self.emit("task_verification", json!(report));
                 let mut missing = requirements.missing(&current);
                 if !denied.is_empty() {
                     return Err(
@@ -129,7 +152,7 @@ impl Agent {
                 if !unresolved.is_empty() {
                     return Err("A command or file change failed. Task failed; see actual tool results and exit status.".into());
                 }
-                let claims = super::completion::unverified_claim(
+                let claims = super::verification::unverified_claim(
                     &task,
                     &turn.content,
                     &prior_history
@@ -145,7 +168,8 @@ impl Agent {
                     missing.push(reason);
                 }
                 let empty = turn.content.trim().is_empty();
-                let intent = requirements.action() && super::completion::intent_only(&turn.content);
+                let intent =
+                    requirements.action() && super::verification::intent_only(&turn.content);
                 if missing.is_empty() && !empty && !intent {
                     return Ok(turn.content);
                 }
@@ -224,7 +248,16 @@ impl Agent {
                 } else if let Some(previous) = completed.get(&cache_key) {
                     Ok(json!({"ok":true,"alreadyExecuted":true,"evidence":previous}))
                 } else if let Some(w) = w {
-                    permissions::execute(self, &registry, w, &call, limits, cancel.clone()).await
+                    authority::execute(
+                        self,
+                        &registry,
+                        w,
+                        &call,
+                        limits,
+                        cancel.clone(),
+                        &contract.authority,
+                    )
+                    .await
                 } else {
                     Err("Select a workspace before using file or command tools".into())
                 };

@@ -1,8 +1,9 @@
-use super::{
-    Workspace,
-    command::{self, CommandSpec},
-    types::*,
-};
+use command::CommandSpec;
+mod command;
+mod workspace;
+pub use workspace::Workspace;
+
+use crate::agent_types::*;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
@@ -197,7 +198,7 @@ impl Tool for Native {
                     Some(s) if !a.old_text.is_empty() && s.matches(&a.old_text).count()==1 => s.replacen(&a.old_text,&a.new_text,1),
                     _=>return Err("old_text must match exactly once; empty old_text is only for creating a new file".into()),
                 };
-                if new.len() > super::workspace::FILE_LIMIT || old.as_deref() == Some(&new) {
+                if new.len() > workspace::FILE_LIMIT || old.as_deref() == Some(&new) {
                     return Err("Patch is empty or too large".into());
                 }
                 let diff = full_diff(&a.path, old.as_deref(), &new);

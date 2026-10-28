@@ -30,8 +30,10 @@ fn run() -> io::Result<()> {
     if std::env::args().nth(1).as_deref() == Some("serve") {
         return lorca::transport::run();
     }
-    if args.next().as_deref() == Some(std::ffi::OsStr::new("main")) {
-        return launcher::run(args.collect());
+    match args.next().as_deref() {
+        Some(command) if command == "main" => return launcher::run(args.collect()),
+        Some(command) if command == "rebuild" => return launcher::rebuild(args.collect()),
+        _ => {}
     }
     let Some(config) = config::Config::load()? else {
         return Ok(());

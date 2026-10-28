@@ -8,6 +8,7 @@ final class ConversationLibrary: ObservableObject {
     @Published private(set) var selectedID = UUID()
     @Published var error: String?
     var perform: (([String: Any]) -> Void)?
+    private var recoveryURL: URL?
     private var pendingDrafts: [UUID: String] = [:]
     init() { selectedID = conversations[0].id }
     var current: Conversation { conversations.first { $0.id == selectedID } ?? conversations[0] }
@@ -34,7 +35,22 @@ final class ConversationLibrary: ObservableObject {
         perform?(["op": "draft", "conversationId": id.uuidString, "text": text])
     }
     func acknowledgedDraft(_ text: String, id: UUID) {
-        if pendingDrafts[id] == text { pendingDrafts.removeValue(forKey: id) }
+        if pendingDrafts[id] == text { pendingDrafts.removeValue(forKey: id); saveRecovery() }
+    }
+    func recoverDrafts(at url: URL) {
+        recoveryURL = url
+        if let data = try? Data(contentsOf: url), let drafts = try? JSONDecoder().decode([UUID: String].self, from: data) {
+            pendingDrafts = drafts
+        }
+    }
+    func checkpointDrafts(at url: URL) { recoveryURL = url; saveRecovery() }
+    private func saveRecovery() {
+        guard let url = recoveryURL else { return }
+        do {
+            if pendingDrafts.isEmpty { if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }; return }
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONEncoder().encode(pendingDrafts).write(to: url, options: .atomic)
+        } catch { self.error = "Couldn’t save pending drafts: \(error.localizedDescription)" }
     }
     func rename(_ id: UUID, to title: String) { perform?(["op": "rename", "conversationId": id.uuidString, "title": title]) }
     func removeDraftImage(_ id: UUID) { perform?(["op": "removeImage", "conversationId": selectedID.uuidString, "imageId": id.uuidString]) }

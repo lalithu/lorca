@@ -53,6 +53,7 @@ Connect both Macs to the same private Sheet and enable sync. Opening Job Apps, r
 - PDF, LaTeX source, and candidate profile are separate. Changing one does not rewrite the others. Tailored PDFs can be rebuilt from synced job source.
 - Conflicts retain both values for review; defaults do not overwrite completed settings. Choose Keep this Mac or Use Sheet, then sync again.
 - Sheets uses read-before-write checks, not atomic distributed transactions. Use one active Mac at a time, especially for sending or conflicting résumé edits.
+- Quitting stops research and makes a bounded final sync attempt. In-flight Google work settles within the shutdown budget; offline/unfinished changes remain local and sync on the next Job Apps open. Uncertain Gmail writes are reconciled, never replayed.
 - After pulling code updates, rebuild and restart both Macs. Git carries code; Sheets carries Job Apps data. Each Mac signs in separately.
 
 ## Résumé tailoring

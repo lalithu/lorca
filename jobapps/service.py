@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import signal
 import time
 
 ROOT=Path(os.environ.get('LORCA_JOBS_ROOT',str(Path.home()/'Library/Application Support/lorca/job-apps')))
@@ -50,6 +51,18 @@ def pause_and_wait():
         while time.monotonic()<deadline:
             if research.status()['run']['status'] not in ('starting','running','stopping'):break
             time.sleep(.2)
+
+
+_closed=False
+
+def shutdown():
+    global _closed
+    if _closed:return
+    _closed=True
+    research.stop()
+    resumes.shutdown()
+    integrations.shutdown()
+    pause_and_wait()
 
 
 def dispatch(v):
@@ -138,12 +151,14 @@ def dispatch(v):
         if v.get('field') not in ('stage','priority','notes','outreach_stage'):raise ValueError('Unsupported field')
         tracker.update_job(int(v['id']),{v['field']:v.get('value','')});integrations.request_sync();return snapshot()
     if op=='detail':return {'job':tracker.get_job(int(v['id'])),'history':tracker.get_history(int(v['id']))}
-    if op=='quit':pause_and_wait();return {'closed':True}
+    if op=='quit':shutdown();return {'closed':True}
     raise ValueError('Unknown Job Apps operation')
 
 
 def main():
     setup()
+    def terminate(_signal,_frame):raise SystemExit(0)
+    signal.signal(signal.SIGTERM,terminate)
     # One adapter owns this local tracker, and is closed when the native app closes.
     with (ROOT/'adapter.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -156,6 +171,6 @@ def main():
                 except Exception as exc:response={'ok':False,'error':str(exc)[:700]}
                 print(json.dumps(response,ensure_ascii=False),flush=True)
                 if v.get('op')=='quit':break
-        finally:integrations.shutdown();resumes.shutdown();pause_and_wait()
+        finally:shutdown()
 
 if __name__=='__main__':main()

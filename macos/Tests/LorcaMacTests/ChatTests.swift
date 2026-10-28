@@ -69,6 +69,7 @@ class MockBackend: BackendTransport {
         emit()
         return try JSONEncoder().encode(snapshot())
     }
+    func cancelRequests() async {}
     func events(_ receive: @escaping @MainActor (BackendSnapshot) -> Void) async throws {
         self.receive = receive
         if breakNextStream { breakNextStream = false; failNextCommand = true; throw BackendError(message: "Stream broke") }

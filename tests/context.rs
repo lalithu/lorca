@@ -122,3 +122,54 @@ fn oversized_executed_patch_folds_as_a_whole_without_losing_evidence() {
     );
     assert!(messages[1]["content"].as_str().unwrap().contains("true"));
 }
+
+#[test]
+fn repeated_checkpoints_do_not_become_pinned_narrative_recursively() {
+    let mut context = Context::default();
+    let mut messages = vec![
+        json!({"role":"system","content":"permissions"}),
+        json!({"role":"user","content":"Inspect; do not write"}),
+    ];
+    for _ in 0..10 {
+        messages.push(json!({"role":"assistant","content":"observation ".repeat(4000)}));
+        context
+            .fit(
+                &mut messages,
+                &[],
+                8192,
+                "Inspect; do not write",
+                &json!({"unresolved":["cargo test failed"],"denied":["patch"]}),
+            )
+            .unwrap();
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m["content"]
+                    .as_str()
+                    .is_some_and(|s| s.starts_with("Working checkpoint (historical data): ")))
+                .count(),
+            1
+        );
+        assert!(context.tokens(&messages, &[]) <= 6144);
+        assert!(
+            messages[1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("cargo test failed")
+        );
+    }
+}
+
+#[test]
+fn calibration_uses_raw_basis_even_when_the_previous_estimate_was_scaled() {
+    let messages = vec![json!({"role":"user","content":"representative prompt"})];
+    let mut context = Context::default();
+    let raw = context.tokens(&messages, &[]);
+    context.confirm(raw, raw * 2);
+    let scaled = context.tokens(&messages, &[]);
+    assert_eq!(scaled, raw * 2);
+    context.confirm(scaled, scaled);
+    assert_eq!(context.tokens(&messages, &[]), scaled);
+    assert_eq!(lorca::context::generation_reserve(8192), 2048);
+    assert_eq!(lorca::context::generation_reserve(4096), 1024);
+}

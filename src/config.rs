@@ -6,9 +6,11 @@ pub const HELP: &str = "lorca — chat with a local Ollama model
 
 Usage: lorca [--model NAME] [--host URL] [--config PATH]
        lorca main
+       lorca rebuild
 
   lorca          Start terminal chat
   lorca main     Open the macOS dashboard and Mini
+  lorca rebuild  Rebuild/install the CLI and macOS app, then open the dashboard
 
   --model NAME   Override the saved model for this session
   --host URL     Override the saved Ollama address for this session

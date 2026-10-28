@@ -27,7 +27,7 @@ const EDIT_VERBS: &[&str] = &[
 ];
 
 #[derive(Debug, Serialize)]
-pub(super) struct Requirements {
+pub struct Requirements {
     inspect: bool,
     directory_only: bool,
     edit: bool,
@@ -229,7 +229,11 @@ impl Requirements {
                         .flatten()
                         .filter(|c| &c["id"] == id)
                     {
-                        commands.push((call["function"]["arguments"]["arguments"].clone(), index));
+                        commands.push((
+                            call["function"]["arguments"]["arguments"].clone(),
+                            index,
+                            result["exitCode"].as_i64(),
+                        ));
                     }
                 }
                 _ => (),
@@ -259,7 +263,10 @@ impl Requirements {
             }
         }
         for name in &self.commands {
-            if !commands.iter().any(|(args, index)| {
+            if !commands.iter().any(|(args, index, exit)| {
+                if *exit != Some(0) {
+                    return false;
+                }
                 if self.edit && last_edit.is_some_and(|edit| *index <= edit) {
                     return false;
                 }
@@ -416,9 +423,8 @@ mod tests {
             command("test", "test"),
             result("run_command", "test", json!({"ok":false,"exitCode":101})),
         ];
-        assert_eq!(requirements.missing(&history).len(), 1);
-        // An exit 101 proves execution, never a successful command. Runtime's
-        // unresolved error gate separately prevents Completed for this failure.
+        assert_eq!(requirements.missing(&history).len(), 2);
+        // An exit 101 proves execution, but does not satisfy a command requirement.
         assert!(unverified_claim("Run tests", "I ran cargo test.", &history).is_none());
         assert!(unverified_claim("Run tests", "I ran cargo test.", &[]).is_some());
     }
@@ -530,5 +536,35 @@ mod tests {
             )
             .is_none()
         );
+    }
+}
+
+/// Compact deterministic result. Supporting records are actual task-local tool
+/// observations; original observations remain in the persisted transcript.
+#[derive(Debug, Serialize)]
+pub struct Report {
+    pub satisfied: bool,
+    pub satisfied_requirements: Vec<String>,
+    pub unsatisfied: Vec<String>,
+    pub evidence: Vec<serde_json::Value>,
+}
+impl Requirements {
+    pub fn report(&self, history: &[Value]) -> Report {
+        let unsatisfied = self.missing(history);
+        let evidence:Vec<_>=history.iter().filter(|m|m["role"]=="tool").filter_map(|m| {
+            let value=serde_json::from_str::<Value>(m["content"].as_str()?).ok()?;
+            Some(serde_json::json!({"tool":m["tool_name"],"callId":m["tool_call_id"],"ok":value["ok"],"exitCode":value["exitCode"],"path":value["path"],"verified":value["verified"]}))
+        }).collect();
+        let satisfied_requirements = self
+            .missing(&[])
+            .into_iter()
+            .filter(|r| !unsatisfied.contains(r))
+            .collect();
+        Report {
+            satisfied: unsatisfied.is_empty(),
+            satisfied_requirements,
+            unsatisfied,
+            evidence,
+        }
     }
 }

@@ -20,6 +20,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isQuitting = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"), let icon = NSImage(contentsOf: url) {
+            NSApp.applicationIconImage = icon
+        }
         installMenus()
         windows.open()
         store.modelSession.approvePreviousUnload = { [weak self] model in
@@ -44,6 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !isQuitting else { return .terminateLater }
+        isQuitting = true
         let models = store.modelSession.modelsToRelease.sorted()
         let alert = sharedModelAlert("Quit lorca and unload its models?", models: models)
         alert.addButton(withTitle: "Quit & Unload")
@@ -54,9 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         sender.activate(ignoringOtherApps: true)
         let choice = alert.runModal()
-        guard choice != .alertThirdButtonReturn else { return .terminateCancel }
-        isQuitting = true
-        store.stop()
+        guard choice != .alertThirdButtonReturn else { isQuitting = false; return .terminateCancel }
         Task {
             let failures = await store.modelSession.close(unload: choice == .alertFirstButtonReturn)
             if !failures.isEmpty {

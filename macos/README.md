@@ -14,6 +14,8 @@ cargo install --path . --locked --force
 lorca main
 ```
 
+For iteration after installing the command, quit lorca and run `lorca rebuild` from any directory. It rebuilds the Rust core, installs the updated CLI, builds the app, and opens the dashboard automatically. The native app icon is 🌊; the Mini pet remains the orca.
+
 Or run `./macos/run.sh` to build and open the app. Open `macos/Package.swift` in Xcode to edit. Full Xcode is required for `swift test`.
 
 The build script selects full Xcode when installed. On affected command-line-tools installations, its macOS 26.5 SDK fallback avoids a missing SwiftUI macro plugin. The bundle is `macos/build/lorca.app`, containing the Swift executable, Rust core, and Job Apps companion.
@@ -43,7 +45,7 @@ The build script selects full Xcode when installed. On affected command-line-too
 - Opening the app or selecting a model does not load it. Submitted work prepares it and requests `keep_alive: -1`.
 - A temporary indeterminate loading bar and elapsed time appear under `ctx`. Context and speed use confirmed Ollama measurements; unavailable values show `—`.
 - **Unload model…** frees memory; **Reload model…** helps recover a stalled model. Stop active work first. Shared-model warnings and Rust session leases apply.
-- `⌘Q` offers **Quit & Unload**, **Keep Loaded & Quit**, and **Cancel**, even before a model has loaded.
+- `⌘Q` offers **Quit & Unload**, **Keep Loaded & Quit**, and **Cancel**, even before a model has loaded. Cleanup has deadlines, preserves unacknowledged drafts, and stops the app-owned Job Apps companion. Other lorca clients keep their shared backend.
 - Explicit Job Apps research/tailoring can also load a model. Pause research before chatting or switching models.
 
 ## Storage and images

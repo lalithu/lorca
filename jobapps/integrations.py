@@ -6,6 +6,7 @@ import subprocess
 import threading
 import time
 import google_connections as google
+import google_http
 import jobtracker as tracker
 import outreach
 import sheets
@@ -33,6 +34,7 @@ def status():
 
 
 def run(operation):
+    if _stop.is_set():raise ValueError('Job Apps is closing')
     if not _busy.acquire(blocking=False):raise ValueError('Google operation in progress; try again shortly')
     previous_message=_state.get('message','Google connected')
     _state.update(busy=True,message='Working…')
@@ -106,6 +108,7 @@ def sync():
 
 
 def request_sync():
+    if _stop.is_set():return
     # Reuse the same worker/sync path; coalesce repeated opens and saves.
     if google.config().get('enabled') and google.TOKEN.exists():_wake.set()
 
@@ -126,6 +129,7 @@ def auto_drafts():
 
 
 def start_background():
+    google_http.stopping = lambda: _stop.is_set() and google_http.shutdown_deadline is None
     def loop():
         while not _stop.is_set():
             _wake.wait(60);_wake.clear()
@@ -146,5 +150,21 @@ def start_background():
     return thread
 
 
-def shutdown():
+def shutdown(timeout=27,flush=True):
     _stop.set();_wake.set()
+    deadline=time.monotonic()+timeout
+    google_http.shutdown_deadline=deadline
+    google_http.stopping=lambda: _stop.is_set() and google_http.shutdown_deadline is None
+    # Finish current work first; the final pass uses the same serialized sync
+    # and conflict/reconciliation rules. All HTTP requests share one deadline.
+    acquired=False
+    try:
+        acquired=_busy.acquire(timeout=max(0,deadline-time.monotonic()))
+        if not acquired:return False
+        if flush and time.monotonic()<deadline and google.config().get('enabled') and google.TOKEN.exists():
+            try:sync()
+            except Exception as exc:_state['message']='Saved locally; sync pending: '+str(exc)[:400]
+        return True
+    finally:
+        if acquired:_busy.release()
+        google_http.shutdown_deadline=None

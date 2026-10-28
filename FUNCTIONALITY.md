@@ -1,5 +1,6 @@
 # 🫍 lorca · functionality
 
+- **Rebuild:** `lorca rebuild` updates core, CLI, and GUI, then opens the dashboard; native 🌊 app icon.
 - **Interfaces:** Rust terminal chat, resizable native dashboard, floating Mini; shared Rust core.
 - **Chats:** create, rename, switch, delete; saved messages, drafts, partial replies, and tool activity.
 - **Responses:** streaming Markdown, free scrolling with bottom-follow, text zoom, cancellation.

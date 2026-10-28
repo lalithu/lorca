@@ -244,8 +244,15 @@ impl Core {
         }
         let mut failed = vec![];
         if unload {
+            // Another client's model preparation can hold the lifecycle lock.
+            // Give all retirements one shared budget, then release this session
+            // even when the provider or another allocation is unresponsive.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
             for model in names {
-                if self.release(session, &model).await.is_err() {
+                if !matches!(
+                    tokio::time::timeout_at(deadline, self.release(session, &model)).await,
+                    Ok(Ok(()))
+                ) {
                     failed.push(model);
                 }
             }
@@ -256,6 +263,7 @@ impl Core {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        self.maintenance();
         let mut s = self.state.lock().unwrap();
         s.clients.remove(session);
         s.view.sessions.retain(|v| v.id != session);

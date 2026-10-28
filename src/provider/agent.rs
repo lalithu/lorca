@@ -74,7 +74,7 @@ impl Inference for OllamaAgent {
                 .await
                 .unwrap_or(crate::context::DEFAULT_CAPACITY);
             let mut body = json!({"model":self.model,"messages":messages,"stream":true,"think":false,"keep_alive":-1,
-                "options":{"num_ctx":capacity,"num_predict":(capacity/4).min(2048),"temperature":0.1}});
+                "options":{"num_ctx":capacity,"num_predict":crate::context::generation_reserve(capacity),"temperature":0.1}});
             if !tools.is_empty() {
                 body["tools"] = json!(tools);
             }

@@ -20,7 +20,7 @@ final class ChatStore: ObservableObject {
     var draftImages: [ChatAttachment] { library.current.draftImages }
     var imageStore: AttachmentStore { AttachmentStore(directory: backend.root.appendingPathComponent("attachments")) }
     var canSend: Bool { canSendChat && !agent.busy && !jobs.running }
-    var canSendChat: Bool { ready && !isManagingModel && !agent.submitting && !currentAgentActive && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftImages.isEmpty)
+    var canSendChat: Bool { ready && !closing && !isManagingModel && !agent.submitting && !currentAgentActive && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftImages.isEmpty)
         && !isGenerating && !isImportingImages && !modelSession.isLoading && !modelSession.isClosing }
     @Published private(set) var chatTextZoom: CGFloat = 0
     @Published var isImportingImages = false
@@ -60,6 +60,7 @@ final class ChatStore: ObservableObject {
     private var revision: UInt64 = 0
     @Published private(set) var ready = false
     private var closing = false
+    private var requestsStopped = false
     private var pendingTurn: UUID?
 
     init(backend: BackendTransport? = nil, defaults: UserDefaults = .standard) {
@@ -71,6 +72,7 @@ final class ChatStore: ObservableObject {
         for source in [modelSession.objectWillChange, library.objectWillChange, agent.objectWillChange, jobs.objectWillChange] {
             source.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &updates)
         }
+        library.recoverDrafts(at: self.backend.root.appendingPathComponent("pending-drafts.json"))
         library.perform = { [weak self] in self?.enqueue($0) }
         modelSession.clearAction = { [weak self] in self?.enqueue(["op": "clearError"]) }
         modelSession.prepareAction = { [weak self] model, approve in
@@ -81,17 +83,34 @@ final class ChatStore: ObservableObject {
         }
         modelSession.closeAction = { [weak self] unload in
             guard let self else { return [] }
-            await self.pending?.value
-            await self.jobs.shutdown()
-            self.closing = true
-            self.eventTask?.cancel()
-            self.agent.shutdown()
+            return await self.shutdown(unload: unload)
+        }
+    }
+    func shutdown(unload: Bool, drainSeconds: TimeInterval = 3, closeSeconds: TimeInterval = 15) async -> [String] {
+        guard !closing else { return [] }
+        closing = true
+        // Recovery is separate from Rust's canonical files; never overwrite a
+        // conversation with a potentially stale UI projection.
+        library.checkpointDrafts(at: backend.root.appendingPathComponent("pending-drafts.json"))
+        eventTask?.cancel(); eventTask = nil
+        agent.shutdown()
+        let jobsTask = Task { await jobs.shutdown() }
+        let queued = pending
+        let drained = await finishWithin(drainSeconds) { await queued?.value; return true } ?? false
+        if !drained { queued?.cancel() }
+        pending = nil
+        requestsStopped = true
+        _ = await finishWithin(1) { [backend] in await backend.cancelRequests() }
+        let result = await finishWithin(closeSeconds) { [self] in
             do {
-                let data = try await self.backend.command(["op": "close", "unload": unload])
+                let data = try await backend.command(["op": "close", "unload": unload])
                 struct Closed: Decodable { let failures: [String] }
                 return try JSONDecoder().decode(Closed.self, from: data).failures
-            } catch { return unload ? self.modelSession.modelsToRelease.sorted() : [] }
+            } catch { return unload ? modelSession.modelsToRelease.sorted() : [] }
         }
+        _ = await finishWithin(1) { [backend] in await backend.cancelRequests() }
+        await jobsTask.value
+        return result ?? (unload ? modelSession.modelsToRelease.sorted() : [])
     }
     var modelChoices: [String] { Array(Set(models + [selectedModel])).sorted() }
     var status: String {
@@ -111,13 +130,16 @@ final class ChatStore: ObservableObject {
         do {
             if !ready {
                 revision = 0
-                apply(try await backend.connect(model: selectedModel))
+                let state = try await backend.connect(model: selectedModel)
+                guard !closing else { return }
+                apply(state)
                 ready = true
                 library.restorePendingDrafts()
                 observeEvents()
                 agent.observe()
             }
             await pending?.value
+            guard !closing else { return }
             if agent.unconfirmedSubmission || !agent.connected { try? await agent.restore() }
             guard await perform(["op": "refresh"]) else { return }
             guard isConnected else { return }
@@ -139,6 +161,7 @@ final class ChatStore: ObservableObject {
                         let data = try await self.backend.command(["op": "snapshot"])
                         self.apply(try JSONDecoder().decode(BackendSnapshot.self, from: data))
                     } catch {
+                        guard !Task.isCancelled, !self.closing else { return }
                         self.ready = false
                         self.isConnected = false
                         self.isGenerating = false
@@ -146,7 +169,9 @@ final class ChatStore: ObservableObject {
                         self.error = friendlyError(error)
                         do {
                             self.revision = 0
-                            self.apply(try await self.backend.connect(model: self.selectedModel))
+                            let state = try await self.backend.connect(model: self.selectedModel)
+                            guard !self.closing, !Task.isCancelled else { return }
+                            self.apply(state)
                             self.ready = true
                             self.agent.observe()
                             try? await self.agent.restore()
@@ -161,13 +186,16 @@ final class ChatStore: ObservableObject {
         }
     }
     func enqueue(_ fields: [String: Any]) {
+        guard !closing else { return }
         let preceding = pending
         pending = Task { [weak self] in
             await preceding?.value
+            guard !Task.isCancelled else { return }
             _ = await self?.perform(fields)
         }
     }
     @discardableResult private func perform(_ fields: [String: Any]) async -> Bool {
+        guard !requestsStopped, !Task.isCancelled else { return false }
         do {
             let data = try await backend.command(fields)
             if fields["op"] as? String == "draft", let id = (fields["conversationId"] as? String).flatMap(UUID.init(uuidString:)), let text = fields["text"] as? String {
@@ -183,7 +211,7 @@ final class ChatStore: ObservableObject {
         }
     }
     func apply(_ snapshot: BackendSnapshot) {
-        guard snapshot.revision >= revision, let session = snapshot.sessions.first(where: { $0.id == backend.sessionID }) else { return }
+        guard !closing, snapshot.revision >= revision, let session = snapshot.sessions.first(where: { $0.id == backend.sessionID }) else { return }
         revision = snapshot.revision
         library.apply(snapshot, selected: session.selectedId)
         agent.restoreArchived(snapshot.conversations,selected:session.selectedId)
@@ -207,13 +235,13 @@ final class ChatStore: ObservableObject {
         } else { usage = session.usage }
     }
     func send() {
-        guard canSend, agent.reserveSubmission() else { return }
+        guard !closing, canSend, agent.reserveSubmission() else { return }
         let conversation = library.selectedID, request = UUID(), text = draft, model = selectedModel
         let workspace=agentWorkspace
         let preceding = pending
         pending = Task { [weak self] in
             await preceding?.value
-            guard let self else { return }
+            guard let self, !self.closing, !Task.isCancelled else { return }
             _ = await self.agent.submit(task: text, workspace: workspace, conversation: conversation, request: request, model: model)
             _ = await self.perform(["op": "snapshot"])
         }
@@ -227,7 +255,7 @@ final class ChatStore: ObservableObject {
         isReloadingModel = true
         defer { isReloadingModel = false }
         await pending?.value
-        guard !isGenerating, !agent.busy else { return }
+        guard !closing, !isGenerating, !agent.busy else { return }
         do {
             _ = try await backend.command(["op": "release", "model": model])
             _ = await perform(["op": "snapshot"])

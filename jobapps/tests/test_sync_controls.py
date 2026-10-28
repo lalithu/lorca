@@ -53,7 +53,7 @@ class SyncControlTests(unittest.TestCase):
                 self.assertTrue(finished.wait(2),'Queued sync was dropped')
             finally:
                 if owned:busy.release()
-                integrations.shutdown()
+                integrations.shutdown(flush=False)
                 if worker:worker.join(2)
             self.assertFalse(worker.is_alive());self.assertEqual(sync.call_count,1)
 

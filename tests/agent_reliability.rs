@@ -484,3 +484,25 @@ async fn corrected_absolute_command_directory_settles_the_original_preflight_err
             .any(|e| e.kind == "tool_completed" && e.data["result"]["exitCode"] == 0)
     );
 }
+
+#[tokio::test]
+async fn task_restriction_blocks_a_model_patch_before_approval_or_side_effect() {
+    let (view, _, root) = drive(
+        "Inspect README.md; do not edit files",
+        vec![patch("README.md"), text("No changes made.")],
+        Decision::AllowOnce,
+    )
+    .await;
+    assert_ne!(view.status, Status::Completed);
+    assert_eq!(
+        std::fs::read_to_string(root.0.join("README.md")).unwrap(),
+        "outdated"
+    );
+    assert!(
+        !view
+            .events
+            .iter()
+            .any(|e| e.kind == "approval_required" || e.kind == "file_changes")
+    );
+    assert!(view.events.iter().any(|e| e.kind == "task_contract"));
+}

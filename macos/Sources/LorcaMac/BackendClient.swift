@@ -40,11 +40,13 @@ protocol BackendTransport: AnyObject {
     var root: URL { get }
     func connect(model: String) async throws -> BackendSnapshot
     func command(_ fields: [String: Any]) async throws -> Data
+    func cancelRequests() async
     func events(_ receive: @escaping @MainActor (BackendSnapshot) -> Void) async throws
     func agentEvents(_ receive: @escaping @MainActor (AgentTaskSnapshot?) -> Void) async throws
 }
 
 extension BackendTransport {
+    func cancelRequests() async {}
     func agentEvents(_ receive: @escaping @MainActor (AgentTaskSnapshot?) -> Void) async throws {
         throw BackendError(message: "Agent events are unavailable. Rebuild and relaunch lorca.")
     }
@@ -58,7 +60,7 @@ final class BackendClient: BackendTransport {
     private let network: URLSession
     private var endpoint: Endpoint?
     private var child: Process?
-    init(root: URL? = nil, network: URLSession = .shared) {
+    init(root: URL? = nil, network: URLSession = URLSession(configuration: .ephemeral)) {
         self.root = root ?? Self.defaultRoot
         self.network = network
     }
@@ -127,7 +129,7 @@ final class BackendClient: BackendTransport {
         if fields["session"] == nil { fields["session"] = sessionID }
         var request = URLRequest(url: endpoint.url.appendingPathComponent("command"))
         request.httpMethod = "POST"
-        request.timeoutInterval = 140
+        request.timeoutInterval = fields["op"] as? String == "close" ? 15 : 140
         request.setValue("Bearer \(endpoint.token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: fields)
@@ -137,6 +139,14 @@ final class BackendClient: BackendTransport {
             throw BackendError(message: detail ?? "lorca’s backend session ended. Reconnect to continue.", submissionRejected: true)
         }
         return data
+    }
+    func cancelRequests() async {
+        await withCheckedContinuation { continuation in
+            network.getAllTasks { tasks in
+                tasks.forEach { $0.cancel() }
+                continuation.resume()
+            }
+        }
     }
     func events(_ receive: @escaping @MainActor (BackendSnapshot) -> Void) async throws {
         guard let endpoint, let sessionID else { throw BackendError(message: "Backend disconnected") }
