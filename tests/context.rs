@@ -173,3 +173,55 @@ fn calibration_uses_raw_basis_even_when_the_previous_estimate_was_scaled() {
     assert_eq!(lorca::context::generation_reserve(8192), 2048);
     assert_eq!(lorca::context::generation_reserve(4096), 1024);
 }
+
+#[test]
+fn context_fitting_reserves_the_same_budget_that_inference_will_receive() {
+    use lorca::context::{Context, GenerationBudget};
+    for capacity in [8192, 16384, 65536] {
+        for recovery in [false, true] {
+            let task = "Update index.html; preserve the current design";
+            let mut messages = vec![
+                json!({"role":"system","content":"Use verified results; never infer approval."}),
+                json!({"role":"user","content":task}),
+            ];
+            for n in 0..24 {
+                messages.push(json!({"role":"assistant","content":format!("Old finding {n}: {}","context ".repeat(1000))}));
+            }
+            let operational = json!({"denied":["do not replay"],"operations":[{"tool":"apply_patch","path":"index.html","ok":true,"verified":true,"bytes":100}]});
+            let budget = GenerationBudget::new(capacity, recovery);
+            let mut context = Context::default();
+            context
+                .fit_budgeted(&mut messages, &[], budget, task, &operational)
+                .unwrap();
+            budget.check(context.tokens(&messages, &[])).unwrap();
+            let encoded = serde_json::to_string(&messages).unwrap();
+            assert!(encoded.contains(task));
+            assert!(encoded.contains("do not replay"));
+            assert!(encoded.contains("index.html"));
+        }
+    }
+}
+
+#[test]
+fn recovery_falls_back_to_smaller_steps_when_larger_output_would_displace_the_goal() {
+    use lorca::context::{Context, GenerationBudget};
+    let task = "x".repeat(9600);
+    let mut messages = vec![
+        json!({"role":"system","content":"Never infer approval."}),
+        json!({"role":"user","content":task}),
+    ];
+    let original = messages.clone();
+    let mut context = Context::default();
+    let normal = GenerationBudget::new(4096, false);
+    let expanded = GenerationBudget::new(4096, true);
+    assert!(normal.check(context.tokens(&messages, &[])).is_ok());
+    assert!(expanded.check(context.tokens(&messages, &[])).is_err());
+    let (chosen, compacted) = context
+        .fit_generation(&mut messages, &[], expanded, &task, &json!({}))
+        .unwrap();
+    assert_eq!(chosen.output_limit, normal.output_limit);
+    assert!(!compacted);
+    assert_eq!(context.compactions, 0);
+    assert_eq!(messages, original);
+    chosen.check(context.tokens(&messages, &[])).unwrap();
+}

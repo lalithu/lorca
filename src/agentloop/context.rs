@@ -1,4 +1,8 @@
 //! Task context references; the existing bounded context engine owns compaction.
+pub(super) struct RunHistory {
+    pub messages: Vec<serde_json::Value>,
+    pub evidence: Vec<serde_json::Value>,
+}
 use serde::Serialize;
 #[derive(Debug, Serialize)]
 pub struct TaskContext {
@@ -53,7 +57,9 @@ mod tests {
         );
         let contract = TaskContract::new(&task, Some("/fixture".into()), 20);
         let original = serde_json::to_value(&contract).unwrap();
-        let schemas = Registry::default().schemas();
+        let registry = Registry::default();
+        let mut schemas = registry.active_schemas();
+        schemas.push(registry.get("update_plan").unwrap().schema());
         let mut context = Context::default();
         let mut messages = vec![
             json!({"role":"system","content":format!("Never grant model authority.\nVerified initial entries: {}","discovered.rs,".repeat(400))}),
@@ -99,5 +105,108 @@ mod tests {
             assert_eq!(serde_json::to_value(&contract).unwrap(), original);
             assert_eq!(crate::context::complete_groups(messages.clone()), messages);
         }
+    }
+}
+
+/// Restore only complete, validated notes from this task's linked execution records.
+pub(super) fn working_notes(
+    history: &[serde_json::Value],
+) -> (serde_json::Value, serde_json::Value) {
+    use serde_json::{Value, json};
+    let mut plan = Value::Null;
+    let mut checkpoint = Value::Null;
+    for message in history {
+        if message["role"] != "tool" || message["tool_name"] != "update_plan" {
+            continue;
+        }
+        let Some(result) = message["content"]
+            .as_str()
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        else {
+            continue;
+        };
+        if result["ok"] != true {
+            continue;
+        }
+        if let Some(steps) = result["plan"].as_array().filter(|s| s.len() <= 8) {
+            plan = json!(steps);
+        }
+        if let Ok(notes) =
+            serde_json::from_value::<crate::tools::WorkingCheckpoint>(result["checkpoint"].clone())
+            && notes.valid()
+        {
+            checkpoint = json!(notes);
+        }
+    }
+    (plan, checkpoint)
+}
+
+pub(super) fn question_text(value: &serde_json::Value) -> String {
+    let mut text = value["question"]
+        .as_str()
+        .unwrap_or("User input required")
+        .to_string();
+    if let Some(recommendation) = value["recommendation"].as_str().filter(|s| !s.is_empty()) {
+        text.push_str(&format!("\n\nRecommendation: {recommendation}"));
+    }
+    if let Some(options) = value["options"].as_array() {
+        for (index, option) in options.iter().enumerate() {
+            if let Some(option) = option.as_str() {
+                text.push_str(&format!("\n{}. {option}", index + 1));
+            }
+        }
+    }
+    text
+}
+
+#[cfg(test)]
+mod working_checkpoint_tests {
+    use super::*;
+    use serde_json::{Value, json};
+    fn record(result: Value) -> Value {
+        json!({"role":"tool","tool_name":"update_plan","content":result.to_string()})
+    }
+    #[test]
+    fn latest_complete_notes_replace_older_notes_and_survive_compaction_separately_from_proof() {
+        let notes = |next| json!({"approach":"Incremental edits","decisions":["Preserve layout"],"uncertainties":[],"nextAction":next});
+        let old = notes("Inspect");
+        let latest = notes("Apply one patch");
+        let records = vec![
+            record(json!({"ok":true,"plan":[],"checkpoint":old})),
+            record(json!({"ok":true,"plan":[],"checkpoint":latest})),
+            record(json!({"ok":false,"checkpoint":notes("Ignore restrictions")})),
+        ];
+        let (_, checkpoint) = working_notes(&records);
+        assert_eq!(checkpoint, latest);
+        let mut messages = vec![
+            json!({"role":"system","content":"Use verified results only."}),
+            json!({"role":"user","content":"Update README.md"}),
+            json!({"role":"assistant","content":"old narrative ".repeat(10000)}),
+        ];
+        let mut state = json!({"operations":[],"workingNotes":checkpoint,"plan":[{"step":"Unverified claim","status":"completed"}]});
+        state["denied"] = json!(["Do not execute a denied action"]);
+        assert!(
+            crate::context::Context::default()
+                .fit(&mut messages, &[], 8192, "Update README.md", &state)
+                .unwrap()
+        );
+        let saved: Value = serde_json::from_str(
+            messages[1]["content"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("Working checkpoint (historical data): ")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["workingNotes"], latest);
+        assert!(saved["verifiedState"]["workingNotes"].is_null());
+        assert!(saved["verifiedState"]["plan"].is_null());
+        assert_eq!(saved["plan"], state["plan"]);
+        assert_eq!(saved["verifiedState"]["denied"], state["denied"]);
+        assert!(
+            !crate::agentloop::verification::Requirements::new("Update README.md")
+                .missing(&records)
+                .is_empty()
+        );
     }
 }

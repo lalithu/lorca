@@ -53,3 +53,11 @@ if [[ "${LORCA_INSTALL_CLI:-0}" == "1" ]]; then
 fi
 touch "$app"
 echo "Built $PWD/$app"
+
+# Only a successful, signed build may replace running processes. Packaging and
+# isolated acceptance tests can opt out explicitly without touching live clients.
+if [[ "${LORCA_BUILD_ONLY:-0}" == "1" ]]; then
+    echo "Build-only mode: running Lorca was not restarted."
+else
+    python3 restart.py "$PWD/$app"
+fi

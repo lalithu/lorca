@@ -2,6 +2,7 @@ pub mod authority;
 pub mod context;
 mod execution;
 pub mod objective;
+mod recovery;
 mod runtime;
 pub use crate::agent_types as types;
 pub mod verification;

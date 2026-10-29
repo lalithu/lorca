@@ -72,6 +72,16 @@ impl Agent {
         inference: Arc<dyn Inference>,
         registry: Registry,
     ) -> Result<String> {
+        self.submit_continuation(request, inference, registry, vec![])
+    }
+    /// Only Core supplies records from a linked waiting task. Notes never grant authority.
+    pub(crate) fn submit_continuation(
+        self: &Arc<Self>,
+        request: Submission,
+        inference: Arc<dyn Inference>,
+        registry: Registry,
+        resume_evidence: Vec<Value>,
+    ) -> Result<String> {
         let Submission {
             owner,
             model,
@@ -135,7 +145,10 @@ impl Agent {
                     inference,
                     registry,
                     rx.clone(),
-                    history,
+                    super::context::RunHistory {
+                        messages: history,
+                        evidence: resume_evidence,
+                    },
                 )
                 .await;
             let (status, kind, result) = if *rx.borrow() {
@@ -147,6 +160,11 @@ impl Agent {
             } else {
                 match result {
                     Ok(text) => (Status::Completed, "task_completed", text),
+                    Err(e) if e.starts_with("Waiting for input: ") => (
+                        Status::WaitingForInput,
+                        "task_waiting_for_input",
+                        e[19..].into(),
+                    ),
                     Err(e) if e.starts_with("Task incomplete:") => {
                         (Status::Incomplete, "task_incomplete", e)
                     }

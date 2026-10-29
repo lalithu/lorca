@@ -1,6 +1,12 @@
 import Combine
 import SwiftUI
 
+enum ThinkingEffort: String, CaseIterable, Identifiable {
+    case off, nominal, high
+    var id: String { rawValue }
+    var label: String { rawValue.capitalized }
+}
+
 enum Appearance: String, CaseIterable, Identifiable {
     case system = "System", dark = "Dark", light = "Light"
     var id: String { rawValue }
@@ -16,7 +22,7 @@ final class ChatStore: ObservableObject {
     var agentWorkspace: URL? { agent.workspaces[library.selectedID] }
     var currentAgentActive: Bool { agent.active?.conversationId == library.selectedID }
     var messages: [ChatMessage] { library.current.messages }
-    var draft: String { get { library.current.draft } set { library.setDraft(newValue) } }
+    var draft: String { get { library.current.draft } set { if newValue != "Continue the unfinished task." { continuation = nil }; library.setDraft(newValue) } }
     var draftImages: [ChatAttachment] { library.current.draftImages }
     var imageStore: AttachmentStore { AttachmentStore(directory: backend.root.appendingPathComponent("attachments")) }
     var canSend: Bool { canSendChat && !agent.busy && !jobs.running }
@@ -38,6 +44,9 @@ final class ChatStore: ObservableObject {
             enqueue(["op": "selectModel", "model": selectedModel])
         }
     }
+    @Published var thinkingEffort: ThinkingEffort {
+        didSet { defaults.set(thinkingEffort.rawValue, forKey: "thinkingEffort") }
+    }
     @Published var appearance: Appearance {
         didSet { defaults.set(appearance.rawValue, forKey: "appearance"); appearanceChanged?() }
     }
@@ -50,6 +59,11 @@ final class ChatStore: ObservableObject {
     var displayUsage: ChatUsage {
         if let task=agent.latest,task.conversationId==library.selectedID,task.model==nil || task.model==selectedModel {return task.usage ?? ChatUsage(contextUsed:nil)}
         return usage
+    }
+    private var continuation: (conversation: UUID, task: String)?
+    func continueAgentTask(_ id: String) {
+        continuation = (library.selectedID, id)
+        draft = "Continue the unfinished task."
     }
     var appearanceChanged: (() -> Void)?
     private let defaults: UserDefaults
@@ -69,6 +83,7 @@ final class ChatStore: ObservableObject {
         uiZoom = AppZoom(defaults: defaults)
         agent = AgentStore(backend: self.backend)
         selectedModel = defaults.string(forKey: "model") ?? "qwen3.5:9b"
+        thinkingEffort = ThinkingEffort(rawValue: defaults.string(forKey: "thinkingEffort") ?? "off") ?? .off
         appearance = Appearance(rawValue: defaults.string(forKey: "appearance") ?? "Dark") ?? .dark
         for source in [uiZoom.objectWillChange, modelSession.objectWillChange, library.objectWillChange, agent.objectWillChange, jobs.objectWillChange] {
             source.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &updates)
@@ -238,12 +253,14 @@ final class ChatStore: ObservableObject {
     func send() {
         guard !closing, canSend, agent.reserveSubmission() else { return }
         let conversation = library.selectedID, request = UUID(), text = draft, model = selectedModel
-        let workspace=agentWorkspace
+        let workspace=agentWorkspace, effort=thinkingEffort.rawValue
+        let continueTaskID = continuation?.conversation == conversation ? continuation?.task : nil
         let preceding = pending
         pending = Task { [weak self] in
             await preceding?.value
             guard let self, !self.closing, !Task.isCancelled else { return }
-            _ = await self.agent.submit(task: text, workspace: workspace, conversation: conversation, request: request, model: model)
+            let accepted = await self.agent.submit(task: text, workspace: workspace, conversation: conversation, request: request, model: model, effort: effort, continueTaskID: continueTaskID)
+            if accepted && self.continuation?.task == continueTaskID { self.continuation = nil }
             _ = await self.perform(["op": "snapshot"])
         }
     }

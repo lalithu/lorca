@@ -253,3 +253,91 @@ async fn agent_activity_stream_is_authenticated_and_reconnectable() {
     let _ = server.await;
     fs::remove_dir_all(root).unwrap();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sigterm_stops_backend_and_preserves_existing_conversation_and_draft() {
+    use std::process::{Command, Stdio};
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let root = std::env::temp_dir().join(format!("lorca-restart-test-{}", id()));
+    let mut child = Child(
+        Command::new(env!("CARGO_BIN_EXE_lorca"))
+            .arg("serve")
+            .env("LORCA_DATA_DIR", &root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let path = root.join("runtime/endpoint.json");
+    let endpoint: Endpoint = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(bytes) = fs::read(&path) {
+                break serde_json::from_slice(&bytes).unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let http = reqwest::Client::new();
+    let health: Value = http
+        .get(format!("{}/health", endpoint.url))
+        .bearer_auth(&endpoint.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(health["pid"], child.0.id());
+    let connected: Value = http
+        .post(format!("{}/command", endpoint.url))
+        .bearer_auth(&endpoint.token)
+        .json(&json!({"op":"connect","model":"test"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let session = connected["session"].as_str().unwrap();
+    let saved = http
+        .post(format!("{}/command", endpoint.url))
+        .bearer_auth(&endpoint.token)
+        .json(&json!({"op":"draft","session":session,"text":"Preserve me across rebuild"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(saved.status().is_success());
+    // Signal only the isolated subprocess, never the test runner or live backend.
+    assert_eq!(unsafe { libc::kill(child.0.id() as i32, libc::SIGTERM) }, 0);
+    let status = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(status.success(), "{status}");
+    assert!(!path.exists());
+    let repo = Repository::new(root.clone()).unwrap();
+    assert!(
+        repo.load()
+            .unwrap()
+            .0
+            .iter()
+            .any(|c| c.draft == "Preserve me across rebuild")
+    );
+    fs::remove_dir_all(root).unwrap();
+}

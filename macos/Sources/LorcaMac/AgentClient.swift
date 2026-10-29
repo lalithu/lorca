@@ -6,9 +6,9 @@ struct AgentClient {
     func snapshot() async throws -> AgentTaskSnapshot? {
         try JSONDecoder().decode(AgentTaskSnapshot?.self, from: await backend.command(["op": "agent_snapshot"]))
     }
-    func start(task: String, workspace: URL?, conversation: UUID, request: UUID, model: String) async throws -> String {
+    func start(task: String, workspace: URL?, conversation: UUID, request: UUID, model: String, effort: String = "off", continueTaskID: String? = nil) async throws -> String {
         let data = try await backend.command(["op": "agent_start", "task": task, "workspace": workspace?.path ?? "",
-            "conversationId": conversation.uuidString, "requestId": request.uuidString, "model": model,
+            "conversationId": conversation.uuidString, "requestId": request.uuidString, "model": model, "effort": effort, "continueTaskId": continueTaskID as Any? ?? NSNull(),
             "limits": ["iterations": 24, "modelSeconds": 120, "commandSeconds": 120]])
         struct Started: Decodable { let taskId: String }
         return try JSONDecoder().decode(Started.self, from: data).taskId

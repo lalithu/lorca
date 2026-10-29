@@ -7,7 +7,7 @@ use tokio::sync::watch;
 pub async fn execute(
     agent: &Agent,
     registry: &Registry,
-    w: &Workspace,
+    w: Option<&Workspace>,
     call: &ToolCall,
     limits: &Limits,
     cancel: watch::Receiver<bool>,
@@ -15,7 +15,11 @@ pub async fn execute(
 ) -> Result<Value> {
     validate(&authority.instruction, call)?;
     let tool = registry.get(&call.name)?;
-    let prepared = tool.prepare(w, call.arguments.clone(), limits)?;
+    let prepared = tool.prepare_optional(w, call.arguments.clone(), limits)?;
+    if call.name == "apply_patch" {
+        super::verification::Requirements::new(&authority.instruction)
+            .validate_patch(&prepared.payload)?;
+    }
     if prepared.approval {
         match agent
             .approval(call, prepared.action.clone(), cancel.clone())
@@ -37,7 +41,7 @@ pub async fn execute(
     );
     let mut output = |data| agent.emit("terminal_output", json!({"callId":call.id,"output":data}));
     let result = tool
-        .execute(w, &prepared, limits, cancel, &mut output)
+        .execute_optional(w, &prepared, limits, cancel, &mut output)
         .await?;
     if call.name == "apply_patch" && result["ok"] == true {
         agent.emit(
@@ -71,7 +75,7 @@ pub(super) fn validate(task: &str, call: &ToolCall) -> Result<()> {
         ]
         .iter()
         .any(|s| text.contains(s)),
-        "run_command" => [
+        "run_command" | "exec_command" | "write_stdin" => [
             "do not run",
             "don't run",
             "dont run",
@@ -79,6 +83,18 @@ pub(super) fn validate(task: &str, call: &ToolCall) -> Result<()> {
             "no commands",
             "do not execute",
             "without running",
+        ]
+        .iter()
+        .any(|s| text.contains(s)),
+        "fetch_url" | "web_search" => [
+            "do not browse",
+            "do not fetch",
+            "do not search the web",
+            "no internet",
+            "no network",
+            "do not access the internet",
+            "without browsing",
+            "offline only",
         ]
         .iter()
         .any(|s| text.contains(s)),

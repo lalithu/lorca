@@ -32,6 +32,7 @@ pub struct Requirements {
     directory_only: bool,
     edit: bool,
     paths: Vec<String>,
+    empty_paths: Vec<String>,
     read_paths: Vec<String>,
     commands: Vec<String>,
 }
@@ -100,7 +101,7 @@ impl Requirements {
                     .any(|w| ["read", "inspect", "review", "examine"].contains(&w.as_str()))
                 {
                     editing = false;
-                    read_paths.extend(requested_paths(clause));
+                    read_paths.extend(requested_read_paths(clause));
                 } else if tokens.iter().any(|w| EDIT_VERBS.contains(&w.as_str())) {
                     editing = true;
                     paths.extend(requested_paths(clause));
@@ -114,6 +115,7 @@ impl Requirements {
                 }
             }
         }
+        paths = paths.into_iter().map(|p| normalized_path(&p)).collect();
         paths.sort();
         paths.dedup();
         read_paths.sort();
@@ -164,6 +166,41 @@ impl Requirements {
                 commands.push(String::new());
             }
         }
+        // Enforce only an explicit empty-file constraint for a single target.
+        // "in an empty workspace" says nothing about the new file's contents.
+        let plain = lower.replace(['`', '\"', '\''], "");
+        let positive_plain = positive.replace(['`', '\"', '\''], "");
+        let no_content = paths.first().is_some_and(|path| {
+            ["do not populate", "dont populate"].iter().any(|prefix| {
+                plain.match_indices(prefix).any(|(start, _)| {
+                    let rest = plain[start + prefix.len()..]
+                        .split([';', '\n'])
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .trim_end_matches('.');
+                    rest.is_empty()
+                        || rest == "it"
+                        || rest == "the file"
+                        || rest == path
+                        || rest.starts_with("it or ")
+                        || rest.starts_with("it and ")
+                })
+            })
+        });
+        let empty_paths = if edit
+            && paths.len() == 1
+            && (no_content
+                || positive_plain.contains("empty file")
+                || positive_plain.contains("leave it empty")
+                || positive_plain.contains("leave it completely empty")
+                || positive_plain.contains(&format!("empty {}", paths[0]))
+                || positive_plain.contains(&format!("{} empty", paths[0])))
+        {
+            paths.clone()
+        } else {
+            Vec::new()
+        };
         Self {
             inspect: !explanatory
                 && has(&["inspect", "review", "read", "examine"])
@@ -173,6 +210,7 @@ impl Requirements {
                 && !lower.contains("project"),
             edit,
             paths,
+            empty_paths,
             read_paths,
             commands,
         }
@@ -180,10 +218,18 @@ impl Requirements {
     pub fn action(&self) -> bool {
         self.inspect || self.edit || !self.commands.is_empty()
     }
+    pub(super) fn validate_patch(&self, payload: &Value) -> Result<(), String> {
+        let path = normalized_path(payload["path"].as_str().unwrap_or(""));
+        if self.empty_paths.contains(&path) && payload["replacement"] != "" {
+            return Err("Task constraint: the requested file must be empty. Use new_text as an empty string; nothing was executed.".into());
+        }
+        Ok(())
+    }
     pub fn missing(&self, current: &[Value]) -> Vec<String> {
         let mut read = false;
         let mut read_paths = vec![];
         let mut patches = vec![];
+        let mut patch_bytes = std::collections::HashMap::new();
         let mut commands = vec![];
         let mut last_edit = None;
         for (index, m) in current
@@ -215,13 +261,39 @@ impl Requirements {
                 }
                 Some("apply_patch") if result["ok"] == true && result["verified"] == true => {
                     if let Some(path) = result["path"].as_str() {
-                        patches.push(path.to_lowercase());
+                        patches.push(normalized_path(path));
+                        patch_bytes.insert(normalized_path(path), result["bytes"].as_u64());
                         if !already_executed {
                             last_edit = Some(index);
                         }
                     }
                 }
-                Some("run_command") if result["exitCode"].is_number() => {
+                Some("run_command" | "exec_command" | "write_stdin")
+                    if result["exitCode"].is_number() =>
+                {
+                    if m["tool_name"] == "write_stdin" && result["arguments"].is_array() {
+                        // A session begun before a patch is not fresh verification,
+                        // even when its final poll arrives after that patch.
+                        if let Some((started, _)) =
+                            current[..index].iter().enumerate().find(|(_, m)| {
+                                if m["tool_name"] != "exec_command" || m["role"] != "tool" {
+                                    return false;
+                                }
+                                serde_json::from_str::<Value>(m["content"].as_str().unwrap_or(""))
+                                    .is_ok_and(|v| {
+                                        v["sessionId"].is_string()
+                                            && v["sessionId"] == result["sessionId"]
+                                    })
+                            })
+                        {
+                            commands.push((
+                                result["arguments"].clone(),
+                                started,
+                                result["exitCode"].as_i64(),
+                            ));
+                        }
+                        continue;
+                    }
                     let id = &m["tool_call_id"];
                     for call in current
                         .iter()
@@ -244,7 +316,7 @@ impl Requirements {
             missing.push("Inspect relevant real files with read_file; a listing or a promise is not file inspection".into());
         }
         for path in &self.read_paths {
-            if !read_paths.contains(path) {
+            if !read_satisfies(path, &read_paths) {
                 missing.push(format!(
                     "Read the requested real file {path} with read_file"
                 ));
@@ -262,6 +334,13 @@ impl Requirements {
                 }
             }
         }
+        for path in &self.empty_paths {
+            if patch_bytes.get(path) != Some(&Some(0)) {
+                missing.push(format!(
+                    "Verify that {path} was created empty (zero bytes), as requested"
+                ));
+            }
+        }
         for name in &self.commands {
             if !commands.iter().any(|(args, index, exit)| {
                 if *exit != Some(0) {
@@ -275,11 +354,137 @@ impl Requirements {
                         .as_array()
                         .is_some_and(|a| a.first().is_some_and(|v| v == name))
             }) {
-                missing.push(format!("Execute the requested cargo {name} using run_command; report its actual exit status"));
+                missing.push(format!("Execute the requested cargo {name} using exec_command; report its actual exit status"));
             }
         }
         missing
     }
+    /// A failed requested read is a concrete blocker, not a reason to keep
+    /// asking the model to restate its completion summary.
+    pub(super) fn read_blocker(&self, current: &[Value]) -> Option<String> {
+        let results: Vec<Value> = current
+            .iter()
+            .filter(|m| m["role"] == "tool" && m["tool_name"] == "read_file")
+            .filter_map(|m| serde_json::from_str(m["content"].as_str()?).ok())
+            .collect();
+        let successful: Vec<String> = results
+            .iter()
+            .filter(|v| v["ok"] == true && v["content"].is_string())
+            .filter_map(|v| v["path"].as_str().map(str::to_lowercase))
+            .collect();
+        for requested in &self.read_paths {
+            if read_satisfies(requested, &successful) {
+                continue;
+            }
+            if let Some(error) = results
+                .iter()
+                .rev()
+                .filter(|v| v["ok"] != true)
+                .find_map(|v| {
+                    let path = v["path"].as_str()?.to_lowercase();
+                    (path == *requested || read_satisfies(requested, &[path]))
+                        .then(|| v["error"].as_str())
+                        .flatten()
+                })
+            {
+                return Some(format!("Could not read {requested}: {error}"));
+            }
+        }
+        if self.inspect
+            && self.read_paths.is_empty()
+            && successful.is_empty()
+            && let Some(failure) = results.iter().rev().find(|v| v["ok"] != true)
+            && let Some(error) = failure["error"].as_str()
+        {
+            return Some(format!("Could not inspect the requested file: {error}"));
+        }
+        None
+    }
+}
+
+// Explicit paths stay exact. A bare filename may identify one unique
+// successfully read workspace path; a same-name file elsewhere cannot satisfy
+// a directory-qualified request. Duplicate observations are not ambiguity.
+// Route a short standalone clarification through the existing question tool.
+// This recognizes presentation, not task intent; it never authorizes an action.
+pub(super) fn clarification_question(text: &str) -> Option<&str> {
+    let text = text.trim();
+    if text.len() > 500 || !text.ends_with('?') || text.matches('?').count() != 1 {
+        return None;
+    }
+    // A brief introduction may precede the one question. Route that question
+    // once, rather than treating it as an unfulfilled promise and prompting again.
+    let question = text
+        .rsplit_once(". ")
+        .map_or(text, |(_, tail)| tail)
+        .lines()
+        .last()?
+        .trim();
+    let lower = question.to_lowercase();
+    [
+        "what ",
+        "which ",
+        "where ",
+        "how ",
+        "could you ",
+        "can you ",
+        "would you ",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
+    .then_some(question)
+}
+
+fn normalized_path(path: &str) -> String {
+    super::recovery::path_key(path)
+        .unwrap_or_else(|| path.to_owned())
+        .to_lowercase()
+}
+
+fn read_satisfies(requested: &str, observed: &[String]) -> bool {
+    let Some(requested) = super::recovery::path_key(requested) else {
+        return false;
+    };
+    let observed: std::collections::BTreeSet<_> = observed
+        .iter()
+        .filter_map(|p| super::recovery::path_key(p))
+        .collect();
+    if observed.contains(&requested) {
+        return true;
+    }
+    !requested.contains('/')
+        && observed
+            .iter()
+            .filter(|p| p.rsplit('/').next() == Some(requested.as_str()))
+            .count()
+            == 1
+}
+fn requested_read_paths(clause: &str) -> Vec<String> {
+    let mut paths = requested_paths(clause);
+    let words: Vec<_> = clause
+        .split_whitespace()
+        .map(|w| w.trim_matches(['`', '\"', '\'', ',', ';', ':']))
+        .collect();
+    let directories: std::collections::BTreeSet<_> = words
+        .windows(2)
+        .filter_map(|pair| {
+            let dir = pair[1].trim_end_matches('/');
+            (["in", "under", "inside"].contains(&pair[0])
+                && dir.contains('/')
+                && std::path::Path::new(dir).extension().is_none())
+            .then(|| super::recovery::path_key(dir))
+            .flatten()
+        })
+        .collect();
+    if directories.len() == 1 {
+        let dir = directories.first().unwrap();
+        for path in &mut paths {
+            if !path.contains('/') {
+                *path = format!("{dir}/{path}");
+            }
+        }
+    }
+    paths
 }
 
 fn requested_paths(clause: &str) -> Vec<String> {
@@ -384,9 +589,10 @@ pub fn unverified_claim(task: &str, text: &str, history: &[Value]) -> Option<Str
         return Some("Unverified action claim: no successful file edit is recorded. The model response is not execution evidence.".into());
     }
     if claims_run
-        && !results
-            .iter()
-            .any(|(n, v)| *n == "run_command" && v["exitCode"].is_number())
+        && !results.iter().any(|(n, v)| {
+            matches!(*n, "run_command" | "exec_command" | "write_stdin")
+                && v["exitCode"].is_number()
+        })
     {
         return Some("Unverified action claim: no executed command is recorded. The model response is not execution evidence.".into());
     }
@@ -566,5 +772,72 @@ impl Requirements {
             unsatisfied,
             evidence,
         }
+    }
+}
+
+#[cfg(test)]
+mod read_identity_tests {
+    use super::*;
+    fn read(path: &str, ok: bool) -> Value {
+        serde_json::json!({"role":"tool","tool_name":"read_file","content":serde_json::json!({"ok":ok,"path":path,"content":"real content"}).to_string()})
+    }
+    #[test]
+    fn bare_filename_matches_one_successful_path_without_losing_explicit_scope() {
+        let bare = Requirements::new("Read mod.rs");
+        let actual = read("src/tools/agent/mod.rs", true);
+        assert!(bare.missing(std::slice::from_ref(&actual)).is_empty());
+        assert!(
+            bare.missing(&[actual.clone(), actual.clone(), read("README.md", true)])
+                .is_empty()
+        );
+        for instruction in ["Read src/tools/web/mod.rs", "Read mod.rs in src/tools/web/"] {
+            assert!(
+                !Requirements::new(instruction)
+                    .missing(std::slice::from_ref(&actual))
+                    .is_empty()
+            );
+        }
+        assert!(
+            !bare
+                .missing(&[actual, read("src/tools/web/mod.rs", true)])
+                .is_empty()
+        );
+        assert!(
+            !bare
+                .missing(&[read("src/tools/agent/mod.rs", false)])
+                .is_empty()
+        );
+        assert!(
+            !bare
+                .missing(&[serde_json::json!({"role":"assistant","content":"I read mod.rs"})])
+                .is_empty()
+        );
+    }
+}
+
+#[cfg(test)]
+mod empty_file_tests {
+    use super::*;
+    #[test]
+    fn verified_edit_alone_does_not_prove_an_explicit_empty_file_outcome() {
+        let req = Requirements::new("Create an empty README.md; do not populate it");
+        let result = |bytes| {
+            serde_json::json!({"role":"tool","tool_name":"apply_patch","content":
+            serde_json::json!({"ok":true,"verified":true,"path":"README.md","bytes":bytes}).to_string()})
+        };
+        assert!(!req.missing(&[result(8)]).is_empty());
+        assert!(req.missing(&[result(0)]).is_empty());
+        assert!(!req.missing(&[result(0), result(8)]).is_empty());
+        for task in [
+            "Create README.md with content; do not populate unrelated files",
+            "Create README.md with content; do not create an empty file",
+        ] {
+            assert!(Requirements::new(task).missing(&[result(8)]).is_empty());
+        }
+        assert!(
+            Requirements::new("Create README.md in an empty workspace")
+                .missing(&[result(8)])
+                .is_empty()
+        );
     }
 }

@@ -23,7 +23,7 @@ struct ChatView: View {
                                             if !message.attachments.isEmpty {
                                                 AttachmentStrip(attachments: message.attachments, storage: store.imageStore, compact: false)
                                             }
-                                            AgentActivityView(store: store.agent, taskID: task, savedMessage: message, textSize: textSize)
+                                            AgentActivityView(store: store.agent, taskID: task, savedMessage: message, textSize: textSize, onChoose: message.id == store.messages.last?.id ? { store.draft = $0 } : nil, onContinue: message.id == store.messages.last?.id ? { store.continueAgentTask(task) } : nil)
                                         }
                                     } else { messageView(message) }
                                 }

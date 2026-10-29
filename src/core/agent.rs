@@ -5,6 +5,7 @@ pub(super) struct CoreInference {
     pub(super) core: Arc<Core>,
     pub(super) session: String,
     pub(super) model: String,
+    pub(super) effort: crate::agent_types::ThinkingEffort,
 }
 /// Keep the existing model preparation future alive until it has cleaned up its
 /// loading state, even when a task timeout/cancellation drops its inference future.
@@ -42,6 +43,17 @@ impl CoreInference {
     }
 }
 impl Inference for CoreInference {
+    fn effort(&self) -> crate::agent_types::ThinkingEffort {
+        self.effort
+    }
+    fn generation_policy(
+        &self,
+        budget: crate::context::GenerationBudget,
+        seconds: u64,
+        usage: &crate::types::Usage,
+    ) -> (crate::context::GenerationBudget, u64) {
+        budget.scheduled(seconds, usage, self.effort)
+    }
     fn generate<'a>(&'a self, messages: &'a [Value], tools: &'a [Value]) -> FutureResult<'a, Turn> {
         self.generate_stream(messages, tools, &|_| {})
     }
@@ -68,6 +80,25 @@ impl Inference for CoreInference {
                 model: self.model.clone(),
             };
             provider.generate_stream(messages, tools, updates).await
+        })
+    }
+    fn generate_budgeted<'a>(
+        &'a self,
+        messages: &'a [Value],
+        tools: &'a [Value],
+        budget: crate::context::GenerationBudget,
+        updates: &'a (dyn Fn(ModelUpdate) + Send + Sync),
+    ) -> FutureResult<'a, Turn> {
+        Box::pin(async move {
+            self.ready().await?;
+            let provider = provider::agent::OllamaAgent {
+                client: self.core.client.clone(),
+                host: self.core.host(&self.session)?,
+                model: self.model.clone(),
+            };
+            provider
+                .generate_for_effort(messages, tools, budget, self.effort, updates)
+                .await
         })
     }
 }

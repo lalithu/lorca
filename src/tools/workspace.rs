@@ -158,6 +158,24 @@ impl Workspace {
             .open_dir(Self::path(path)?)
             .map_err(|e| format!("Directory {path}: {e}"))
     }
+    /// Binary reads retain the same directory capability and traversal restrictions.
+    pub(super) fn read_bytes(&self, path: &str, limit: usize) -> Result<Vec<u8>> {
+        let file = self
+            .dir
+            .open(Self::path(path)?)
+            .map_err(|e| format!("Read {path}: {e}"))?;
+        if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+            return Err("Expected a regular file".into());
+        }
+        let mut bytes = Vec::new();
+        file.take(limit as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        if bytes.len() > limit {
+            return Err(format!("Image exceeds {limit} byte limit"));
+        }
+        Ok(bytes)
+    }
     pub fn read(&self, path: &str) -> Result<String> {
         let f = self
             .dir

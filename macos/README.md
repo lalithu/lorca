@@ -14,7 +14,7 @@ cargo install --path . --locked --force
 lorca main
 ```
 
-For iteration after installing the command, quit lorca and run `lorca rebuild` from any directory. It rebuilds the Rust core, installs the updated CLI, builds the app, and opens the dashboard automatically. The native app icon is 🌊; the Mini pet remains the orca.
+For iteration after installing the command, run `lorca rebuild` from any directory. It rebuilds the Rust core, installs the updated CLI, builds the app, and gracefully restarts both UI and backend. The native app icon is 🌊; the Mini pet remains the orca.
 
 Or run `./macos/run.sh` to build and open the app. Open `macos/Package.swift` in Xcode to edit. Full Xcode is required for `swift test`.
 
@@ -90,3 +90,12 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swift test --pack
 ```
 
 [Job Apps setup](../jobapps/README.md) · [Agent contract](../AGENT.md) · [Native acceptance](Acceptance/README.md)
+
+## Rebuild and quit policy
+
+- `lorca rebuild`, `./macos/build.sh` and `./macos/run.sh` perform a fresh restart only after the build, signing and bundled-core check succeed. The helper checks the exact executable mappings, backend lock owner, authenticated health PID and live UI connection before reporting success.
+- Cleanup runs before AppKit terminates: drafts are checkpointed, agent work is cancelled, and the Job Apps companion drains its existing shutdown path. Rebuild does not unload models or stop the shared Ollama service. Normal ⌘Q keeps its existing unload/keep-loaded/cancel choices.
+- Conversations, attachments, settings, tracker data and Google credentials are retained. This is a process restart, never a data reset.
+- Older apps without the cooperative shutdown marker must be quit normally once before rebuilding. An unknown process, changed backend owner or shutdown timeout stops the restart with an error; the helper never force-kills a client.
+- Ordinary app launches continue to reuse the shared backend. Only an explicit rebuild replaces it. Other terminal clients using that backend may need to reconnect after a rebuild.
+- For packaging or isolated acceptance checks, use `LORCA_BUILD_ONLY=1 ./macos/build.sh` to build without restarting. `lorca rebuild` always requests the complete restart.

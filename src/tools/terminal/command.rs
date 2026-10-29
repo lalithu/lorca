@@ -1,5 +1,5 @@
-use super::Workspace;
 use crate::agent_types::*;
+use crate::tools::Workspace;
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncRead, AsyncReadExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::Command,
     sync::{mpsc, watch},
 };
@@ -180,7 +180,18 @@ pub async fn run(
 ) -> Result<Value> {
     // Revalidate both the command and directory immediately before spawning.
     CommandSpec::validate("cargo", &spec.args, &spec.directory, workspace)?;
-    run_sandboxed(spec, workspace, seconds, &mut cancel, output).await
+    run_sandboxed(spec, workspace, seconds, &mut cancel, None, output).await
+}
+pub async fn run_interactive(
+    spec: &CommandSpec,
+    workspace: &Workspace,
+    seconds: u64,
+    mut cancel: watch::Receiver<bool>,
+    input: mpsc::Receiver<Option<String>>,
+    output: &mut (dyn FnMut(Value) + Send),
+) -> Result<Value> {
+    CommandSpec::validate("cargo", &spec.args, &spec.directory, workspace)?;
+    run_sandboxed(spec, workspace, seconds, &mut cancel, Some(input), output).await
 }
 pub async fn git_diff(workspace: &Workspace, cancel: watch::Receiver<bool>) -> Result<Value> {
     let git = workspace.root.join(".git");
@@ -210,13 +221,14 @@ pub async fn git_diff(workspace: &Workspace, cancel: watch::Receiver<bool>) -> R
         ],
         directory: ".".into(),
     };
-    run_sandboxed(&spec, workspace, 10, &mut cancel.clone(), &mut |_| {}).await
+    run_sandboxed(&spec, workspace, 10, &mut cancel.clone(), None, &mut |_| {}).await
 }
 async fn run_sandboxed(
     spec: &CommandSpec,
     workspace: &Workspace,
     seconds: u64,
     cancel: &mut watch::Receiver<bool>,
+    mut input: Option<mpsc::Receiver<Option<String>>>,
     output: &mut (dyn FnMut(Value) + Send),
 ) -> Result<Value> {
     if *cancel.borrow() {
@@ -259,13 +271,18 @@ async fn run_sandboxed(
         .env("CARGO_TERM_COLOR", "never")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     #[cfg(unix)]
     child.process_group(0);
     let mut child = child.spawn().map_err(|e| format!("Sandbox spawn: {e}"))?;
+    let mut stdin = child.stdin.take();
     let _group = ProcessGroup(child.id().ok_or("Missing process id")?);
     let (tx, mut rx) = mpsc::channel(16);
     let stdout = tokio::spawn(drain(child.stdout.take().unwrap(), "stdout", tx.clone()));
@@ -284,6 +301,18 @@ async fn run_sandboxed(
             biased;
             _=cancel.changed()=> { let _=child.kill().await; stdout.abort(); stderr.abort(); return Err("Cancelled".into()); },
             _=&mut timer=> { let _=child.kill().await; stdout.abort(); stderr.abort(); return Err(format!("Command timed out after {seconds}s")); },
+            item=async {input.as_mut().unwrap().recv().await}, if input.is_some()=> {
+                match item {
+                    Some(Some(text))=>if let Some(pipe)=stdin.as_mut(){
+                        tokio::select!{biased;
+                            _=cancel.changed()=>return Err("Cancelled".into()),
+                            _=&mut timer=>return Err(format!("Command timed out after {seconds}s")),
+                            r=pipe.write_all(text.as_bytes())=>r.map_err(|e|format!("Command stdin: {e}"))?,
+                        }
+                    },
+                    Some(None)|None=>{stdin.take();input=None;}
+                }
+            },
             result=child.wait(), if code.is_none()=> { code=Some(result.map_err(|e| e.to_string())?.code().unwrap_or(-1)); },
             item=rx.recv(), if !pipes_closed=> match item {
                 Some((channel, bytes))=> { total += bytes.len(); let available=OUTPUT_LIMIT.saturating_sub(combined.len()); let chunk=String::from_utf8_lossy(&bytes); let chunk=bounded(&chunk, available); if available>0 { output(json!({"stream":channel,"text":chunk})); combined.push_str(&chunk); } },

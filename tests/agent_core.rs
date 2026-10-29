@@ -144,7 +144,25 @@ async fn unified_core_native_ollama_tools_permissions_and_model_lease() {
     assert_eq!(chats.len(), 2);
     assert_eq!(chats[0]["stream"], true);
     assert_eq!(chats[0]["keep_alive"], -1);
-    assert_eq!(chats[0]["tools"].as_array().unwrap().len(), 6);
+    let offered: Vec<_> = chats[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["function"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        offered,
+        vec![
+            "apply_patch",
+            "exec_command",
+            "list_directory",
+            "read_file",
+            "request_user_input",
+            "search_files",
+            "tool_search",
+            "write_stdin"
+        ]
+    );
     let messages = chats[1]["messages"].as_array().unwrap();
     assert_eq!(messages[2]["tool_calls"][1]["id"], "patch");
     assert_eq!(messages[4]["tool_call_id"], "patch");

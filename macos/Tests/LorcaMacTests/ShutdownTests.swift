@@ -39,6 +39,33 @@ final class ShutdownTests: XCTestCase {
         addTeardownBlock { defaults.removePersistentDomain(forName: name) }
         return ChatStore(backend: backend, defaults: defaults)
     }
+    func testAppShutdownWaitsForCleanupAndRunsOnlyOnce() async {
+        let shutdown = AppShutdown()
+        var resume: CheckedContinuation<[String], Never>?
+        var cleanupCalls = 0
+        var completionCalls = 0
+        shutdown.begin(unload: false, cleanup: { unload in
+            XCTAssertFalse(unload)
+            cleanupCalls += 1
+            return await withCheckedContinuation { resume = $0 }
+        }, completed: { failures in
+            XCTAssertEqual(shutdown.phase, .ready)
+            XCTAssertEqual(failures, ["unconfirmed"])
+            completionCalls += 1
+        })
+        XCTAssertEqual(shutdown.phase, .closing)
+        for _ in 0..<100 { if resume != nil { break }; await Task.yield() }
+        shutdown.begin(unload: true, cleanup: { _ in XCTFail("Repeated shutdown"); return [] }, completed: { _ in XCTFail("Repeated completion") })
+        XCTAssertEqual(cleanupCalls, 1)
+        XCTAssertEqual(completionCalls, 0)
+        resume?.resume(returning: ["unconfirmed"])
+        for _ in 0..<100 { if completionCalls == 1 { break }; await Task.yield() }
+        XCTAssertEqual(shutdown.phase, .ready)
+        XCTAssertEqual(completionCalls, 1)
+        shutdown.begin(unload: false, cleanup: { _ in XCTFail("Restarted shutdown"); return [] }, completed: { _ in XCTFail("Repeated completion") })
+        XCTAssertEqual(cleanupCalls, 1)
+    }
+
     func testDeadlineDoesNotWaitForUncooperativeCancellation() async {
         var blocked: CheckedContinuation<Int, Never>?
         let started = Date()

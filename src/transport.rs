@@ -55,7 +55,7 @@ async fn health(State(service): State<Service>, headers: HeaderMap) -> Response 
     if !authorized(&headers, &service.token) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    Json(json!({"protocol":PROTOCOL})).into_response()
+    Json(json!({"protocol":PROTOCOL,"pid":std::process::id()})).into_response()
 }
 async fn events(State(service): State<Service>, headers: HeaderMap) -> Response {
     if !authorized(&headers, &service.token) {
@@ -194,16 +194,39 @@ pub async fn serve(root: PathBuf) -> io::Result<()> {
         .layer(DefaultBodyLimit::max(14 * 1024 * 1024))
         .with_state(service);
     let shutdown = async move {
-        let mut idle = std::time::Instant::now();
-        loop {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            core.maintenance();
-            if core.client_count() > 0 {
-                idle = std::time::Instant::now();
-            } else if idle.elapsed() > Duration::from_secs(30) {
-                break;
+        let idle = async {
+            let mut idle = std::time::Instant::now();
+            loop {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                core.maintenance();
+                if core.client_count() > 0 {
+                    idle = std::time::Instant::now();
+                } else if idle.elapsed() > Duration::from_secs(30) {
+                    break;
+                }
             }
+        };
+        #[cfg(unix)]
+        let terminate = async {
+            if let Ok(mut signal) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            {
+                signal.recv().await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+        tokio::select! {_=idle=>{},_=terminate=>{}}
+        // Closing existing sessions cancels generation and checkpoints state.
+        // Rebuild never unloads or terminates the shared Ollama service.
+        for session in core.snapshot().sessions {
+            let _ = core
+                .command(json!({"op":"close","session":session.id,"unload":false}))
+                .await;
         }
+        core.maintenance();
     };
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)

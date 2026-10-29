@@ -1,4 +1,5 @@
-use crate::agent::{FutureResult, Inference, ModelUpdate, Result, ToolCall, Turn};
+use crate::agent::{FinishReason, FutureResult, Inference, ModelUpdate, Result, ToolCall, Turn};
+use crate::context::GenerationBudget;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -44,6 +45,45 @@ impl Inference for OllamaAgent {
         updates: &'a (dyn Fn(ModelUpdate) + Send + Sync),
     ) -> FutureResult<'a, Turn> {
         Box::pin(async move {
+            let capacity = self
+                .allocated()
+                .await
+                .unwrap_or(crate::context::DEFAULT_CAPACITY);
+            self.generate_budgeted(
+                messages,
+                tools,
+                GenerationBudget::new(capacity, false),
+                updates,
+            )
+            .await
+        })
+    }
+    fn generate_budgeted<'a>(
+        &'a self,
+        messages: &'a [Value],
+        tools: &'a [Value],
+        budget: GenerationBudget,
+        updates: &'a (dyn Fn(ModelUpdate) + Send + Sync),
+    ) -> FutureResult<'a, Turn> {
+        self.generate_for_effort(
+            messages,
+            tools,
+            budget,
+            crate::agent_types::ThinkingEffort::Off,
+            updates,
+        )
+    }
+}
+impl OllamaAgent {
+    pub fn generate_for_effort<'a>(
+        &'a self,
+        messages: &'a [Value],
+        tools: &'a [Value],
+        budget: GenerationBudget,
+        effort: crate::agent_types::ThinkingEffort,
+        updates: &'a (dyn Fn(ModelUpdate) + Send + Sync),
+    ) -> FutureResult<'a, Turn> {
+        Box::pin(async move {
             if messages
                 .iter()
                 .any(|m| m["images"].as_array().is_some_and(|a| !a.is_empty()))
@@ -69,12 +109,29 @@ impl Inference for OllamaAgent {
                     }
                 }
             }
-            let capacity = self
-                .allocated()
-                .await
-                .unwrap_or(crate::context::DEFAULT_CAPACITY);
+            budget.check(
+                crate::context::estimate(&json!(messages))
+                    + crate::context::estimate(&json!(tools))
+                    + 64,
+            )?;
             let mut body = json!({"model":self.model,"messages":messages,"stream":true,"think":false,"keep_alive":-1,
-                "options":{"num_ctx":capacity,"num_predict":crate::context::generation_reserve(capacity),"temperature":0.1}});
+                "options":{"num_ctx":budget.context_limit,"num_predict":budget.output_limit,"temperature":0.1}});
+            if effort != crate::agent_types::ThinkingEffort::Off {
+                body.as_object_mut().unwrap().remove("think");
+                // Use advertised controls only. A template marker does not prove API support.
+                if let Ok(response) = self
+                    .client
+                    .post(format!("{}/api/show", self.host))
+                    .json(&json!({"model":self.model}))
+                    .timeout(Duration::from_secs(5))
+                    .send()
+                    .await
+                    && let Ok(info) = response.json::<Value>().await
+                    && let Some(setting) = thinking_setting(&info, effort)
+                {
+                    body["think"] = setting;
+                }
+            }
             if !tools.is_empty() {
                 body["tools"] = json!(tools);
             }
@@ -82,13 +139,29 @@ impl Inference for OllamaAgent {
                 .client
                 .post(format!("{}/api/chat", self.host))
                 .json(&body)
-                .timeout(Duration::from_secs(180))
+                .timeout(Duration::from_secs(match effort {
+                    crate::agent_types::ThinkingEffort::Off => 180,
+                    crate::agent_types::ThinkingEffort::Nominal => 240,
+                    crate::agent_types::ThinkingEffort::High => 360,
+                }))
                 .send()
                 .await
                 .map_err(|e| format!("Ollama: {e}"))?;
             if !response.status().is_success() {
                 let status = response.status();
                 let v: Value = response.json().await.unwrap_or_default();
+                if status == reqwest::StatusCode::INTERNAL_SERVER_ERROR
+                    && interrupted_tool_arguments(v["error"].as_str().unwrap_or(""), tools)
+                {
+                    // No acknowledged call exists. Do not parse, repair or retain
+                    // any argument fragments, and do not invent usage/stop metadata.
+                    return Ok(Turn {
+                        content: String::new(),
+                        calls: vec![],
+                        message: json!({"role":"assistant","content":""}),
+                        finish_reason: FinishReason::InterruptedToolCall,
+                    });
+                }
                 return Err(format!(
                     "Ollama {status}: {}",
                     v["error"].as_str().unwrap_or("request failed")
@@ -140,10 +213,48 @@ impl Inference for OllamaAgent {
             let done=done.ok_or("Ollama ended without a completion acknowledgement; partial output was saved, actions were not replayed")?;
             let mut usage = crate::types::Usage::from_response(&done);
             usage.context_limit = self.allocated().await;
+            let observed_input = usage.prompt_tokens;
             updates(ModelUpdate::Usage(usage));
-            parse_turn(assembly.message()?)
+            if let Some(input) = observed_input {
+                budget.check(input)?;
+            }
+            // A length stop is an acknowledged interruption, not a completed
+            // call group. Discard all pending arguments before JSON parsing.
+            // Older servers can omit done_reason; hitting the requested cap is
+            // then conservatively treated as exhaustion, never guessed success.
+            let finish_reason = match done["done_reason"].as_str() {
+                Some("length") => FinishReason::Length,
+                Some("stop") => FinishReason::Stop,
+                _ if done["eval_count"]
+                    .as_u64()
+                    .is_some_and(|n| n >= budget.output_limit) =>
+                {
+                    FinishReason::Length
+                }
+                _ => FinishReason::Unknown,
+            };
+            let message = if finish_reason == FinishReason::Length {
+                json!({"role":"assistant","content":assembly.content})
+            } else {
+                assembly.message()?
+            };
+            let mut turn = parse_turn(message)?;
+            turn.finish_reason = finish_reason;
+            Ok(turn)
         })
     }
+}
+
+fn interrupted_tool_arguments(error: &str, tools: &[Value]) -> bool {
+    let Some(name) = error
+        .strip_prefix("llama-server returned invalid tool call arguments for \"")
+        .and_then(|s| s.strip_suffix("\": unexpected end of JSON input"))
+    else {
+        return false;
+    };
+    tools
+        .iter()
+        .any(|tool| tool["function"]["name"].as_str() == Some(name))
 }
 
 /// Ollama NDJSON can split anywhere in UTF-8 or JSON. Frames are decoded only
@@ -284,5 +395,56 @@ pub fn parse_turn(message: Value) -> Result<Turn> {
         content,
         calls,
         message: wire,
+        finish_reason: FinishReason::Unknown,
     })
+}
+
+// Capability data belongs to the adapter, not agent policy.
+fn thinking_setting(info: &Value, effort: crate::agent_types::ThinkingEffort) -> Option<Value> {
+    use crate::agent_types::ThinkingEffort;
+    let values = info["thinking"]["values"].as_array();
+    let preferred = if effort == ThinkingEffort::High {
+        "high"
+    } else {
+        "medium"
+    };
+    if values.is_some_and(|v| v.contains(&json!(preferred))) {
+        Some(json!(preferred))
+    } else if values.is_some_and(|v| v.contains(&json!(true))) {
+        Some(json!(true))
+    } else if values.is_some_and(|v| v == &[json!(false)]) {
+        Some(json!(false))
+    } else {
+        None
+    }
+}
+#[cfg(test)]
+mod effort_tests {
+    use super::*;
+    use crate::agent_types::ThinkingEffort::{High, Nominal};
+    #[test]
+    fn thinking_controls_follow_capabilities_without_model_name_rules() {
+        for effort in [Nominal, High] {
+            assert_eq!(
+                thinking_setting(&json!({"thinking":{"values":[true,false]}}), effort),
+                Some(json!(true))
+            );
+            assert_eq!(
+                thinking_setting(&json!({"thinking":{"values":[false]}}), effort),
+                Some(json!(false))
+            );
+            assert_eq!(thinking_setting(&json!({}), effort), None);
+            assert_eq!(
+                thinking_setting(&json!({"template":"{{enable_thinking}}"}), effort),
+                None
+            );
+        }
+        let info = json!({"thinking":{"values":["low","medium","high"]}});
+        assert_eq!(thinking_setting(&info, Nominal), Some(json!("medium")));
+        assert_eq!(thinking_setting(&info, High), Some(json!("high")));
+        assert_eq!(
+            thinking_setting(&json!({"thinking":{"values":["low"]}}), High),
+            None
+        );
+    }
 }

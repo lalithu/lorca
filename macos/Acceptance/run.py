@@ -24,7 +24,7 @@ fallback = pathlib.Path("/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
 sdk = args.sdk or (str(fallback) if fallback.exists() and not pathlib.Path("/Applications/Xcode.app").exists() else os.environ.get("SDKROOT"))
 sdk = sdk or subprocess.check_output(["xcrun", "--show-sdk-path"], text=True).strip()
 if not args.skip_build:
-    subprocess.run(["bash", "macos/build.sh"], cwd=repo, check=True, env=dict(os.environ, SDKROOT=sdk))
+    subprocess.run(["bash", "macos/build.sh"], cwd=repo, check=True, env=dict(os.environ, SDKROOT=sdk, LORCA_BUILD_ONLY="1"))
 if args.long:
     for name in ["src", "tests", "assets"]:
         shutil.copytree(repo / name, project / name)

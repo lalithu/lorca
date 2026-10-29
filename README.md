@@ -35,7 +35,7 @@ lorca main              # Dashboard; Mini is optional.
 lorca                   # Terminal chat.
 ```
 
-After installing, quit lorca and use `lorca rebuild` from any directory to rebuild the core, CLI and app, update the installed command, and open the dashboard.
+After installing, use `lorca rebuild` from any directory to rebuild the core, CLI and app, update the installed command, and gracefully restart the UI and backend. Conversations, unsent drafts, settings and Job Apps data are preserved. The shared Ollama service and loaded models are left alone.
 
 ## Repository
 

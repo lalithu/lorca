@@ -291,7 +291,7 @@ async fn repeated_failures_limit_and_single_active_task_are_enforced() {
             .is_err()
     );
     let view = wait(&agent, |v| !v.status.active()).await;
-    assert_eq!(view.status, Status::Failed);
+    assert_eq!(view.status, Status::Incomplete);
     assert!(view.result.unwrap().contains("repeated unsuccessful"));
     assert_eq!(mock.seen.lock().unwrap().len(), 3);
     let mock = Mock::new(vec![calls(vec![("list_directory", json!({"path":"."}))])]);
@@ -549,8 +549,10 @@ async fn long_task_compacts_repeatedly_and_never_repeats_an_approved_write() {
         json!({"path":"created.rs","old_text":"","new_text":"verified once"}),
     )]);
     let mut turns = vec![patch.clone()];
-    for _ in 0..22 {
-        turns.push(calls(vec![("read_file", json!({"path":"large.rs"}))]));
+    for n in 0..22 {
+        let path = format!("large-{n}.rs");
+        std::fs::copy(root.0.join("large.rs"), root.0.join(&path)).unwrap();
+        turns.push(calls(vec![("read_file", json!({"path":path}))]));
     }
     turns.push(patch);
     turns.push(finish());

@@ -96,6 +96,56 @@ impl Core {
                 return Err("The previous agent result could not be saved. Reconnect before starting another task.".into());
             }
         }
+        let mut effective_task = if task.is_empty() {
+            "Describe the attached images.".to_string()
+        } else {
+            task.to_string()
+        };
+        let mut resume_evidence = vec![];
+        let mut parent = None;
+        if let Some(ci) = ci {
+            let chat = &s.view.conversations[ci];
+            if let Some(previous) = chat.messages.last().filter(|m| {
+                m.role == "assistant"
+                    && (m.extra.get("agentStatus") == Some(&json!("waiting_for_input"))
+                        || (v["continueTaskId"].as_str().is_some()
+                            && m.extra.get("agentTaskId") == v.get("continueTaskId")
+                            && matches!(
+                                m.extra.get("agentStatus").and_then(Value::as_str),
+                                Some("incomplete" | "failed" | "cancelled")
+                            )))
+                    && m.extra
+                        .get("agentWorkspace")
+                        .and_then(Value::as_str)
+                        .or_else(|| {
+                            request_for(chat, m)
+                                .and_then(|request| request.extra.get("agentWorkspace"))
+                                .and_then(Value::as_str)
+                        })
+                        .unwrap_or("")
+                        == workspace
+                            .as_ref()
+                            .map(|w| w.root.to_str().unwrap_or(""))
+                            .unwrap_or("")
+            }) {
+                let original = previous
+                    .extra
+                    .get("agentObjective")
+                    .and_then(Value::as_str)
+                    .or_else(|| request_for(chat, previous).map(|request| request.content.as_str()))
+                    .ok_or("Waiting task has no saved objective")?;
+                effective_task = format!("{original}\nUser decision: {task}");
+                if effective_task.len() > 8000 {
+                    return Err("The continued objective is too long; start a new request with a concise objective.".into());
+                }
+                parent = previous.extra.get("agentTaskId").cloned();
+                resume_evidence =
+                    linked_evidence(chat, parent.as_ref().and_then(Value::as_str).unwrap_or(""))?;
+            }
+        }
+        if v["continueTaskId"].as_str().is_some() && parent.as_ref() != v.get("continueTaskId") {
+            return Err("That task cannot be continued here. Use the same chat and workspace; denied tasks remain denied.".into());
+        }
         let mut submitted_chat = ci.map(|i| s.view.conversations[i].clone());
         let mut history = vec![];
         if let Some(chat) = &mut submitted_chat {
@@ -106,16 +156,19 @@ impl Core {
             message.attachments = std::mem::take(&mut chat.draft_images);
             chat.messages.push(message);
             history = self.repository.wire_messages(chat)?;
+            if parent.is_some()
+                && let Some(message) = history.last_mut()
+            {
+                message["content"] = json!(format!(
+                    "Continue the pending request. {effective_task}\nThe latest user decision answers the preceding question. Preserve earlier restrictions and actual tool results; never infer permission from a choice."
+                ));
+            }
         }
-        let id = self.agent.submit(
+        let id = self.agent.submit_continuation(
             Submission {
                 owner: session.into(),
                 model: Some(model.clone()),
-                task: if task.is_empty() {
-                    "Describe the attached images.".into()
-                } else {
-                    task.into()
-                },
+                task: effective_task.clone(),
                 workspace: workspace
                     .as_ref()
                     .map(|w| w.root.clone())
@@ -129,12 +182,15 @@ impl Core {
                 core: self.clone(),
                 session: session.into(),
                 model,
+                effort: serde_json::from_value(v.get("effort").cloned().unwrap_or(json!("off")))
+                    .map_err(|e| format!("Invalid thinking effort: {e}"))?,
             }),
             if workspace.is_some() {
                 Registry::default()
             } else {
                 Registry::empty()
             },
+            resume_evidence,
         )?;
         if let Some(ci) = ci {
             let mut chat = submitted_chat.take().unwrap();
@@ -143,6 +199,8 @@ impl Core {
                 ("agentTaskId".into(), json!(id)),
                 ("agentRequestId".into(), json!(request)),
                 ("agentKind".into(), json!("request")),
+                ("agentParent".into(), json!(parent)),
+                ("agentObjective".into(), json!(effective_task)),
                 (
                     "agentWorkspace".into(),
                     json!(workspace.as_ref().map(|w| &w.root)),
@@ -187,7 +245,14 @@ impl Core {
                 .is_some_and(|v| {
                     matches!(
                         v.as_str(),
-                        Some("completed" | "cancelled" | "failed" | "incomplete" | "denied")
+                        Some(
+                            "completed"
+                                | "cancelled"
+                                | "failed"
+                                | "incomplete"
+                                | "denied"
+                                | "waiting_for_input"
+                        )
                     )
                 })
         {
@@ -219,6 +284,26 @@ impl Core {
             ("agentEvents".into(), json!(task.audit)),
             ("agentUsage".into(), json!(task.usage)),
             ("agentModel".into(), json!(task.model)),
+            (
+                "agentWorkspace".into(),
+                if task.workspace.is_empty() {
+                    Value::Null
+                } else {
+                    json!(task.workspace)
+                },
+            ),
+            ("agentObjective".into(), json!(task.task)),
+            (
+                "agentParent".into(),
+                chat.messages
+                    .iter()
+                    .find(|m| {
+                        m.role == "user" && m.extra.get("agentTaskId") == Some(&json!(task.id))
+                    })
+                    .and_then(|m| m.extra.get("agentParent"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            ),
         ]);
         if existing.is_some_and(|i| {
             chat.messages[i].content == response.content && chat.messages[i].extra == response.extra
@@ -269,6 +354,7 @@ impl Core {
                                             | "failed"
                                             | "incomplete"
                                             | "denied"
+                                            | "waiting_for_input"
                                     )
                                 )
                             })
@@ -303,4 +389,43 @@ impl Core {
         }
         Ok(())
     }
+}
+
+// Follow persisted execution IDs, never model-supplied checkpoint claims. Each
+// transcript is stored once; continuations reference it rather than copying it.
+fn linked_evidence(chat: &Conversation, id: &str) -> Result<Vec<Value>> {
+    let mut id = id.to_owned();
+    let mut seen = std::collections::HashSet::new();
+    let mut groups = Vec::new();
+    while !id.is_empty() {
+        if !seen.insert(id.clone()) {
+            return Err("Invalid continuation chain".into());
+        }
+        let message = chat
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant" && m.extra.get("agentTaskId") == Some(&json!(id)))
+            .ok_or("Continuation records are missing")?;
+        groups.push(
+            message
+                .extra
+                .get("agentHistory")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+        );
+        id = message
+            .extra
+            .get("agentParent")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+    }
+    Ok(groups.into_iter().rev().flatten().collect())
+}
+
+fn request_for<'a>(chat: &'a Conversation, response: &Message) -> Option<&'a Message> {
+    chat.messages.iter().find(|m| {
+        m.role == "user" && m.extra.get("agentTaskId") == response.extra.get("agentTaskId")
+    })
 }

@@ -12,13 +12,34 @@ pub struct ToolCall {
     pub name: String,
     pub arguments: Value,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FinishReason {
+    Stop,
+    Length,
+    /// The runtime rejected incomplete tool JSON; length exhaustion is unconfirmed.
+    InterruptedToolCall,
+    #[default]
+    Unknown,
+}
 #[derive(Clone, Debug)]
 pub struct Turn {
     pub content: String,
     pub calls: Vec<ToolCall>,
     pub message: Value,
+    pub finish_reason: FinishReason,
 }
 pub trait Inference: Send + Sync {
+    fn effort(&self) -> ThinkingEffort {
+        ThinkingEffort::Off
+    }
+    fn generation_policy(
+        &self,
+        budget: crate::context::GenerationBudget,
+        seconds: u64,
+        _usage: &crate::types::Usage,
+    ) -> (crate::context::GenerationBudget, u64) {
+        (budget, seconds)
+    }
     fn generate<'a>(&'a self, messages: &'a [Value], tools: &'a [Value]) -> FutureResult<'a, Turn>;
     fn generate_stream<'a>(
         &'a self,
@@ -28,8 +49,36 @@ pub trait Inference: Send + Sync {
     ) -> FutureResult<'a, Turn> {
         self.generate(messages, tools)
     }
+    // Existing custom inference implementations remain compatible. Real model
+    // adapters override this to use exactly the budget checked by the agent.
+    fn generate_budgeted<'a>(
+        &'a self,
+        messages: &'a [Value],
+        tools: &'a [Value],
+        _budget: crate::context::GenerationBudget,
+        updates: &'a (dyn Fn(ModelUpdate) + Send + Sync),
+    ) -> FutureResult<'a, Turn> {
+        self.generate_stream(messages, tools, updates)
+    }
     fn capacity(&self) -> FutureResult<'_, Option<u64>> {
         Box::pin(async { Ok(None) })
+    }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingEffort {
+    #[default]
+    Off,
+    Nominal,
+    High,
+}
+impl ThinkingEffort {
+    pub fn checkpoint_turns(self) -> usize {
+        match self {
+            Self::Off => 1,
+            Self::Nominal => 2,
+            Self::High => 3,
+        }
     }
 }
 #[derive(Clone, Debug)]
@@ -71,6 +120,7 @@ pub enum Status {
     AwaitingApproval,
     Completed,
     Incomplete,
+    WaitingForInput,
     Denied,
     Cancelled,
     Failed,

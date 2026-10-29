@@ -10,8 +10,8 @@ fn rebuild_help_describes_complete_build_and_launch_without_starting_ui() {
     assert!(result.status.success());
     let text = String::from_utf8_lossy(&result.stdout);
     assert!(text.contains("Rust core, CLI, and macOS app"));
-    assert!(text.contains("then open the dashboard"));
-    assert!(text.contains("Quit lorca first"));
+    assert!(text.contains("data are preserved"));
+    assert!(text.contains("restart the app and backend"));
 }
 
 #[test]

@@ -50,7 +50,7 @@ fn open_app() -> io::Result<()> {
 pub fn rebuild(args: Vec<OsString>) -> io::Result<()> {
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
         println!(
-            "Usage: lorca rebuild\n\nQuit lorca first. Rebuild the Rust core, CLI, and macOS app, update the installed CLI, then open the dashboard.\nUses the repository this CLI was installed from; works from any directory."
+            "Usage: lorca rebuild\n\nRebuild the Rust core, CLI, and macOS app, update the installed CLI, then restart the app and backend. Conversations, drafts, settings and Job Apps data are preserved.\nUses the repository this CLI was installed from; works from any directory."
         );
         return Ok(());
     }
@@ -79,15 +79,16 @@ fn rebuild_app() -> io::Result<()> {
     let status = Command::new("/bin/bash")
         .arg(script)
         .env("LORCA_INSTALL_CLI", "1")
+        .env("LORCA_BUILD_ONLY", "0")
         .current_dir(&root)
         .status()?;
     if !status.success() {
         return Err(io::Error::other(
-            "build failed; the dashboard was not opened",
+            "build or restart failed; a fresh restart was not confirmed",
         ));
     }
-    println!("Rebuild complete. Opening lorca…");
-    open_app()
+    println!("Rebuild complete. Fresh app and backend restart verified.");
+    Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]

@@ -187,3 +187,56 @@ final class ChatTests: XCTestCase {
     }
 
 }
+
+extension ChatTests {
+    func testThinkingEffortPersistsAndIsCapturedForEachSubmission() async throws {
+        let suite = "lorca.effort-test.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let backend = MockBackend()
+        let store = ChatStore(backend: backend, defaults: defaults)
+        XCTAssertEqual(store.thinkingEffort, .off)
+        store.thinkingEffort = .high
+        let restored = ChatStore(backend: MockBackend(), defaults: defaults)
+        XCTAssertEqual(restored.thinkingEffort, .high)
+        await store.refreshConnection()
+        store.draft = "Hello"
+        store.send()
+        store.thinkingEffort = .off
+        for _ in 0..<200 {
+            if backend.requests.contains(where: { $0["op"] as? String == "agent_start" }) { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(backend.requests.last(where: { $0["op"] as? String == "agent_start" })?["effort"] as? String, "high")
+        _ = await store.modelSession.close(unload: false)
+    }
+    func testWaitingForInputIsReadableAndDoesNotBlockTheComposer() throws {
+        let task = try agentFixture(conversation: UUID(), request: UUID(), status: "waiting_for_input")
+        XCTAssertFalse(task.status.active)
+        XCTAssertEqual(task.status.label, "Waiting for you")
+    }
+}
+
+extension ChatTests {
+    func testContinuationIsExplicitAndReplacingItsDraftStartsANewRequest() async throws {
+        for replaceDraft in [false, true] {
+            let backend = MockBackend()
+            let suite = "lorca.continuation-test.\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let store = ChatStore(backend: backend, defaults: defaults)
+            await store.refreshConnection()
+            store.continueAgentTask("saved-task")
+            if replaceDraft { store.draft = "Explain Rust ownership" }
+            store.send()
+            for _ in 0..<200 {
+                if backend.requests.contains(where: { $0["op"] as? String == "agent_start" }) { break }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            let request = backend.requests.last(where: { $0["op"] as? String == "agent_start" })
+            XCTAssertNotNil(request)
+            XCTAssertEqual(request?["continueTaskId"] as? String, replaceDraft ? nil : "saved-task")
+            _ = await store.modelSession.close(unload: false)
+        }
+    }
+}

@@ -17,11 +17,15 @@ enum LorcaApp {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let store = ChatStore()
     private lazy var windows = WindowManager(store: store)
-    private var isQuitting = false
+    private let shutdown = AppShutdown()
+    private var rebuildSignal: RebuildSignal?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"), let icon = NSImage(contentsOf: url) {
             NSApp.applicationIconImage = icon
+        }
+        rebuildSignal = try? RebuildSignal(root: store.backend.root) { [weak self] in
+            self?.beginShutdown(unload: false, showFailures: false)
         }
         installMenus()
         windows.open()
@@ -43,11 +47,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    func applicationWillTerminate(_ notification: Notification) { store.stop() }
+    func applicationWillTerminate(_ notification: Notification) {
+        rebuildSignal?.removeMarker()
+        store.stop()
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard !isQuitting else { return .terminateLater }
-        isQuitting = true
+        switch shutdown.phase {
+        case .ready: return .terminateNow
+        case .closing: return .terminateCancel
+        case .running: break
+        }
         let models = store.modelSession.modelsToRelease.sorted()
         let alert = sharedModelAlert("Quit lorca and unload its models?", models: models)
         alert.addButton(withTitle: "Quit & Unload")
@@ -58,19 +68,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         sender.activate(ignoringOtherApps: true)
         let choice = alert.runModal()
-        guard choice != .alertThirdButtonReturn else { isQuitting = false; return .terminateCancel }
-        Task {
-            let failures = await store.modelSession.close(unload: choice == .alertFirstButtonReturn)
-            if !failures.isEmpty {
+        guard choice != .alertThirdButtonReturn else { return .terminateCancel }
+        beginShutdown(unload: choice == .alertFirstButtonReturn, showFailures: true)
+        return .terminateCancel
+    }
+
+    private func beginShutdown(unload: Bool, showFailures: Bool) {
+        shutdown.begin(unload: unload, cleanup: { [store] unload in
+            await store.modelSession.close(unload: unload)
+        }) { failures in
+            if showFailures && !failures.isEmpty {
                 let failure = NSAlert()
                 failure.messageText = "Model unloading wasn’t confirmed"
                 failure.informativeText = "Ollama may still have these models loaded: \(failures.joined(separator: ", "))."
                 failure.addButton(withTitle: "Quit")
                 failure.runModal()
             }
-            sender.reply(toApplicationShouldTerminate: true)
+            NSApp.terminate(nil)
         }
-        return .terminateLater
     }
 
     private func sharedModelAlert(_ title: String, models: [String]) -> NSAlert {

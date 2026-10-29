@@ -155,3 +155,136 @@ fn eight_complete_unindexed_calls_keep_order_and_distinct_ids() {
         assert_eq!(call.arguments["path"], format!("file{i}"));
     }
 }
+
+async fn stop_server(
+    reason: Option<&'static str>,
+    tokens: u64,
+    partial: bool,
+    prompt_tokens: u64,
+) -> (
+    String,
+    tokio::task::JoinHandle<()>,
+    Arc<Mutex<Vec<serde_json::Value>>>,
+) {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded = requests.clone();
+    let app = Router::new().route("/api/ps", get(|| async {Json(json!({"models":[{"name":"test:latest","context_length":65536}]}))})).route("/api/chat", post(move |Json(request): Json<serde_json::Value>| {
+        let recorded = recorded.clone();
+        async move {
+            recorded.lock().unwrap().push(request);
+            let args = if partial {json!("{\"path\":\"README.md\",")} else {json!({"path":"README.md"})};
+            let mut done = json!({"done":true,"eval_count":tokens,"prompt_eval_count":prompt_tokens,"eval_duration":1_000_000});
+            if let Some(reason) = reason {done["done_reason"] = json!(reason);}
+            let frames = [json!({"message":{"role":"assistant","content":"Public progress only.","tool_calls":[{"id":"pending","function":{"name":"read_file","arguments":args}}]},"done":false}), done];
+            Response::new(Body::from(frames.iter().map(|f|format!("{f}\n")).collect::<String>()))
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let host = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (host, task, requests)
+}
+#[tokio::test]
+async fn length_metadata_precedes_argument_parsing_and_preserves_public_progress_and_usage() {
+    use lorca::{agent::FinishReason, context::GenerationBudget};
+    for partial in [false, true] {
+        let (host, server, requests) = stop_server(Some("length"), 2048, partial, 128).await;
+        let model = OllamaAgent {
+            client: reqwest::Client::new(),
+            host,
+            model: "test".into(),
+        };
+        let updates = Mutex::new(Vec::new());
+        let budget = GenerationBudget {
+            context_limit: 65536,
+            output_limit: 2048,
+            safety_margin: 1024,
+        };
+        let turn = model
+            .generate_budgeted(
+                &[json!({"role":"user","content":"Read README.md"})],
+                &[],
+                budget,
+                &|u| updates.lock().unwrap().push(u),
+            )
+            .await
+            .unwrap();
+        assert_eq!(turn.finish_reason, FinishReason::Length);
+        assert_eq!(turn.content, "Public progress only.");
+        assert!(turn.calls.is_empty());
+        assert!(turn.message.get("tool_calls").is_none());
+        assert!(updates.lock().unwrap().iter().any(|u| matches!(u,ModelUpdate::Usage(v) if v.generated_tokens==Some(2048) && v.context_limit==Some(65536))));
+        assert_eq!(requests.lock().unwrap()[0]["options"]["num_predict"], 2048);
+        assert_eq!(requests.lock().unwrap()[0]["options"]["num_ctx"], 65536);
+        server.abort();
+    }
+}
+#[tokio::test]
+async fn missing_stop_reason_stays_compatible_but_budget_exhaustion_is_conservative() {
+    use lorca::{agent::FinishReason, context::GenerationBudget};
+    for (reason, tokens, expected) in [
+        (None, 100, FinishReason::Unknown),
+        (None, 2048, FinishReason::Length),
+        (Some("stop"), 2048, FinishReason::Stop),
+    ] {
+        let (host, server, _) = stop_server(reason, tokens, false, 128).await;
+        let model = OllamaAgent {
+            client: reqwest::Client::new(),
+            host,
+            model: "test".into(),
+        };
+        let budget = GenerationBudget {
+            context_limit: 65536,
+            output_limit: 2048,
+            safety_margin: 1024,
+        };
+        let turn = model
+            .generate_budgeted(&[], &[], budget, &|_| {})
+            .await
+            .unwrap();
+        assert_eq!(turn.finish_reason, expected);
+        assert_eq!(
+            turn.calls.len(),
+            usize::from(expected != FinishReason::Length)
+        );
+        server.abort();
+    }
+}
+#[tokio::test]
+async fn oversized_input_is_rejected_before_any_model_request() {
+    use lorca::context::GenerationBudget;
+    let (host, server, requests) = stop_server(Some("stop"), 10, false, 128).await;
+    let model = OllamaAgent {
+        client: reqwest::Client::new(),
+        host,
+        model: "test".into(),
+    };
+    let result = model
+        .generate_budgeted(
+            &[json!({"role":"user","content":"large input ".repeat(5000)})],
+            &[],
+            GenerationBudget::new(4096, false),
+            &|_| {},
+        )
+        .await;
+    assert!(result.unwrap_err().contains("Context cannot fit"));
+    assert!(requests.lock().unwrap().is_empty());
+    server.abort();
+}
+
+#[tokio::test]
+async fn reported_input_cannot_silently_consume_reserved_output_space() {
+    use lorca::context::GenerationBudget;
+    let (host, server, requests) = stop_server(Some("stop"), 10, false, 64000).await;
+    let model = OllamaAgent {
+        client: reqwest::Client::new(),
+        host,
+        model: "test".into(),
+    };
+    let result = model
+        .generate_budgeted(&[], &[], GenerationBudget::new(65536, false), &|_| {})
+        .await;
+    assert!(result.unwrap_err().contains("Context cannot fit"));
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    server.abort();
+}

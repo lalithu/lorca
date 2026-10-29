@@ -5,6 +5,8 @@ struct AgentActivityView: View {
     let taskID: String
     var savedMessage: ChatMessage? = nil
     var textSize: CGFloat = 14
+    var onChoose: ((String) -> Void)? = nil
+    var onContinue: (() -> Void)? = nil
     private var snapshot: AgentTaskSnapshot? {
         if let current = store.runs[taskID] { return current }
         guard let message = savedMessage,
@@ -40,6 +42,16 @@ struct AgentActivityView: View {
                         Label("Context automatically compacted", systemImage: "arrow.down.right.and.arrow.up.left")
                             .font(.system(size: 11)).foregroundStyle(.secondary)
                     }
+                }
+                if [.incomplete, .failed, .cancelled].contains(task.status), let resume = onContinue {
+                    Button("Continue task", action: resume).buttonStyle(.bordered).controlSize(.small)
+                }
+                if task.status == .waitingForInput, let choose = onChoose,
+                   let question = events.last(where: { $0.kind == "tool_completed" && $0.data["result"]["needsUserInput"].boolean == true }) {
+                    ViewThatFits(in: .horizontal) {
+                        HStack { ForEach(question.data["result"]["options"].strings, id: \.self) { option in Button(option) { choose(option) } } }
+                        VStack(alignment: .leading) { ForEach(question.data["result"]["options"].strings, id: \.self) { option in Button(option) { choose(option) } } }
+                    }.buttonStyle(.bordered).controlSize(.small)
                 }
                 if task.status.active && task.generating == true {
                     Text(text.isEmpty ? "Thinking…" : "Working…").font(.caption).foregroundStyle(.secondary)
