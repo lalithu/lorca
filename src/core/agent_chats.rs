@@ -96,18 +96,22 @@ impl Core {
                 return Err("The previous agent result could not be saved. Reconnect before starting another task.".into());
             }
         }
-        let mut effective_task = if task.is_empty() {
+        let effective_task = if task.is_empty() {
             "Describe the attached images.".to_string()
         } else {
             task.to_string()
         };
         let mut resume_evidence = vec![];
         let mut parent = None;
+        let mut pending_task = None;
         if let Some(ci) = ci {
             let chat = &s.view.conversations[ci];
             if let Some(previous) = chat.messages.last().filter(|m| {
                 m.role == "assistant"
                     && (m.extra.get("agentStatus") == Some(&json!("waiting_for_input"))
+                        || m.extra.get("agentContract").is_some_and(|c| {
+                            c["relation"] == "status" && c["pendingTask"].is_object()
+                        })
                         || (v["continueTaskId"].as_str().is_some()
                             && m.extra.get("agentTaskId") == v.get("continueTaskId")
                             && matches!(
@@ -134,13 +138,62 @@ impl Core {
                     .and_then(Value::as_str)
                     .or_else(|| request_for(chat, previous).map(|request| request.content.as_str()))
                     .ok_or("Waiting task has no saved objective")?;
-                effective_task = format!("{original}\nUser decision: {task}");
+                pending_task = Some(crate::agentloop::intent::PendingTask {
+                    completed: false,
+                    id: previous.extra["agentTaskId"].as_str().unwrap_or("").into(),
+                    objective: original.into(),
+                    contract: previous.extra.get("agentContract").cloned(),
+                });
+                if let Some(saved) = previous
+                    .extra
+                    .get("agentContract")
+                    .filter(|c| c["relation"] == "status")
+                    .and_then(|c| c.get("pendingTask"))
+                    && let Ok(task) = serde_json::from_value::<crate::agentloop::intent::PendingTask>(
+                        saved.clone(),
+                    )
+                {
+                    pending_task = Some(task);
+                }
                 if effective_task.len() > 8000 {
                     return Err("The continued objective is too long; start a new request with a concise objective.".into());
                 }
                 parent = previous.extra.get("agentTaskId").cloned();
                 resume_evidence =
                     linked_evidence(chat, parent.as_ref().and_then(Value::as_str).unwrap_or(""))?;
+            }
+        }
+        // Completed tasks inform short follow-ups, but are not resumable work.
+        // In particular, do not link their old execution evidence to a new turn.
+        if pending_task.is_none()
+            && v["continueTaskId"].is_null()
+            && let Some(ci) = ci
+            && let Some(previous) = s.view.conversations[ci].messages.last().filter(|m| {
+                m.role == "assistant"
+                    && m.extra.get("agentStatus") == Some(&json!("completed"))
+                    && m.extra
+                        .get("agentWorkspace")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        == workspace
+                            .as_ref()
+                            .and_then(|w| w.root.to_str())
+                            .unwrap_or("")
+            })
+        {
+            let chat = &s.view.conversations[ci];
+            if let Some(objective) = previous
+                .extra
+                .get("agentObjective")
+                .and_then(Value::as_str)
+                .or_else(|| request_for(chat, previous).map(|m| m.content.as_str()))
+            {
+                pending_task = Some(crate::agentloop::intent::PendingTask {
+                    id: previous.extra["agentTaskId"].as_str().unwrap_or("").into(),
+                    objective: objective.into(),
+                    contract: previous.extra.get("agentContract").cloned(),
+                    completed: true,
+                });
             }
         }
         if v["continueTaskId"].as_str().is_some() && parent.as_ref() != v.get("continueTaskId") {
@@ -160,7 +213,7 @@ impl Core {
                 && let Some(message) = history.last_mut()
             {
                 message["content"] = json!(format!(
-                    "Continue the pending request. {effective_task}\nThe latest user decision answers the preceding question. Preserve earlier restrictions and actual tool results; never infer permission from a choice."
+                    "Continue the pending request. {effective_task}\nDetermine whether the latest user message answers, corrects, cancels, or replaces the pending task; do not assume it is an answer. Choices never grant execution permission."
                 ));
             }
         }
@@ -191,6 +244,7 @@ impl Core {
                 Registry::empty()
             },
             resume_evidence,
+            pending_task,
         )?;
         if let Some(ci) = ci {
             let mut chat = submitted_chat.take().unwrap();
@@ -234,6 +288,29 @@ impl Core {
             return;
         };
         let mut chat = s.view.conversations[ci].clone();
+        if let Some(old) = task
+            .contract
+            .as_ref()
+            .and_then(|c| c["supersedesTaskId"].as_str())
+        {
+            for message in &mut chat.messages {
+                if message.role == "assistant"
+                    && message.extra.get("agentTaskId").and_then(Value::as_str) == Some(old)
+                {
+                    message
+                        .extra
+                        .insert("agentStatus".into(), json!("cancelled"));
+                    message
+                        .extra
+                        .insert("agentSupersededBy".into(), json!(task.id));
+                }
+                if message.role == "user"
+                    && message.extra.get("agentTaskId").and_then(Value::as_str) == Some(&task.id)
+                {
+                    message.extra.insert("agentParent".into(), Value::Null);
+                }
+            }
+        }
         let existing = chat.messages.iter().position(|m| {
             m.role == "assistant"
                 && m.extra.get("agentTaskId").and_then(Value::as_str) == Some(&task.id)
@@ -293,6 +370,7 @@ impl Core {
                 },
             ),
             ("agentObjective".into(), json!(task.task)),
+            ("agentContract".into(), json!(task.contract)),
             (
                 "agentParent".into(),
                 chat.messages

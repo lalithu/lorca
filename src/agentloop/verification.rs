@@ -26,7 +26,7 @@ const EDIT_VERBS: &[&str] = &[
     "make",
 ];
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Requirements {
     inspect: bool,
     directory_only: bool,
@@ -35,6 +35,7 @@ pub struct Requirements {
     empty_paths: Vec<String>,
     read_paths: Vec<String>,
     commands: Vec<String>,
+    report_only: bool,
 }
 impl Requirements {
     pub fn new(task: &str) -> Self {
@@ -192,6 +193,7 @@ impl Requirements {
             && paths.len() == 1
             && (no_content
                 || positive_plain.contains("empty file")
+                || positive_plain.contains("empty content")
                 || positive_plain.contains("leave it empty")
                 || positive_plain.contains("leave it completely empty")
                 || positive_plain.contains(&format!("empty {}", paths[0]))
@@ -212,8 +214,67 @@ impl Requirements {
             paths,
             empty_paths,
             read_paths,
+            report_only: !edit_requested,
             commands,
         }
+    }
+    pub(super) fn interpreted(task: &str, intent: &super::intent::Interpretation) -> Self {
+        use super::intent::OutcomeKind::*;
+        let mut value = Self::new(task);
+        value.inspect |= intent.outcomes.iter().any(|o| o.kind == Inspect);
+        value.edit |= intent
+            .outcomes
+            .iter()
+            .any(|o| matches!(o.kind, Edit | RepairVerify));
+        let semantic_paths: Vec<_> = intent
+            .outcomes
+            .iter()
+            .filter(|o| matches!(o.kind, Edit | RepairVerify))
+            .filter_map(|o| o.target.as_ref())
+            .map(|p| normalized_path(p))
+            .collect();
+        value.paths.extend(semantic_paths);
+        value.paths.sort();
+        value.paths.dedup();
+        value.read_paths.extend(
+            intent
+                .outcomes
+                .iter()
+                .filter(|o| o.kind == Inspect)
+                .filter_map(|o| o.target.clone())
+                // Abstract inspection subjects are not literal file references.
+                // Keep concrete paths subject to the existing read-evidence check.
+                .filter(|p| {
+                    !matches!(
+                        p.to_ascii_lowercase().as_str(),
+                        "." | "repository" | "repo" | "workspace" | "project" | "directory"
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
+        value.report_only = !value.edit && !intent.outcomes.iter().any(|o| o.kind == RepairVerify);
+        if intent
+            .outcomes
+            .iter()
+            .any(|o| matches!(o.kind, ExecuteReport | RepairVerify))
+            && value.commands.is_empty()
+        {
+            value.commands.push(String::new());
+        }
+        if !intent
+            .outcomes
+            .iter()
+            .any(|o| matches!(o.kind, ExecuteReport | RepairVerify))
+        {
+            // Do not erase a command explicitly required by the user.
+        }
+        value
+    }
+    pub(crate) fn requires_edit(&self) -> bool {
+        self.edit
+    }
+    pub(super) fn reports_failure(&self) -> bool {
+        self.report_only && !self.commands.is_empty()
     }
     pub fn action(&self) -> bool {
         self.inspect || self.edit || !self.commands.is_empty()
@@ -343,7 +404,7 @@ impl Requirements {
         }
         for name in &self.commands {
             if !commands.iter().any(|(args, index, exit)| {
-                if *exit != Some(0) {
+                if !self.report_only && *exit != Some(0) {
                     return false;
                 }
                 if self.edit && last_edit.is_some_and(|edit| *index <= edit) {
@@ -409,19 +470,11 @@ impl Requirements {
 // This recognizes presentation, not task intent; it never authorizes an action.
 pub(super) fn clarification_question(text: &str) -> Option<&str> {
     let text = text.trim();
-    if text.len() > 500 || !text.ends_with('?') || text.matches('?').count() != 1 {
+    if text.len() > 2000 || !text.contains('?') {
         return None;
     }
-    // A brief introduction may precede the one question. Route that question
-    // once, rather than treating it as an unfulfilled promise and prompting again.
-    let question = text
-        .rsplit_once(". ")
-        .map_or(text, |(_, tail)| tail)
-        .lines()
-        .last()?
-        .trim();
-    let lower = question.to_lowercase();
-    [
+    let question = text.rsplit_once(". ").map_or(text, |(_, tail)| tail).trim();
+    let prefixes = [
         "what ",
         "which ",
         "where ",
@@ -429,10 +482,17 @@ pub(super) fn clarification_question(text: &str) -> Option<&str> {
         "could you ",
         "can you ",
         "would you ",
-    ]
-    .iter()
-    .any(|prefix| lower.starts_with(prefix))
-    .then_some(question)
+        "should ",
+    ];
+    let recognized = |s: &str| {
+        prefixes
+            .iter()
+            .any(|p| s.trim().to_lowercase().starts_with(p))
+    };
+    if text.matches('?').count() == 1 && recognized(question) {
+        return Some(question);
+    }
+    (recognized(text) || text.lines().any(recognized)).then_some(text)
 }
 
 fn normalized_path(path: &str) -> String {
@@ -487,7 +547,7 @@ fn requested_read_paths(clause: &str) -> Vec<String> {
     paths
 }
 
-fn requested_paths(clause: &str) -> Vec<String> {
+pub(super) fn requested_paths(clause: &str) -> Vec<String> {
     let end = [" to ", " from ", " based on ", " using ", " for "]
         .iter()
         .filter_map(|marker| clause.find(marker))
@@ -629,8 +689,8 @@ mod tests {
             command("test", "test"),
             result("run_command", "test", json!({"ok":false,"exitCode":101})),
         ];
-        assert_eq!(requirements.missing(&history).len(), 2);
-        // An exit 101 proves execution, but does not satisfy a command requirement.
+        assert_eq!(requirements.missing(&history).len(), 1);
+        // Run-and-report accepts the recorded failure; cargo check is still missing.
         assert!(unverified_claim("Run tests", "I ran cargo test.", &history).is_none());
         assert!(unverified_claim("Run tests", "I ran cargo test.", &[]).is_some());
     }

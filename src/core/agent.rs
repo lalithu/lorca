@@ -43,6 +43,9 @@ impl CoreInference {
     }
 }
 impl Inference for CoreInference {
+    fn interprets_tasks(&self) -> bool {
+        true
+    }
     fn effort(&self) -> crate::agent_types::ThinkingEffort {
         self.effort
     }

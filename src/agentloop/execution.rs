@@ -23,11 +23,12 @@ impl Agent {
     ) -> Result<String> {
         let super::context::RunHistory {
             messages: history,
-            evidence: resume_evidence,
+            evidence: mut resume_evidence,
+            pending_task,
         } = history;
         let mut registry = registry;
         registry.attach_inference(inference.clone());
-        let task = self.snapshot().unwrap().task;
+        let mut task = self.snapshot().unwrap().task;
         if let Some(w) = w {
             w.restore_references(&history);
         }
@@ -38,13 +39,12 @@ impl Agent {
             bounded(&w.map(|w|w.references()).unwrap_or_default().join(", "),6000))}),
         ];
         let prior_history = history.clone();
-        let contract = super::TaskContract::new(
+        let mut contract = super::TaskContract::new(
             &task,
             w.map(|w| w.root.display().to_string()),
             history.len(),
         );
-        self.emit("task_contract", json!(contract));
-        let requirements = &contract.objective.completion;
+
         messages.extend(history);
         if messages.last().is_none_or(|m| m["role"] != "user") {
             messages.push(json!({"role":"user","content":task}));
@@ -60,6 +60,159 @@ impl Agent {
             .unwrap()
             .usage
             .context_limit = capacity;
+        let mut status_only = false;
+        let interpreted = inference.interprets_tasks() && capacity.is_some();
+        if interpreted {
+            let intent = super::intent::interpret(
+                inference.as_ref(),
+                &task,
+                pending_task.as_ref(),
+                capacity.unwrap(),
+                limits,
+                cancel.clone(),
+            )
+            .await?;
+            if pending_task.as_ref().is_some_and(|p| p.completed) {
+                resume_evidence.clear();
+            }
+            if intent.relation == super::intent::Relation::Cancel {
+                if let Some(owner) = self.snapshot().map(|v| v.owner) {
+                    self.cancel_owner(&owner);
+                }
+                let mut saved = json!(contract);
+                saved["supersedesTaskId"] = json!(
+                    pending_task
+                        .as_ref()
+                        .filter(|p| !p.completed)
+                        .map(|p| &p.id)
+                );
+                self.state.lock().unwrap().view.as_mut().unwrap().contract = Some(saved);
+                return Err("Cancelled".into());
+            }
+            let continuing = matches!(
+                intent.relation,
+                super::intent::Relation::Continue | super::intent::Relation::Correct
+            );
+            let authority_text = if continuing {
+                pending_task
+                    .as_ref()
+                    .map(|p| {
+                        format!(
+                            "{}\nLatest user instruction: {}",
+                            p.contract
+                                .as_ref()
+                                .and_then(|c| c["objective"]["original_instruction"].as_str())
+                                .unwrap_or(&p.objective),
+                            task
+                        )
+                    })
+                    .unwrap_or_else(|| task.clone())
+            } else {
+                resume_evidence.clear();
+                task.clone()
+            };
+            contract.objective.original_instruction = if continuing {
+                pending_task
+                    .as_ref()
+                    .and_then(|p| p.contract.as_ref())
+                    .and_then(|c| c["objective"]["original_instruction"].as_str())
+                    .unwrap_or(&task)
+                    .into()
+            } else {
+                task.clone()
+            };
+            contract.objective.requested_outcome = intent.objective.clone();
+            contract.objective.completion = super::verification::Requirements::interpreted(
+                &format!("{}\n{}", intent.objective, task),
+                &intent,
+            );
+            contract.authority = if continuing && let Some(previous) = &pending_task {
+                super::authority::Authority::continued(
+                    previous,
+                    &task,
+                    &intent,
+                    &contract.objective.completion,
+                )
+            } else {
+                super::authority::Authority::interpreted(
+                    &authority_text,
+                    &intent,
+                    &contract.objective.completion,
+                )
+            };
+            self.emit("task_interpreted",json!({"interpretation":intent,"parent":if continuing {pending_task.as_ref().map(|p|&p.id)}else{None},"revision":1}));
+            task = intent.objective.clone();
+            self.state.lock().unwrap().view.as_mut().unwrap().task = task.clone();
+            let mut saved = json!(contract);
+            saved["revision"] = json!(1);
+            saved["relation"] = json!(intent.relation);
+            if intent.relation == super::intent::Relation::New {
+                saved["supersedesTaskId"] = json!(
+                    pending_task
+                        .as_ref()
+                        .filter(|p| !p.completed)
+                        .map(|p| &p.id)
+                );
+            }
+            // Prior tool observations are background, not fresh task evidence.
+            let ids: HashSet<_> = resume_evidence
+                .iter()
+                .filter_map(|m| m["tool_call_id"].as_str())
+                .map(str::to_owned)
+                .collect();
+            for message in messages.iter_mut().skip(1) {
+                if message["tool_calls"].is_array()
+                    || message["role"] == "tool"
+                        && !ids.contains(message["tool_call_id"].as_str().unwrap_or(""))
+                {
+                    if message["tool_calls"].as_array().is_some_and(|calls| {
+                        calls
+                            .iter()
+                            .all(|c| ids.contains(c["id"].as_str().unwrap_or("")))
+                    }) {
+                        continue;
+                    }
+                    *message = json!({"role":"assistant","content":format!("Earlier task context (not current execution evidence): {}",bounded(&message.to_string(),900))});
+                }
+            }
+            if intent.relation == super::intent::Relation::Status {
+                saved["pendingTask"] = json!(pending_task);
+                status_only = true;
+            }
+            self.state.lock().unwrap().view.as_mut().unwrap().contract = Some(saved);
+            if let Some(question) = intent.clarification.as_ref() {
+                return super::recovery::question(
+                    self,
+                    &registry,
+                    w,
+                    limits,
+                    cancel.clone(),
+                    &contract.authority,
+                    question,
+                )
+                .await;
+            }
+            if intent.relation == super::intent::Relation::Status {
+                messages.push(json!({"role":"system","content":"Answer the status question from saved observations only. Do not request any tools or replace the prior task."}));
+            }
+            messages.push(json!({"role":"system","content":format!("Active task revision 1: {}. This interpretation is a working objective, not permission or execution evidence.",json!(intent))}));
+        } else if let Some(previous) = pending_task.as_ref().filter(|p| !p.completed) {
+            task = format!("{}\nUser decision: {}", previous.objective, task);
+            contract = super::TaskContract::new(
+                &task,
+                w.map(|w| w.root.display().to_string()),
+                prior_history.len(),
+            );
+        }
+        self.state.lock().unwrap().view.as_mut().unwrap().task = task.clone();
+        if !interpreted
+            && pending_task.is_some()
+            && let Some(last) = messages.iter_mut().rev().find(|m| m["role"] == "user")
+        {
+            last["content"] = json!(task);
+        }
+        self.emit("task_contract", json!(contract));
+        let requirements = &contract.objective.completion;
         let mut capacity = capacity.unwrap_or(crate::context::DEFAULT_CAPACITY);
         let mut evidence = Vec::<Value>::new();
         let mut completed = HashMap::<String, Value>::new();
@@ -108,7 +261,11 @@ impl Agent {
             operational["denied"] = json!(denied);
             let schemas = registry.active_schemas();
             operational["unavailableTools"] = json!(registry.unavailable());
-            let offered = if finalizing { &[][..] } else { &schemas[..] };
+            let offered = if finalizing || status_only {
+                &[][..]
+            } else {
+                &schemas[..]
+            };
             let budget = crate::context::GenerationBudget::new(
                 capacity,
                 expanded_output || inference.effort() == ThinkingEffort::High,
@@ -256,7 +413,7 @@ impl Agent {
                     "{cause} No tool calls from that interrupted response executed. Resume the same user request using the verified results already present. Use small, targeted patches or one action per turn; do not rewrite an entire file unnecessarily or replay completed actions. Existing approvals and restrictions still apply. This is an internal generation failure, not missing user instructions.")}));
                 continue;
             }
-            if finalizing && !turn.calls.is_empty() {
+            if (finalizing || status_only) && !turn.calls.is_empty() {
                 return Err("Task incomplete: tool-free finalization requested tools; no action was executed".into());
             }
             if turn.calls.is_empty() {
@@ -266,7 +423,10 @@ impl Agent {
                     .cloned()
                     .collect::<Vec<_>>();
                 let mut report = requirements.report(&current);
-                if !unresolved.is_empty() {
+                if unresolved.keys().any(|k| {
+                    !requirements.reports_failure()
+                        || !(k.starts_with("exec_command:") || k.starts_with("write_stdin:"))
+                }) {
                     report.satisfied = false;
                     report
                         .unsatisfied
@@ -295,7 +455,10 @@ impl Agent {
                     )
                     .await;
                 }
-                if !unresolved.is_empty() {
+                if unresolved.keys().any(|k| {
+                    !requirements.reports_failure()
+                        || !(k.starts_with("exec_command:") || k.starts_with("write_stdin:"))
+                }) {
                     return Err("A command or file change failed. Task failed; see actual tool results and exit status.".into());
                 }
                 let claims = super::verification::unverified_claim(
@@ -401,8 +564,10 @@ impl Agent {
                     return Err("Task incomplete: Working checkpoints did not advance to an action or answer within the continuation allowance. Saved work is preserved.".into());
                 }
             }
-            for call in turn.calls {
+            let calls = turn.calls;
+            for (call_index, call) in calls.iter().cloned().enumerate() {
                 if *cancel.borrow() {
+                    self.skip_calls(&calls[call_index..], "Cancelled before execution");
                     return Err("Cancelled".into());
                 }
                 let key = call_key(&call);
@@ -570,6 +735,7 @@ impl Agent {
                     failure.result = value.clone();
                     failure.invalid_arguments = invalid_arguments;
                     if !invalid_arguments
+                        && !(requirements.reports_failure() && value["exitCode"].is_number())
                         && matches!(
                             call.name.as_str(),
                             "apply_patch" | "run_command" | "exec_command" | "write_stdin"
@@ -638,12 +804,20 @@ impl Agent {
                 };
                 messages.push(json!({"role":"tool","tool_name":call.name,"tool_call_id":call.id,"content":content}));
                 if value["needsUserInput"] == true {
+                    self.skip_calls(
+                        &calls[call_index + 1..],
+                        "Waiting for user input; action not executed",
+                    );
                     return Err(format!(
                         "Waiting for input: {}",
                         super::context::question_text(&value)
                     ));
                 }
                 if !denied.is_empty() {
+                    self.skip_calls(
+                        &calls[call_index + 1..],
+                        "Prior action denied; action not executed",
+                    );
                     return Err(
                         "Task denied: an action was declined; no retry or bypass was performed"
                             .into(),
@@ -718,6 +892,19 @@ fn argument_feedback(registry: &Registry, call: &ToolCall, result: &mut Value) -
         result["example"] = example.clone();
     }
     true
+}
+
+impl Agent {
+    fn skip_calls(&self, calls: &[ToolCall], reason: &str) {
+        for call in calls {
+            let value = json!({"ok":false,"executed":false,"skipped":true,"error":reason});
+            self.state.lock().unwrap().view.as_mut().unwrap().transcript.push(json!({"role":"tool","tool_name":call.name,"tool_call_id":call.id,"content":value.to_string()}));
+            self.emit(
+                "tool_skipped",
+                json!({"callId":call.id,"tool":call.name,"result":value}),
+            );
+        }
+    }
 }
 
 fn call_key(call: &ToolCall) -> String {

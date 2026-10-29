@@ -142,12 +142,6 @@ pub(super) async fn guidance(
         agent, registry, workspace, limits, cancel, authority, &prompt,
     )
     .await
-    .map_err(|error| {
-        error
-            .strip_prefix("Waiting for input: ")
-            .map(|reason| format!("Task incomplete: {reason}"))
-            .unwrap_or(error)
-    })
 }
 
 pub(super) async fn question(

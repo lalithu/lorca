@@ -32,6 +32,9 @@ impl OllamaAgent {
     }
 }
 impl Inference for OllamaAgent {
+    fn interprets_tasks(&self) -> bool {
+        true
+    }
     fn capacity(&self) -> FutureResult<'_, Option<u64>> {
         Box::pin(async { Ok(self.allocated().await) })
     }

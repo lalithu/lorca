@@ -55,6 +55,17 @@ fn patch(id: &str, old: &str, new: &str) -> Value {
     }}]})
 }
 async fn chat(State(server): State<Arc<Server>>, Json(request): Json<Value>) -> Response {
+    // The bounded interpretation pass is separate from operational recovery.
+    // Keep the same deliberately failing generation scenarios and assertions below.
+    if request["tools"]
+        .as_array()
+        .is_some_and(|a| a.iter().any(|v| v["function"]["name"] == "interpret_task"))
+    {
+        return Response::new(Body::from(format!(
+            "{}\n",
+            json!({"message":{"role":"assistant","tool_calls":[{"id":"intent","function":{"name":"interpret_task","arguments":{"relation":"new","objective":"Update index.html with the requested dark mode, explorer and gradient features","outcomes":[{"kind":"edit","target":"index.html"}],"edit_targets":["index.html"],"forbidden_targets":[],"read_only":false,"commands_forbidden":false,"clarification":null}}}]},"done":true,"done_reason":"stop"})
+        )));
+    }
     assert_eq!(request["stream"], true);
     assert_eq!(request["think"], false);
     assert!(

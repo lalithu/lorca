@@ -147,7 +147,7 @@ async fn inspect_requires_file_contents_not_just_listing_or_claims() {
         Decision::Deny,
     )
     .await;
-    assert_eq!(v.status, Status::Incomplete);
+    assert_eq!(v.status, Status::WaitingForInput);
     assert_eq!(
         v.events
             .iter()
@@ -179,7 +179,7 @@ async fn readme_promises_are_bounded_and_do_not_change_files() {
             Decision::Deny,
         )
         .await;
-        assert_eq!(v.status, Status::Incomplete);
+        assert_eq!(v.status, Status::WaitingForInput);
         assert_eq!(s.seen.lock().unwrap().len(), 3);
         assert_eq!(
             std::fs::read_to_string(r.0.join("README.md")).unwrap(),
@@ -229,7 +229,7 @@ async fn combined_request_needs_inspection_and_the_requested_patch() {
         Decision::AllowOnce,
     )
     .await;
-    assert_eq!(v.status, Status::Incomplete);
+    assert_eq!(v.status, Status::WaitingForInput);
     let (v, _, _) = drive(
         "Inspect this repository and update README.md",
         vec![
@@ -258,7 +258,7 @@ async fn a_different_successful_patch_cannot_satisfy_readme_update() {
         Decision::AllowOnce,
     )
     .await;
-    assert_eq!(v.status, Status::Incomplete);
+    assert_eq!(v.status, Status::WaitingForInput);
     assert_eq!(
         std::fs::read_to_string(r.0.join("README.md")).unwrap(),
         "outdated"
@@ -666,7 +666,7 @@ async fn missing_exact_file_is_a_clear_blocker_without_summary_retries() {
         Decision::Deny,
     )
     .await;
-    assert_eq!(view.status, Status::Incomplete, "{:?}", view.result);
+    assert_eq!(view.status, Status::WaitingForInput, "{:?}", view.result);
     assert_eq!(script.seen.lock().unwrap().len(), 2);
     assert!(
         view.result
@@ -700,7 +700,7 @@ async fn repeated_unverified_read_attempts_do_not_repeat_automatic_discovery() {
         Decision::Deny,
     )
     .await;
-    assert_eq!(view.status, Status::Incomplete, "{:?}", view.result);
+    assert_eq!(view.status, Status::WaitingForInput, "{:?}", view.result);
     assert_eq!(
         view.events
             .iter()
@@ -728,7 +728,12 @@ async fn prohibited_reads_never_trigger_discovery_or_claim_success() {
             Decision::Deny,
         )
         .await;
-        assert_eq!(view.status, Status::Incomplete, "{path}: {:?}", view.result);
+        assert_eq!(
+            view.status,
+            Status::WaitingForInput,
+            "{path}: {:?}",
+            view.result
+        );
         assert_eq!(script.seen.lock().unwrap().len(), 2);
         assert!(!view.events.iter().any(|e| e.kind == "tool_recovery"
             || (e.kind == "tool_started" && e.data["tool"] != "request_user_input")
@@ -847,7 +852,7 @@ async fn automatic_discovery_cannot_follow_a_file_symlink_outside_workspace() {
         Decision::Deny,
     )
     .await;
-    assert_eq!(view.status, Status::Incomplete, "{:?}", view.result);
+    assert_eq!(view.status, Status::WaitingForInput, "{:?}", view.result);
     assert_eq!(script.seen.lock().unwrap().len(), 2);
     assert!(read_results(&view).iter().all(|v| v["ok"] == false));
     assert!(
@@ -1210,7 +1215,7 @@ async fn repeated_failures_ask_for_guidance_once_and_keep_completed_work() {
         Decision::AllowOnce,
     )
     .await;
-    assert_eq!(view.status, Status::Incomplete, "{:?}", view.result);
+    assert_eq!(view.status, Status::WaitingForInput, "{:?}", view.result);
     assert_eq!(questions(&view).len(), 1);
     assert_eq!(script.seen.lock().unwrap().len(), 4);
     assert_eq!(
@@ -1248,7 +1253,7 @@ async fn repeated_empty_listings_are_authoritative_and_stop_with_a_question() {
         Decision::Deny,
     )
     .await;
-    assert_eq!(view.status, Status::Incomplete, "{:?}", view.result);
+    assert_eq!(view.status, Status::WaitingForInput, "{:?}", view.result);
     assert_eq!(questions(&view).len(), 1);
     assert_eq!(script.seen.lock().unwrap().len(), 4);
     let first = &script.seen.lock().unwrap()[1].0.last().unwrap()["content"]
@@ -1374,7 +1379,7 @@ async fn malformed_top_level_tool_json_gets_one_safe_retry_with_current_schemas(
         Decision::Deny,
     )
     .await;
-    assert_eq!(view.status, Status::Incomplete);
+    assert_eq!(view.status, Status::WaitingForInput);
     assert_eq!(questions(&view).len(), 1);
     assert!(read_results(&view).is_empty());
     assert_eq!(script.seen.lock().unwrap().len(), 2);

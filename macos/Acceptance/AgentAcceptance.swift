@@ -15,6 +15,7 @@ enum LorcaAsset {
   _=NSApplication.shared
   let defaults=UserDefaults(suiteName:"lorca.acceptance.\(UUID().uuidString)")!
   defaults.set(model,forKey:"model")
+  defaults.set(env["LORCA_ACCEPTANCE_EFFORT"] ?? "nominal",forKey:"thinkingEffort")
   let staleRoot=root.appendingPathComponent("stale-backend")
   try! FileManager.default.createDirectory(at:staleRoot.appendingPathComponent("runtime"),withIntermediateDirectories:true)
   var staleEndpoint=(try! JSONSerialization.jsonObject(with:Data(contentsOf:BackendClient.defaultRoot.appendingPathComponent("runtime/endpoint.json")))) as! [String:Any]
@@ -40,7 +41,7 @@ enum LorcaAsset {
   var report:[[String:Any]]=[]
   var acceptedAll=true
   let prompts = env["LORCA_ACCEPTANCE_TASK"] == "long" ? [
-   "Inspect this repository and update README.md to accurately describe the current implementation. Inspect these actual modules: src/agent/execution.rs, src/agent/completion.rs, src/agent/permissions.rs, src/agent/workspace.rs, src/agent/tools.rs, src/agent/command.rs, src/agent/runtime.rs, src/provider/agent.rs, src/core/agent_chats.rs, and src/context.rs. Document the real architecture, safety boundaries and limitations in a concise README, then run cargo test. Use nextOffset for relevant truncated sections. Keep the README under 250 words."
+   "Inspect this repository and update README.md to accurately describe the current implementation. Inspect these actual modules: src/agentloop/execution.rs, src/agentloop/verification.rs, src/agentloop/authority.rs, src/tools/workspace.rs, src/tools/registry.rs, src/tools/terminal/command.rs, src/agentloop/runtime.rs, src/provider/agent.rs, src/core/agent_chats.rs, and src/context.rs. Document the real architecture, safety boundaries and limitations in a concise README, then run cargo test. Use nextOffset for relevant truncated sections. Keep the README under 250 words."
   ] : [
    "Inspect this repository and update README.md to accurately describe the current implementation.",
    "Fix the subtraction bug in src/lib.rs so add(2, 3) returns 5. Run cargo test after applying the fix and report the actual exit code.",
@@ -77,7 +78,7 @@ enum LorcaAsset {
      if let approval=task.approval,!approved.contains(approval.id),store.agent.canDecide(task,approval:approval) {
       let action=approval.action;let path=action["path"].string ?? ""
       let allow = approval.tool == "apply_patch" && ["README.md","src/lib.rs"].contains(path)
-       || approval.tool == "run_command" && [ ["test"],["test","--quiet"] ].contains(action["arguments"].strings)
+       || ["exec_command","run_command"].contains(approval.tool) && [ ["test"],["test","--quiet"] ].contains(action["arguments"].strings)
         && action["workingDirectory"].string.map { URL(fileURLWithPath:$0).standardizedFileURL.path } == project.standardizedFileURL.path
       approved.insert(approval.id)
       print("NATIVE_APPROVAL \(approval.tool) allow=\(allow) action=\(action.pretty.prefix(350))")
@@ -103,7 +104,7 @@ enum LorcaAsset {
   print("NATIVE_READBACK README_BYTES=\(readme.utf8.count)")
   let view=NSApp.windows.first{$0.title == "lorca"}?.contentView
   if let view,let rep=view.bitmapImageRepForCachingDisplay(in:view.bounds) {view.cacheDisplay(in:view.bounds,to:rep);if let data=rep.representation(using:.png,properties:[:]){try? data.write(to:root.appendingPathComponent("native-final.png"))}}
-  _=await store.modelSession.close(unload:true)
+  _=await store.modelSession.close(unload:false)
   print(acceptedAll ? "NATIVE_ACCEPTANCE_PASSED":"NATIVE_ACCEPTANCE_FAILED")
   exit(acceptedAll ? 0:3)
  }

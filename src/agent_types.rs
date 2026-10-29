@@ -29,6 +29,10 @@ pub struct Turn {
     pub finish_reason: FinishReason,
 }
 pub trait Inference: Send + Sync {
+    /// Real adapters opt into bounded task interpretation; simple test/custom adapters remain compatible.
+    fn interprets_tasks(&self) -> bool {
+        false
+    }
     fn effort(&self) -> ThinkingEffort {
         ThinkingEffort::Off
     }
@@ -160,6 +164,8 @@ pub struct TaskView {
     pub owner: String,
     pub model: Option<String>,
     pub task: String,
+    #[serde(default)]
+    pub contract: Option<Value>,
     pub workspace: String,
     pub status: Status,
     pub events: Vec<Event>,

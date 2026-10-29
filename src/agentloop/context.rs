@@ -2,6 +2,7 @@
 pub(super) struct RunHistory {
     pub messages: Vec<serde_json::Value>,
     pub evidence: Vec<serde_json::Value>,
+    pub pending_task: Option<super::intent::PendingTask>,
 }
 use serde::Serialize;
 #[derive(Debug, Serialize)]
@@ -41,7 +42,7 @@ pub(super) fn operational(
     // The original instruction is pinned separately by Context::fit. Outcome
     // and restrictions are verbatim copies/substrings, not independent policy.
     json!({"context":contract.context,"requiresActionApproval":contract.authority.requires_action_approval,
-        "requirements":contract.objective.completion,"operations":operations})
+        "scope":contract.authority.scope,"requirements":contract.objective.completion,"operations":operations})
 }
 
 #[cfg(test)]

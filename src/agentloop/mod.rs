@@ -1,6 +1,7 @@
 pub mod authority;
 pub mod context;
 mod execution;
+pub mod intent;
 pub mod objective;
 mod recovery;
 mod runtime;

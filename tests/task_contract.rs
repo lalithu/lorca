@@ -23,6 +23,6 @@ fn failed_command_is_evidence_of_execution_not_success() {
         json!({"role":"tool","tool_name":"run_command","tool_call_id":"one","content":json!({"ok":false,"exitCode":1}).to_string()}),
     ];
     let report = contract.objective.completion.report(&history);
-    assert!(!report.satisfied);
+    assert!(report.satisfied); // The request is to run/report, not repair the failed test.
     assert_eq!(report.evidence[0]["exitCode"], 1);
 }

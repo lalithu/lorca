@@ -123,7 +123,7 @@ async fn qwen_creates_empty_readme_without_cargo_or_clarification() {
 #[ignore = "Requires an installed Ollama model; no file writes approved"]
 async fn qwen_asks_one_question_for_an_unspecified_file() {
     let (view, root) = run("Create a file").await;
-    assert_eq!(view.status, Status::Incomplete, "{:?}", view.result);
+    assert_eq!(view.status, Status::WaitingForInput, "{:?}", view.result);
     assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
     assert_eq!(
         view.audit

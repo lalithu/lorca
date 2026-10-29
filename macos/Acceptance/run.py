@@ -11,6 +11,7 @@ import time
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--model", default="qwen3.5:9b-q4_K_M")
+parser.add_argument("--effort", choices=["off", "nominal", "high"], default="nominal")
 parser.add_argument("--long", action="store_true", help="Inspect an isolated copy of Lorca's Rust code")
 parser.add_argument("--sdk", help="Explicit SDK path; CLT defaults to the installed working 26.5 SDK")
 parser.add_argument("--skip-build", action="store_true", help="Use the already-built release core")
@@ -38,7 +39,7 @@ else:
 sources = sorted(p for p in (repo / "macos/Sources/LorcaMac").glob("*.swift") if p.name != "App.swift")
 runner = root / "native-acceptance"
 subprocess.run(["xcrun", "swiftc", "-parse-as-library", "-sdk", sdk, "-target", "arm64-apple-macos14.0", "-module-cache-path", str(repo / "macos/.build/out/ModuleCache.noindex"), *map(str, sources), str(pathlib.Path(__file__).with_name("AgentAcceptance.swift")), "-o", str(runner)], check=True, cwd=repo)
-env = dict(os.environ, LORCA_DATA_DIR=str(root / "data"), LORCA_ACCEPTANCE_ROOT=str(root), LORCA_ACCEPTANCE_MODEL=args.model, LORCA_SOURCE_ROOT=str(repo), PATH=str(pathlib.Path.home() / ".cargo/bin") + ":" + os.environ["PATH"])
+env = dict(os.environ, LORCA_DATA_DIR=str(root / "data"), LORCA_ACCEPTANCE_ROOT=str(root), LORCA_ACCEPTANCE_MODEL=args.model, LORCA_ACCEPTANCE_EFFORT=args.effort, LORCA_SOURCE_ROOT=str(repo), PATH=str(pathlib.Path.home() / ".cargo/bin") + ":" + os.environ["PATH"])
 if args.long:
     env["LORCA_ACCEPTANCE_TASK"] = "long"
 with (root / "backend.log").open("w") as backend_log:

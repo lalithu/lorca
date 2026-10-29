@@ -72,7 +72,7 @@ impl Agent {
         inference: Arc<dyn Inference>,
         registry: Registry,
     ) -> Result<String> {
-        self.submit_continuation(request, inference, registry, vec![])
+        self.submit_continuation(request, inference, registry, vec![], None)
     }
     /// Only Core supplies records from a linked waiting task. Notes never grant authority.
     pub(crate) fn submit_continuation(
@@ -81,6 +81,7 @@ impl Agent {
         inference: Arc<dyn Inference>,
         registry: Registry,
         resume_evidence: Vec<Value>,
+        pending_task: Option<super::intent::PendingTask>,
     ) -> Result<String> {
         let Submission {
             owner,
@@ -117,6 +118,7 @@ impl Agent {
             owner,
             model,
             task: task.clone(),
+            contract: None,
             workspace: workspace
                 .as_ref()
                 .map(|w| w.root.display().to_string())
@@ -148,10 +150,11 @@ impl Agent {
                     super::context::RunHistory {
                         messages: history,
                         evidence: resume_evidence,
+                        pending_task,
                     },
                 )
                 .await;
-            let (status, kind, result) = if *rx.borrow() {
+            let (mut status, mut kind, mut result) = if *rx.borrow() {
                 (
                     Status::Cancelled,
                     "task_cancelled",
@@ -173,6 +176,12 @@ impl Agent {
                 }
             };
             let mut s = this.state.lock().unwrap();
+            if *s.cancel.borrow() {
+                status = Status::Cancelled;
+                kind = "task_cancelled";
+                result = "Task cancelled; completed effects retained, no further actions executed"
+                    .into();
+            }
             let view = s.view.as_mut().unwrap();
             view.status = status;
             view.generating = false;

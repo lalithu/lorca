@@ -291,7 +291,7 @@ async fn repeated_failures_limit_and_single_active_task_are_enforced() {
             .is_err()
     );
     let view = wait(&agent, |v| !v.status.active()).await;
-    assert_eq!(view.status, Status::Incomplete);
+    assert_eq!(view.status, Status::WaitingForInput);
     assert!(view.result.unwrap().contains("repeated unsuccessful"));
     assert_eq!(mock.seen.lock().unwrap().len(), 3);
     let mock = Mock::new(vec![calls(vec![("list_directory", json!({"path":"."}))])]);

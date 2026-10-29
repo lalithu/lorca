@@ -4,7 +4,7 @@ Run on Apple Silicon with Ollama and the named model installed:
 
 ```sh
 python3 macos/Acceptance/run.py --model qwen3.5:9b-q4_K_M
-python3 macos/Acceptance/run.py --model qwen3.6:27b-mlx
+python3 macos/Acceptance/run.py --model m2max-fast:latest --effort nominal
 python3 macos/Acceptance/run.py --long --model qwen3.5:9b-q4_K_M
 ```
 
@@ -22,3 +22,8 @@ This is an automated native integration run, not a replacement for XCTest or man
 UX testing. Review the generated prose for factual accuracy; tool evidence alone
 cannot prove semantic correctness. The runner exits unsuccessfully for non-completed
 outcomes, missing native controls or unexpected tools in the contextual follow-up.
+
+Use an installed Ollama model name; the alias does not imply a native MLX backend.
+Thinking effort defaults to nominal and is recorded by the runner. Both exec_command
+and its legacy run_command name are recognized for fixture-scoped Cargo approval.
+The runner closes its session without unloading a model shared with another client.

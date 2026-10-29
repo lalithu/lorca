@@ -105,6 +105,18 @@ impl Registry {
         self.unavailable.remove(name);
         self.tools.insert(name.into(), tool);
     }
+    pub(crate) fn requires_approval(&self, name: &str, arguments: &Value) -> bool {
+        self.adaptive
+            && self
+                .catalog
+                .read()
+                .unwrap()
+                .get(name)
+                .is_some_and(|m| m.authority == Authority::Approval)
+            && (name != "write_stdin"
+                || arguments["close_stdin"] == true
+                || arguments["chars"].as_str().is_some_and(|s| !s.is_empty()))
+    }
     pub fn get(&self, name: &str) -> Result<Arc<dyn Tool>> {
         self.tools.get(name).cloned().ok_or_else(|| {
             self.unavailable
