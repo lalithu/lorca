@@ -100,6 +100,17 @@ final class AgentTests: XCTestCase {
         shared.draft = "Normal chat"; XCTAssertTrue(shared.canSendChat)
         _ = await shared.modelSession.close(unload: false)
     }
+    func testActiveRoutingAllowsOnlyExplicitSameChatStatusOrCorrection() async throws {
+        let backend=AgentMockBackend(), store=ChatStore(backend:AgentMockBackend())
+        _ = backend
+        await store.refreshConnection()
+        store.draft="Inspect and test";store.send()
+        try await Task.sleep(for:.milliseconds(100))
+        store.draft="What are you doing?";XCTAssertTrue(store.canSteerActive);XCTAssertTrue(store.canSend)
+        store.draft="Actually change the requested result.";XCTAssertTrue(store.canSteerActive)
+        store.draft="Unrelated new task";XCTAssertFalse(store.canSteerActive);XCTAssertFalse(store.canSend)
+        _ = await store.modelSession.close(unload:false)
+    }
     func testApprovalAllowAndDenyAreSingleSubmissionAndStaleActionsAreBlocked() async throws {
         for decision in ["allow_once", "deny"] {
             let backend = AgentMockBackend(); backend.agentState = try agentFixture()

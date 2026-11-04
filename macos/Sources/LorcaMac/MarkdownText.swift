@@ -42,17 +42,41 @@ struct MarkdownBlock: Identifiable {
     }
 }
 
-struct MarkdownText: View {
+struct MarkdownText: View, Equatable {
+    static func ==(lhs:Self,rhs:Self)->Bool {lhs.text==rhs.text && lhs.size==rhs.size && lhs.showsCopyButton==rhs.showsCopyButton && lhs.userMessage==rhs.userMessage}
     let text: String
     let size: CGFloat
+    var showsCopyButton = true
+    var userMessage = false
 
     var body: some View {
-        Text(Self.rendered(text, size: size))
+        VStack(alignment:.leading,spacing:6) {
+        if showsCopyButton && !userMessage {HStack {Spacer();Button("Copy message") {NativeClipboard.copy(text)}.buttonStyle(.borderless).font(.system(size:10)).foregroundStyle(.secondary)}}
+        Text(displayText)
             .font(.system(size: size))
             .lineSpacing(4)
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
+        if text.contains("```") {
+            HStack {ForEach(Array(Self.codeBlocks(text).enumerated()),id:\.offset) {index,code in
+                Button("Copy code \(index+1)") {NativeClipboard.copy(code)}.buttonStyle(.borderless).font(.caption).accessibilityLabel("Copy code block \(index+1)")
+            }}
+        }
+        }
+    }
+    private var displayText: AttributedString {
+        var value = Self.rendered(text, size: size)
+        if userMessage { value.foregroundColor = .white }
+        return value
+    }
+    static func codeBlocks(_ source:String)->[String] {
+        var blocks:[String]=[],current:[String]=[];var inside=false
+        for line in source.components(separatedBy:"\n") {
+            if line.hasPrefix("```") {if inside {blocks.append(current.joined(separator:"\n"));current=[]};inside.toggle()}
+            else if inside {current.append(line)}
+        }
+        return blocks
     }
 
     // One Text keeps selection continuous across Markdown elements and leaves
@@ -94,5 +118,12 @@ struct MarkdownText: View {
             result += content
         }
         return result
+    }
+}
+
+// The same native pasteboard operation backs message, code, patch and output copying.
+enum NativeClipboard {
+    @MainActor static func copy(_ text:String,to pasteboard:NSPasteboard = .general) {
+        pasteboard.clearContents();pasteboard.setString(text,forType:.string)
     }
 }

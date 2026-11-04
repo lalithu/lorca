@@ -6,13 +6,33 @@ struct ChatComposer: View {
     var compact = false
     @State private var choosingImages = false
     @State private var dropTarget = false
+    @State private var statusMessage: String?
 
-    private var canSend: Bool { store.canSend }
-    private func send() { store.send() }
+    private var canSend: Bool { store.canSend && store.draft.trimmingCharacters(in:.whitespacesAndNewlines) != "Correction:" }
+    private func send() {if canSend {store.send()}}
+    private func requestStatus() {
+        Task {
+            do {
+                let data=try await store.backend.command(["op":"agent_status"])
+                let value=try JSONDecoder().decode(AgentJSON.self,from:data)
+                if value["taskId"].string == store.agent.active?.id {statusMessage="Status snapshot: \(value["status"].string ?? "unknown") — \(String((value["task"].string ?? "").prefix(200)))"}
+            } catch {store.error=error.localizedDescription}
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 14 : 20) {
             if !compact { AgentComposerControls(store: store) }
+            if store.currentAgentActive {
+                HStack(spacing:12) {
+                    Button("Status",action:requestStatus).disabled(store.agent.submitting)
+                    Button("Correct task") {if !store.canSteerActive {store.draft="Correction: " + store.draft}}
+                    Spacer()
+                    Text("Thinking changes apply to the next task").font(.system(size:10)).foregroundStyle(.secondary)
+                }.font(.system(size:11)).accessibilityIdentifier("active-task-controls")
+            }
+            if store.currentAgentActive,let message=statusMessage {Text(message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)}
+            if store.currentAgentActive && !store.draft.isEmpty && !store.canSteerActive {Text("Start a correction with ‘Correction:’ or ‘Actually…’, or request Status.").font(.caption).foregroundStyle(.secondary)}
             if !store.draftImages.isEmpty {
                 AttachmentStrip(attachments: store.draftImages, storage: store.imageStore, compact: compact,
                     remove: store.library.removeDraftImage)
@@ -43,7 +63,8 @@ struct ChatComposer: View {
                     }
                     .help("Stop response (Esc)").keyboardShortcut(.escape, modifiers: [])
                     .accessibilityLabel("Stop response")
-                } else {
+                }
+                if !(store.isGenerating || store.currentAgentActive) || store.canSteerActive {
                     Button { send() } label: {
                         Image(systemName: "arrow.up").font(.system(size: 17, weight: .semibold))
                             .foregroundStyle(canSend ? .white : .secondary.opacity(0.55))

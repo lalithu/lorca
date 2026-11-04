@@ -6,6 +6,8 @@ struct AgentActivityView: View {
     var savedMessage: ChatMessage? = nil
     var textSize: CGFloat = 14
     var onChoose: ((String) -> Void)? = nil
+    @State private var clarificationAnswer = ""
+    var expandTools = false
     var onContinue: (() -> Void)? = nil
     private var snapshot: AgentTaskSnapshot? {
         if let current = store.runs[taskID] { return current }
@@ -15,29 +17,29 @@ struct AgentActivityView: View {
             workspace: message.agentWorkspace ?? "", status: status, events: message.agentEvents ?? [],
             approval: nil, result: message.content, usage: message.agentUsage)
     }
-    private func response(_ task: AgentTaskSnapshot) -> String {
-        guard let streamed = task.assistantText else { return savedMessage?.content ?? task.result ?? "" }
-        var text = streamed.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !task.status.active && task.status != .completed, let result = task.result {
-            text += (text.isEmpty ? "" : "\n\n") + result
-        } else if text.isEmpty && !task.status.active { text = task.result ?? "" }
-        return text
-    }
     var body: some View {
         if let task = snapshot {
-            let text = response(task)
+            let text = AgentPresentation.responseText(task, saved: savedMessage?.content)
             let events = (savedMessage?.agentEvents?.count ?? 0) > task.events.count ? savedMessage!.agentEvents! : task.events
             let activities = events == task.events ? (store.activities[task.id] ?? AgentActivity.make(from: events)) : AgentActivity.make(from: events)
-            let timeline = AgentTimelineItem.make(text: text, events: events, activities: activities)
-            VStack(alignment: .leading, spacing: 16) {
+            let clarification = AgentPresentation.clarification(task, events: events)
+            let question = clarification?["question"].string
+            let timeline = AgentTimelineItem.make(text: text, events: events, activities: activities, thinking: task.thinking ?? [])
+            VStack(alignment: .leading, spacing: 10) {
                 AgentRunHeader(store: store, task: task, text: text)
                 if events.first?.sequence ?? 0 > 1 {
                     Text("Earlier activity is unavailable.").font(.caption).foregroundStyle(.secondary)
                 }
                 ForEach(timeline) { row in
                     switch row.content {
-                    case .text(let text): MarkdownText(text: text, size: textSize).textSelection(.enabled)
-                    case .tools(let items): AgentActivityGroup(store: store, task: task, items: items)
+                    case .text(let text):
+                        let visible = AgentPresentation.visibleText(text, question: question)
+                        if !visible.isEmpty { MarkdownText(text: visible, size: textSize, showsCopyButton: false).equatable().textSelection(.enabled) }
+                    case .thinking(let block):
+                        ThinkingPanel(block: block, selection: Binding(
+                            get: { store.thinkingExpanded(taskID: taskID, block: block) },
+                            set: { store.setThinkingExpanded($0, taskID: taskID, blockID: block.id) }))
+                    case .tools(let items): AgentActivityGroup(store: store, task: task, items: items, initiallyExpanded: expandTools)
                     case .compaction:
                         Label("Context automatically compacted", systemImage: "arrow.down.right.and.arrow.up.left")
                             .font(.system(size: 11)).foregroundStyle(.secondary)
@@ -46,19 +48,27 @@ struct AgentActivityView: View {
                 if [.incomplete, .failed, .cancelled].contains(task.status), let resume = onContinue {
                     Button("Continue task", action: resume).buttonStyle(.bordered).controlSize(.small)
                 }
-                if task.status == .waitingForInput, let choose = onChoose,
-                   let question = events.last(where: { $0.kind == "tool_completed" && $0.data["result"]["needsUserInput"].boolean == true }) {
-                    ViewThatFits(in: .horizontal) {
-                        HStack { ForEach(question.data["result"]["options"].strings, id: \.self) { option in Button(option) { choose(option) } } }
-                        VStack(alignment: .leading) { ForEach(question.data["result"]["options"].strings, id: \.self) { option in Button(option) { choose(option) } } }
-                    }.buttonStyle(.bordered).controlSize(.small)
+                if let clarification {
+                    MarkdownText(text: question ?? "Your answer is needed", size: textSize, showsCopyButton: false)
+                    if let choose = onChoose {
+                        HStack {
+                            TextField("Your answer", text: $clarificationAnswer).textFieldStyle(.roundedBorder).onSubmit {
+                                if !clarificationAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { choose(clarificationAnswer) }
+                            }
+                            Button("Answer") { choose(clarificationAnswer) }.disabled(clarificationAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        }.accessibilityIdentifier("clarification-answer")
+                        ViewThatFits(in: .horizontal) {
+                            HStack { ForEach(clarification["options"].strings, id: \.self) { option in Button(option) { choose(option) } } }
+                            VStack(alignment: .leading) { ForEach(clarification["options"].strings, id: \.self) { option in Button(option) { choose(option) } } }
+                        }.buttonStyle(.bordered).controlSize(.small)
+                    }
                 }
                 if task.status.active && task.generating == true {
-                    Text(text.isEmpty ? "Thinking…" : "Working…").font(.caption).foregroundStyle(.secondary)
+                    Text("Generating response…").font(.caption).foregroundStyle(.secondary)
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
         } else if let message = savedMessage {
-            MarkdownText(text: message.content, size: textSize).textSelection(.enabled)
+            MarkdownText(text: message.content, size: textSize).equatable().textSelection(.enabled)
         }
     }
 }
@@ -86,7 +96,9 @@ private struct AgentRunHeader: View {
                     Text(task.status == .running ? "Working for \(duration)" : "\(status) · \(interrupted ? "at least " : "")\(duration)")
                         .monospacedDigit()
                 } else { Text(status) }
+                if task.correctionPending {Text("Correction queued · waiting for a safe boundary").foregroundStyle(Color.lorcaBlue)}
                 Spacer(minLength: 0)
+                if !text.isEmpty {Button("Copy response") {NativeClipboard.copy(text)}.buttonStyle(.borderless).accessibilityLabel("Copy whole response")}
                 if task.status.active {
                     Button("Cancel") { Task { await store.cancel() } }.buttonStyle(.borderless)
                         .disabled(store.cancelling || task.owner != store.sessionID || !store.connected)
@@ -100,6 +112,7 @@ private struct AgentActivityGroup: View {
     @ObservedObject var store: AgentStore
     let task: AgentTaskSnapshot
     let items: [AgentActivity]
+    var initiallyExpanded = false
     @State private var expanded = false
     private var pending: Bool { items.contains { $0.id == task.approval?.callId } }
     var body: some View {
@@ -114,20 +127,21 @@ private struct AgentActivityGroup: View {
             }.buttonStyle(.plain).accessibilityLabel("Tool activity: \(AgentActivity.summary(items))")
             if expanded {
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(items) { item in AgentToolRow(store: store, task: task, item: item) }
+                    ForEach(items) { item in AgentToolRow(store: store, task: task, item: item, initiallyExpanded: initiallyExpanded) }
                 }.padding(12).background(.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
             } else if pending, let approval = task.approval {
                 // Keep the actual approval actionable even while details are collapsed.
                 AgentApprovalView(store: store, task: task, approval: approval)
             }
-        }
+        }.onAppear {expanded=initiallyExpanded}
     }
 }
 private struct AgentToolRow: View {
     @ObservedObject var store: AgentStore
     let task: AgentTaskSnapshot
     let item: AgentActivity
-    @State private var expanded = true
+    var initiallyExpanded = false
+    @State private var expanded = false
     private var pending: Bool { task.approval?.callId == item.id }
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -138,14 +152,14 @@ private struct AgentToolRow: View {
                     else { Image(systemName: item.failed ? "exclamationmark.circle" : item.completed ? "checkmark" : "circle").font(.system(size: 10)).foregroundStyle(item.failed ? Color.red : Color.secondary) }
                     Text(item.title).font(.system(size: 12)).lineLimit(1).truncationMode(.middle)
                     Spacer(minLength: 0)
-                    if item.approval != nil { Text(pending ? "Review" : item.failed ? "Not executed / failed" : item.started ? "Allowed once" : "Approval ended").font(.system(size: 10)).foregroundStyle(.secondary) }
+                    Text(pending ? "Waiting for approval" : item.statusLabel).font(.system(size:10)).foregroundStyle(item.failed ? Color.red : Color.secondary)
                 }.contentShape(Rectangle())
             }.buttonStyle(.plain)
             if expanded || pending {
                 VStack(alignment: .leading, spacing: 9) {
                     if let approval = item.approval { AgentApprovalView(store: store, task: task, approval: approval) }
-                    else if item.arguments != .null { AgentOutputView(text: item.arguments.pretty) }
-                    if item.tool == "run_command" {
+                    else if item.arguments != .null && item.tool != "request_user_input" { AgentOutputView(text: item.arguments.redacted.pretty) }
+                    if ["run_command","exec_command","write_stdin"].contains(item.tool ?? "") {
                         if let code = item.result["exitCode"].int {
                             Text("Exit \(code)").font(.system(size: 11, weight: .medium))
                                 .foregroundStyle(code == 0 ? Color.green : Color.red)
@@ -153,18 +167,30 @@ private struct AgentToolRow: View {
                         if let output = item.result["output"].string { AgentOutputView(text: output) }
                         else if !item.output.isEmpty { AgentOutputView(text: item.output) }
                         if let error = item.result["error"].string { Text(error).font(.caption).foregroundStyle(.red) }
+                    } else if item.tool == "request_user_input", item.result["needsUserInput"].boolean == true {
+                        Text("Question presented in the conversation").font(.caption).foregroundStyle(.secondary)
+                    } else if item.tool == "update_plan",case .array(let steps)=item.result["plan"] {
+                        Text("Model working plan · not completion evidence").font(.caption).foregroundStyle(.secondary)
+                        ForEach(Array(steps.enumerated()),id:\.offset) {_,step in
+                            HStack {Image(systemName:step["status"].string=="in_progress" ? "circle.inset.filled":"circle");Text(step["step"].string ?? "");Spacer();Text(step["status"].string ?? "").foregroundStyle(.secondary)}.font(.caption)
+                        }
+                    } else if item.tool == "apply_patch", item.approval == nil, let diff=item.action["diff"].string ?? item.approval?.action["diff"].string {
+                        Label(item.action["changeKind"].string ?? "File change",systemImage:"doc.text").font(.caption)
+                        AgentDiffView(diff:diff).equatable()
                     } else if item.tool == "read_file", let content = item.result["content"].string {
                         AgentOutputView(text: content)
                     } else if item.result != .null {
-                        if item.tool == "git_diff", let diff = item.result["output"].string { AgentDiffView(diff: diff) }
-                        else { AgentOutputView(text: item.result.pretty) }
+                        if item.tool == "git_diff", let diff = item.result["output"].string { AgentDiffView(diff: diff).equatable() }
+                        else { AgentOutputView(text: item.result.redacted.pretty) }
                     }
+                    if let duration=item.elapsedMillis {Text(String(format:"Execution · %.2f s",Double(duration)/1000)).font(.caption).foregroundStyle(.secondary)}
+                    if let note=item.note {Text(note).font(.caption).foregroundStyle(.secondary)}
                     if item.result["truncated"].boolean == true {
-                        Text("Output truncated by the Rust tool limit.").font(.caption).foregroundStyle(.secondary)
+                        Text("Output reduced; captured evidence remains in saved tool activity.").font(.caption).foregroundStyle(.secondary)
                     }
                 }.padding(.leading, 17)
             }
-        }.padding(.vertical, 4)
+        }.padding(.vertical, 4).onAppear {expanded=initiallyExpanded}
     }
 }
 struct AgentMiniStatus: View {

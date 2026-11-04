@@ -10,11 +10,11 @@ struct AgentApprovalView: View {
             Label(pending ? "Approval required" : "Requested action", systemImage: "hand.raised")
                 .font(.system(size: 12, weight: .semibold)).foregroundStyle(Color.lorcaBlue)
             if let diff = approval.action["diff"].string {
-                Text(approval.action["path"].string ?? "File change").font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
-                AgentDiffView(diff: diff)
+                HStack {Text(approval.action["path"].string ?? "File change").textSelection(.enabled);Spacer();if let kind=approval.action["changeKind"].string {Text(kind).foregroundStyle(.secondary)}}.font(.system(size: 11, design: .monospaced))
+                AgentDiffView(diff: diff).equatable()
             } else {
                 // JSON preserves exact argument boundaries, whitespace, and escaping.
-                AgentOutputView(text: approval.action.pretty)
+                AgentOutputView(text: approval.action.redacted.pretty)
             }
             if pending {
                 HStack(spacing: 12) {

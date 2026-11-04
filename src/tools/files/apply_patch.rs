@@ -15,7 +15,7 @@ impl Tool for ApplyPatch {
     }
     fn prepare(&self, w: &Workspace, arguments: Value, _limits: &Limits) -> Result<Prepared> {
         check_size(&arguments)?;
-        let action;
+        let mut action;
         let mut payload = arguments;
         {
             let a: PatchArgs = parse(payload)?;
@@ -43,6 +43,11 @@ impl Tool for ApplyPatch {
             action = json!({"path":a.path,"diff":diff});
             payload = json!({"path":a.path,"expected":old,"replacement":new});
         }
+        action["changeKind"] = json!(if payload["expected"].is_null() {
+            "Created"
+        } else {
+            "Modified"
+        });
         Ok(Prepared {
             action,
             payload,

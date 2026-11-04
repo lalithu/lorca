@@ -33,6 +33,7 @@ enum LorcaAsset {
   print("NATIVE_READY model=\(model) ready=\(store.ready) connected=\(store.isConnected)")
   guard store.ready && store.isConnected else {print("NATIVE_BLOCKER \(store.error ?? store.modelSession.error ?? "unknown")");exit(1)}
   store.agent.workspaces[store.library.selectedID]=project
+  if env["LORCA_ACCEPTANCE_UI"] == "1" { await Chunk2Acceptance.run(store:store,windows:windows,root:root); return }
   windows.toggleMiniExpansion()
   try? await Task.sleep(for:.milliseconds(200))
   guard NSApp.windows.contains(where:{$0.title == "lorca Mini Chat" && $0.isVisible}) else {print("NATIVE_MINI_MISSING");exit(4)}
@@ -90,6 +91,7 @@ enum LorcaAsset {
    }
    guard let task=settled else {await store.agent.cancel();print("NATIVE_TIMEOUT");acceptedAll=false;break}
    let encoder=JSONEncoder();let data=try! encoder.encode(task);var entry=(try! JSONSerialization.jsonObject(with:data)) as! [String:Any]
+   entry.removeValue(forKey:"thinking")
    entry["readmeReadback"]=(try? String(contentsOf:project.appendingPathComponent("README.md"),encoding:.utf8)) ?? "";entry["sourceReadback"]=(try? String(contentsOf:project.appendingPathComponent("src/lib.rs"),encoding:.utf8)) ?? "";entry["prompt"]=prompt;entry["seconds"]=Date().timeIntervalSince(start);entry["streamed"]=streamed;entry["approvedActions"]=approved.count
    report.append(entry)
    let reportData=try! JSONSerialization.data(withJSONObject:report,options:[.prettyPrinted,.sortedKeys]);try! reportData.write(to:root.appendingPathComponent("native-report.json"))

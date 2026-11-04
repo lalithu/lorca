@@ -119,22 +119,26 @@ impl OllamaAgent {
             )?;
             let mut body = json!({"model":self.model,"messages":messages,"stream":true,"think":false,"keep_alive":-1,
                 "options":{"num_ctx":budget.context_limit,"num_predict":budget.output_limit,"temperature":0.1}});
-            if effort != crate::agent_types::ThinkingEffort::Off {
-                body.as_object_mut().unwrap().remove("think");
-                // Use advertised controls only. A template marker does not prove API support.
-                if let Ok(response) = self
+            let mut supported = false;
+            if effort != crate::agent_types::ThinkingEffort::Off
+                && let Ok(response) = self
                     .client
                     .post(format!("{}/api/show", self.host))
                     .json(&json!({"model":self.model}))
                     .timeout(Duration::from_secs(5))
                     .send()
                     .await
-                    && let Ok(info) = response.json::<Value>().await
-                    && let Some(setting) = thinking_setting(&info, effort)
-                {
-                    body["think"] = setting;
-                }
+                && let Ok(info) = response.json::<Value>().await
+                && let Some(setting) = thinking_setting(&info, effort)
+            {
+                supported = setting != json!(false);
+                body["think"] = setting;
             }
+            let mut reasoning = ReasoningStream::new(
+                updates,
+                effort != crate::agent_types::ThinkingEffort::Off,
+                supported,
+            );
             if !tools.is_empty() {
                 body["tools"] = json!(tools);
             }
@@ -188,6 +192,7 @@ impl OllamaAgent {
                     }
                     let v: Value =
                         serde_json::from_slice(&line).map_err(|_| "Invalid Ollama stream frame")?;
+                    reasoning.frame(&v);
                     let text = assembly.push(&v)?;
                     if !text.is_empty() {
                         updates(ModelUpdate::Text(text));
@@ -204,6 +209,7 @@ impl OllamaAgent {
             if done.is_none() && !pending.iter().all(u8::is_ascii_whitespace) {
                 let v: Value = serde_json::from_slice(&pending)
                     .map_err(|_| "Invalid final Ollama stream frame")?;
+                reasoning.frame(&v);
                 let text = assembly.push(&v)?;
                 if !text.is_empty() {
                     updates(ModelUpdate::Text(text));
@@ -216,6 +222,11 @@ impl OllamaAgent {
             let done=done.ok_or("Ollama ended without a completion acknowledgement; partial output was saved, actions were not replayed")?;
             let mut usage = crate::types::Usage::from_response(&done);
             usage.context_limit = self.allocated().await;
+            reasoning.finish(if done["done_reason"] == "length" {
+                "interrupted"
+            } else {
+                "complete"
+            });
             let observed_input = usage.prompt_tokens;
             updates(ModelUpdate::Usage(usage));
             if let Some(input) = observed_input {
@@ -421,6 +432,105 @@ fn thinking_setting(info: &Value, effort: crate::agent_types::ThinkingEffort) ->
         None
     }
 }
+// A bounded, batched presentation stream. It does not participate in parsing calls.
+struct ReasoningStream<'a> {
+    updates: &'a (dyn Fn(ModelUpdate) + Send + Sync),
+    id: String,
+    enabled: bool,
+    finished: bool,
+    seen: bool,
+    pending: String,
+    last: std::time::Instant,
+}
+impl<'a> ReasoningStream<'a> {
+    fn new(
+        updates: &'a (dyn Fn(ModelUpdate) + Send + Sync),
+        requested: bool,
+        supported: bool,
+    ) -> Self {
+        let stream = Self {
+            updates,
+            id: crate::types::id(),
+            enabled: requested && supported,
+            finished: false,
+            seen: false,
+            pending: String::new(),
+            last: std::time::Instant::now(),
+        };
+        stream.emit(
+            if !requested {
+                "off"
+            } else if !supported {
+                "unavailable"
+            } else {
+                "started"
+            },
+            String::new(),
+        );
+        stream
+    }
+    fn emit(&self, state: &str, text: String) {
+        (self.updates)(ModelUpdate::Reasoning {
+            request_id: self.id.clone(),
+            state: state.into(),
+            text,
+        });
+    }
+    fn frame(&mut self, frame: &Value) {
+        if !self.enabled || self.finished {
+            return;
+        }
+        if let Some(text) = frame["message"]["thinking"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+        {
+            self.seen = true;
+            self.pending.push_str(text);
+            if self.pending.len() >= 256 || self.last.elapsed() >= Duration::from_millis(50) {
+                self.flush();
+            }
+        }
+        if frame["message"]["content"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())
+            || frame["message"]["tool_calls"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty())
+        {
+            self.finish("complete");
+        }
+    }
+    fn flush(&mut self) {
+        if !self.pending.is_empty() {
+            let text = std::mem::take(&mut self.pending);
+            self.emit("delta", text);
+            self.last = std::time::Instant::now();
+        }
+    }
+    fn finish(&mut self, state: &str) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        if self.enabled {
+            self.flush();
+            self.emit(
+                if state == "complete" && !self.seen {
+                    "empty"
+                } else {
+                    state
+                },
+                String::new(),
+            );
+        }
+    }
+}
+impl Drop for ReasoningStream<'_> {
+    fn drop(&mut self) {
+        self.finish("interrupted");
+    }
+}
+
 #[cfg(test)]
 mod effort_tests {
     use super::*;
@@ -449,5 +559,72 @@ mod effort_tests {
             thinking_setting(&json!({"thinking":{"values":["low"]}}), High),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod reasoning_tests {
+    use super::*;
+    use std::sync::Mutex;
+    #[test]
+    fn enabled_stream_is_separate_ordered_and_finished_once() {
+        let updates = Mutex::new(Vec::new());
+        let callback = |u| updates.lock().unwrap().push(u);
+        {
+            let mut s = ReasoningStream::new(&callback, true, true);
+            s.frame(&json!({"message":{"thinking":"first "}}));
+            s.frame(&json!({"message":{"thinking":"second"}}));
+            s.frame(&json!({"message":{"content":"answer"}}));
+            s.finish("complete");
+        }
+        let values = updates.lock().unwrap();
+        let text = values
+            .iter()
+            .filter_map(|u| {
+                if let ModelUpdate::Reasoning { state, text, .. } = u {
+                    if state == "delta" {
+                        Some(text.as_str())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect::<String>();
+        assert_eq!(text, "first second");
+        assert_eq!(
+            values
+                .iter()
+                .filter(|u| matches!(u,ModelUpdate::Reasoning{state,..} if state=="complete"))
+                .count(),
+            1
+        );
+    }
+    #[test]
+    fn off_and_unsupported_never_emit_reasoning_even_if_provider_does() {
+        for (requested, supported) in [(false, true), (true, false)] {
+            let updates = Mutex::new(Vec::new());
+            let callback = |u| updates.lock().unwrap().push(u);
+            {
+                let mut s = ReasoningStream::new(&callback, requested, supported);
+                s.frame(&json!({"message":{"thinking":"not for display"}}));
+            }
+            assert!(!format!("{:?}", updates.lock().unwrap()).contains("not for display"));
+        }
+    }
+    #[test]
+    fn incomplete_and_empty_streams_have_explicit_states() {
+        let updates = Mutex::new(Vec::new());
+        let callback = |u| updates.lock().unwrap().push(u);
+        {
+            let _s = ReasoningStream::new(&callback, true, true);
+        }
+        assert!(format!("{:?}", updates.lock().unwrap()).contains("interrupted"));
+        {
+            let mut s = ReasoningStream::new(&callback, true, true);
+            s.finish("complete");
+        }
+        assert!(format!("{:?}", updates.lock().unwrap()).contains("empty"));
     }
 }

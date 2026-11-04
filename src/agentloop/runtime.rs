@@ -10,10 +10,16 @@ pub(super) struct State {
     pub(super) view: Option<TaskView>,
     cancel: watch::Sender<bool>,
     pending: Option<oneshot::Sender<Decision>>,
+    revision_task: Option<String>,
+    objective_revision: u64,
+    accepting_revisions: bool,
+    instructions: Vec<String>,
+    remaining_iterations: usize,
 }
 pub struct Agent {
     pub(super) state: Mutex<State>,
     changes: watch::Sender<u64>,
+    revisions: watch::Sender<u64>,
 }
 impl Default for Agent {
     fn default() -> Self {
@@ -24,8 +30,14 @@ impl Default for Agent {
                 view: None,
                 cancel,
                 pending: None,
+                revision_task: None,
+                objective_revision: 1,
+                accepting_revisions: true,
+                instructions: Vec::new(),
+                remaining_iterations: 0,
             }),
             changes,
+            revisions: watch::channel(0).0,
         }
     }
 }
@@ -110,7 +122,13 @@ impl Agent {
         let (cancel, rx) = watch::channel(false);
         s.cancel = cancel;
         s.pending = None;
+        s.revision_task = None;
+        s.objective_revision = 1;
+        s.accepting_revisions = true;
+        s.instructions = vec![task.clone()];
+        s.remaining_iterations = limits.iterations;
         s.view = Some(TaskView {
+            thinking: Vec::new(),
             revision: 0,
             conversation_id,
             request_id,
@@ -140,20 +158,58 @@ impl Agent {
         );
         let this = self.clone();
         tokio::spawn(async move {
-            let result = this
-                .run(
-                    workspace.as_ref(),
-                    &limits,
-                    inference,
-                    registry,
-                    rx.clone(),
-                    super::context::RunHistory {
-                        messages: history,
-                        evidence: resume_evidence,
-                        pending_task,
-                    },
-                )
-                .await;
+            let base_history = history.clone();
+            let mut history = history;
+            let mut evidence = resume_evidence;
+            let mut previous = pending_task;
+            let mut registry = registry;
+            registry.attach_inference(inference.clone());
+            let result = loop {
+                let result = this
+                    .run(
+                        workspace.as_ref(),
+                        &limits,
+                        inference.clone(),
+                        &registry,
+                        rx.clone(),
+                        super::context::RunHistory {
+                            messages: history.clone(),
+                            evidence: evidence.clone(),
+                            pending_task: previous.clone(),
+                        },
+                    )
+                    .await;
+                this.interrupt_reasoning();
+                if this.revision_pending()
+                    && let Err(error) = registry.settle_for_revision().await
+                {
+                    break Err(error);
+                }
+                let mut state = this.state.lock().unwrap();
+                let Some(task) = state.revision_task.take() else {
+                    state.accepting_revisions = false;
+                    break result;
+                };
+                let view = state.view.as_mut().unwrap();
+                previous = Some(super::intent::PendingTask {
+                    id: view.id.clone(),
+                    objective: view.task.clone(),
+                    contract: view.contract.clone(),
+                    completed: false,
+                });
+                evidence = view.transcript.clone();
+                history = base_history.clone();
+                history.extend(crate::context::complete_groups(view.transcript.clone()));
+                history.push(json!({"role":"user","content":task}));
+                view.task = task;
+                view.generating = false;
+                view.status = Status::Running;
+                drop(state);
+                this.emit(
+                    "task_revised",
+                    json!({"revision":this.objective_revision(),"plansInvalidated":true}),
+                );
+            };
             let (mut status, mut kind, mut result) = if *rx.borrow() {
                 (
                     Status::Cancelled,
@@ -193,6 +249,125 @@ impl Agent {
             this.changed();
         });
         Ok(id)
+    }
+    pub(crate) fn reasoning_update(
+        &self,
+        request_id: String,
+        stage: ThinkingStage,
+        state: String,
+        text: String,
+    ) {
+        let mut s = self.state.lock().unwrap();
+        let Some(view) = s.view.as_mut() else {
+            return;
+        };
+        if state == "started" || state == "off" || state == "unavailable" {
+            if view.thinking.len() >= 64 {
+                view.thinking.remove(0);
+            }
+            view.thinking.push(ThinkingBlock {
+                id: request_id.clone(),
+                stage,
+                state: if state == "started" {
+                    "running".into()
+                } else {
+                    state.clone()
+                },
+                text: String::new(),
+                after_sequence: view.audit.last().map_or(0, |e| e.sequence),
+                text_offset: view.assistant_text.len(),
+                truncated: false,
+            });
+        }
+        let used: usize = view.thinking.iter().map(|v| v.text.len()).sum();
+        if let Some(block) = view.thinking.iter_mut().find(|b| b.id == request_id) {
+            if state == "delta" {
+                let mut end = text.len().min(65536_usize.saturating_sub(used));
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                block.text.push_str(&text[..end]);
+                block.truncated |= end < text.len();
+            } else if state != "started" {
+                block.state = state;
+            }
+        }
+        drop(s);
+        self.changed();
+    }
+    fn interrupt_reasoning(&self) {
+        let mut s = self.state.lock().unwrap();
+        if let Some(v) = s.view.as_mut() {
+            for b in &mut v.thinking {
+                if b.state == "running" {
+                    b.state = "interrupted".into();
+                }
+            }
+        }
+    }
+    pub(super) fn begin_action(&self, revision: u64, data: Value) -> Result<()> {
+        let mut s = self.state.lock().unwrap();
+        if s.revision_task.is_some() || s.objective_revision != revision || *s.cancel.borrow() {
+            return Err("Task revised or cancelled before execution".into());
+        }
+        append_event(
+            s.view.as_mut().ok_or("Task disappeared")?,
+            "tool_started",
+            data,
+        );
+        drop(s);
+        self.changed();
+        Ok(())
+    }
+    pub(super) fn take_iteration(&self) -> bool {
+        let mut s = self.state.lock().unwrap();
+        if s.remaining_iterations == 0 {
+            false
+        } else {
+            s.remaining_iterations -= 1;
+            true
+        }
+    }
+    pub(super) fn instruction_history(&self) -> Vec<String> {
+        self.state.lock().unwrap().instructions.clone()
+    }
+    pub fn objective_revision(&self) -> u64 {
+        self.state.lock().unwrap().objective_revision
+    }
+    pub(super) fn revision_pending(&self) -> bool {
+        self.state.lock().unwrap().revision_task.is_some()
+    }
+    pub(super) fn revision_receiver(&self) -> watch::Receiver<u64> {
+        self.revisions.subscribe()
+    }
+    /// Queue only user-authored corrections. Actions already started settle before reuse.
+    pub fn revise(&self, owner: &str, task_id: &str, text: &str) -> Result<()> {
+        if text.trim().is_empty() || text.len() > 8000 {
+            return Err("Correction must contain 1–8000 bytes".into());
+        }
+        let mut s = self.state.lock().unwrap();
+        let v = s.view.as_ref().ok_or("No task")?;
+        if v.owner != owner || v.id != task_id || !v.status.active() {
+            return Err("No active task belongs to this session".into());
+        }
+        if !s.accepting_revisions {
+            return Err("Task is settling; submit the correction after completion".into());
+        }
+        if s.objective_revision >= 8 || s.revision_task.is_some() {
+            return Err("A correction is pending or the revision limit was reached".into());
+        }
+        s.objective_revision += 1;
+        s.revision_task = Some(text.into());
+        s.instructions.push(text.into());
+        s.pending = None; // Closing the approval channel invalidates even an outstanding prepared action.
+        s.view.as_mut().unwrap().approval = None;
+        self.revisions.send_modify(|n| *n += 1);
+        drop(s);
+        self.emit(
+            "task_revision_requested",
+            json!({"instruction":text,"revision":self.objective_revision()}),
+        );
+        Ok(())
     }
     pub fn cancel(&self, owner: &str, task_id: &str) -> Result<()> {
         let s = self.state.lock().unwrap();

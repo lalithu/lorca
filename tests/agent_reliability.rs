@@ -1387,13 +1387,16 @@ async fn malformed_top_level_tool_json_gets_one_safe_retry_with_current_schemas(
 
 #[tokio::test]
 async fn distinct_deep_read_paths_use_bounded_internal_discovery_without_model_bookkeeping() {
-    let root = module_fixture();
+    let root = empty_workspace();
+    std::fs::create_dir_all(root.0.join("src/tools/agent")).unwrap();
     let mut turns = Vec::new();
     for n in 0..4 {
         let path = format!("src/tools/agent/deep-{n}.rs");
         std::fs::write(root.0.join(&path), format!("// real module {n}\n")).unwrap();
         turns.push(tool("read_file", json!({"path":path})));
     }
+    // Keep the reads first so they still exercise automatic discovery.
+    turns.push(tool("list_directory", json!({"path":"src/tools/agent"})));
     turns.push(text(
         "The four actual modules contain their respective module numbers.",
     ));
@@ -1405,9 +1408,10 @@ async fn distinct_deep_read_paths_use_bounded_internal_discovery_without_model_b
     )
     .await;
     assert_eq!(view.status, Status::Completed, "{:?}", view.result);
-    assert_eq!(script.seen.lock().unwrap().len(), 5);
+    assert_eq!(script.seen.lock().unwrap().len(), 6);
     assert_eq!(read_results(&view).len(), 4);
     assert!(read_results(&view).iter().all(|r| r["ok"] == true));
+    assert!(read_results(&view).iter().all(|r| r["truncated"] == false));
     assert!(questions(&view).is_empty());
     assert!(!view.events.iter().any(|e| e.kind == "tool_failed"));
 }
@@ -1446,7 +1450,7 @@ async fn safe_path_spelling_does_not_bypass_empty_constraint_or_lose_completion_
 }
 #[tokio::test]
 async fn corrected_minor_errors_do_not_consume_a_stale_global_failure_budget() {
-    let root = Fixture::new();
+    let root = empty_workspace();
     let mut turns = Vec::new();
     for n in 0..6 {
         let path = format!("file-{n}.txt");
@@ -1454,6 +1458,7 @@ async fn corrected_minor_errors_do_not_consume_a_stale_global_failure_budget() {
         turns.push(tool("read_file", json!({"path":path,"unknown":true})));
         turns.push(tool("read_file", json!({"path":path})));
     }
+    turns.push(tool("list_directory", json!({"path":"."})));
     turns.push(text("The six files contain real content."));
     let (view, _, _) = drive_in(root, "Read the workspace files", turns, Decision::Deny).await;
     assert_eq!(view.status, Status::Completed, "{:?}", view.result);
@@ -1463,6 +1468,12 @@ async fn corrected_minor_errors_do_not_consume_a_stale_global_failure_budget() {
             .filter(|r| r["ok"] == true)
             .count(),
         6
+    );
+    assert!(
+        read_results(&view)
+            .iter()
+            .filter(|r| r["ok"] == true)
+            .all(|r| r["truncated"] == false)
     );
     assert!(questions(&view).is_empty());
 }

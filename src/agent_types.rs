@@ -64,6 +64,16 @@ pub trait Inference: Send + Sync {
     ) -> FutureResult<'a, Turn> {
         self.generate_stream(messages, tools, updates)
     }
+    /// Same inference request, tagged explicitly by the interpretation caller for presentation.
+    fn generate_interpretation<'a>(
+        &'a self,
+        messages: &'a [Value],
+        tools: &'a [Value],
+        budget: crate::context::GenerationBudget,
+        updates: &'a (dyn Fn(ModelUpdate) + Send + Sync),
+    ) -> FutureResult<'a, Turn> {
+        self.generate_budgeted(messages, tools, budget, updates)
+    }
     fn capacity(&self) -> FutureResult<'_, Option<u64>> {
         Box::pin(async { Ok(None) })
     }
@@ -89,6 +99,11 @@ impl ThinkingEffort {
 pub enum ModelUpdate {
     Text(String),
     Usage(crate::types::Usage),
+    Reasoning {
+        request_id: String,
+        state: String,
+        text: String,
+    },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
@@ -151,9 +166,32 @@ pub struct Approval {
     pub tool: String,
     pub action: Value,
 }
+/// Trusted caller metadata; never inferred from generated reasoning.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingStage {
+    Interpretation,
+    #[default]
+    Execution,
+}
+/// Ephemeral presentation data. Never added to transcript, audit, or model context.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThinkingBlock {
+    pub id: String,
+    #[serde(default)]
+    pub stage: ThinkingStage,
+    pub state: String,
+    pub text: String,
+    pub after_sequence: u64,
+    pub text_offset: usize,
+    pub truncated: bool,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskView {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub thinking: Vec<ThinkingBlock>,
     #[serde(default)]
     pub revision: u64,
     #[serde(default)]

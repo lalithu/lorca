@@ -40,3 +40,56 @@ async fn installed_model_returns_structured_calls_with_each_effort() {
         println!("PASS {model} {effort:?}: one complete read_file call; no tool executed");
     }
 }
+
+#[tokio::test]
+#[ignore = "requires the installed local model; prints counts, never reasoning text"]
+async fn thinking_visibility_on_off_identical_prompt() {
+    use lorca::agent::ModelUpdate;
+    use std::{sync::Mutex, time::Instant};
+    let model = std::env::var("LORCA_LIVE_MODEL").expect("Set the installed model identifier");
+    let provider = OllamaAgent {
+        client: reqwest::Client::new(),
+        host: "http://127.0.0.1:11434".into(),
+        model,
+    };
+    let messages = [
+        json!({"role":"user","content":"What is 17 multiplied by 23? Answer with the integer only."}),
+    ];
+    for effort in [ThinkingEffort::Off, ThinkingEffort::Nominal] {
+        let stats = Mutex::new((0usize, None::<lorca::types::Usage>));
+        let updates = |update| {
+            let mut stats = stats.lock().unwrap();
+            match update {
+                ModelUpdate::Reasoning { state, text, .. } if state == "delta" => {
+                    stats.0 += text.len()
+                }
+                ModelUpdate::Usage(usage) => stats.1 = Some(usage),
+                _ => {}
+            }
+        };
+        let start = Instant::now();
+        let turn = provider
+            .generate_for_effort(
+                &messages,
+                &[],
+                GenerationBudget::new(65536, false),
+                effort,
+                &updates,
+            )
+            .await
+            .unwrap();
+        let stats = stats.lock().unwrap();
+        assert!(turn.content.contains("391"), "Expected arithmetic result");
+        assert!(turn.calls.is_empty());
+        if effort == ThinkingEffort::Off {
+            assert_eq!(stats.0, 0)
+        } else {
+            assert!(stats.0 > 0, "Installed Qwen should emit supported thinking")
+        }
+        println!(
+            "{}",
+            json!({"mode":format!("{effort:?}"),"wallSeconds":start.elapsed().as_secs_f64(),"reasoningBytes":stats.0,"usage":stats.1,"publicAnswer":turn.content})
+        );
+        assert!(!turn.message.to_string().contains("thinking"));
+    }
+}

@@ -21,6 +21,9 @@ pub struct Prepared {
     pub payload: Value,
 }
 pub trait Tool: Send + Sync {
+    fn settle_for_revision(&self) -> FutureResult<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
     fn schema(&self) -> Value;
     fn prepare_optional(
         &self,

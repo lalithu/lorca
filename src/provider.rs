@@ -31,6 +31,16 @@ pub fn chat_body(model: &str, messages: Vec<Value>) -> Value {
     json!({ "model": model, "messages": messages, "stream": true, "think": false, "keep_alive": -1 })
 }
 
+pub fn chat_body_budgeted(
+    model: &str,
+    messages: Vec<Value>,
+    budget: crate::context::GenerationBudget,
+) -> Value {
+    let mut body = chat_body(model, messages);
+    body["options"] = json!({"num_ctx":budget.context_limit,"num_predict":budget.output_limit});
+    body
+}
+
 pub fn same_model(left: &str, right: &str) -> bool {
     fn qualified(name: &str) -> String {
         if name.rsplit('/').next().unwrap_or(name).contains(':') {

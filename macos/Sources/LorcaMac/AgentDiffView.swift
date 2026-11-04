@@ -1,9 +1,12 @@
 import SwiftUI
 
-struct AgentDiffView: View {
+struct AgentDiffView: View, Equatable {
+    static func ==(lhs:Self,rhs:Self)->Bool {lhs.diff==rhs.diff}
     let diff: String
     @State private var expandedGaps = Set<Int>()
     var body: some View {
+        VStack(alignment:.leading,spacing:6) {
+        HStack {Label("Code changes",systemImage:"doc.text").font(.caption).foregroundStyle(.secondary);Spacer();Button("Copy patch") {NativeClipboard.copy(diff)}.buttonStyle(.borderless).font(.caption)}
         ScrollView([.horizontal, .vertical]) {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(UnifiedDiff(diff).rows()) { row in
@@ -31,6 +34,7 @@ struct AgentDiffView: View {
         .background(.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
         .accessibilityLabel("Complete proposed code diff")
         .onChange(of: diff) { _, _ in expandedGaps.removeAll() }
+        }
     }
     private func diffLine(_ line: AgentDiffLine) -> some View {
         HStack(alignment: .top, spacing: 10) {
@@ -53,14 +57,22 @@ struct AgentDiffView: View {
 }
 struct AgentOutputView: View {
     let text: String
+    var copyLabel = "Copy output"
+    @State private var showFull = false
+    static func preview(_ text:String)->String {String(text.prefix(12000))}
     var body: some View {
-        ScrollView([.horizontal, .vertical]) {
-            Text(text).font(.system(size: 11, design: .monospaced))
-                .textSelection(.enabled).fixedSize(horizontal: true, vertical: false)
-                .frame(maxWidth: .infinity, alignment: .leading).padding(10)
+        VStack(alignment:.leading,spacing:5) {
+            HStack {
+                if text.count>12000 {Button(showFull ? "Show preview":"Show full captured output") {showFull.toggle()}.buttonStyle(.borderless)}
+                Spacer();Button(copyLabel) {NativeClipboard.copy(text)}.buttonStyle(.borderless).accessibilityLabel(copyLabel)
+            }.font(.system(size:10)).foregroundStyle(.secondary)
+            ScrollView([.horizontal, .vertical]) {
+                Text(showFull ? text:Self.preview(text)).font(.system(size:11,design:.monospaced))
+                    .textSelection(.enabled).fixedSize(horizontal:true,vertical:false)
+                    .frame(maxWidth:.infinity,alignment:.leading).padding(10)
+            }.frame(minHeight:35,maxHeight:220)
+            .background(.primary.opacity(0.035),in:RoundedRectangle(cornerRadius:8))
+            .accessibilityLabel("Captured tool output")
         }
-        .frame(minHeight: 35, maxHeight: 220)
-        .background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
-        .accessibilityLabel("Tool output")
     }
 }

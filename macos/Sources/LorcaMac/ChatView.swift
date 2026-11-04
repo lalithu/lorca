@@ -23,7 +23,7 @@ struct ChatView: View {
                                             if !message.attachments.isEmpty {
                                                 AttachmentStrip(attachments: message.attachments, storage: store.imageStore, compact: false)
                                             }
-                                            AgentActivityView(store: store.agent, taskID: task, savedMessage: message, textSize: textSize, onChoose: message.id == store.messages.last?.id ? { store.draft = $0 } : nil, onContinue: message.id == store.messages.last?.id ? { store.continueAgentTask(task) } : nil)
+                                            AgentActivityView(store: store.agent, taskID: task, savedMessage: message, textSize: textSize, onChoose: message.id == store.messages.last?.id ? { store.draft = $0; store.send() } : nil, onContinue: message.id == store.messages.last?.id ? { store.continueAgentTask(task) } : nil)
                                         }
                                     } else { messageView(message) }
                                 }
@@ -105,15 +105,8 @@ struct ChatView: View {
     }
 
     @ViewBuilder private func messageView(_ message: ChatMessage) -> some View {
-        if !compact && message.role == .user {
-            HStack(alignment: .top, spacing: 0) {
-                Spacer(minLength: 28)
-                UserMessageLayout {
-                    messageContent(message)
-                        .padding(.horizontal, 14).padding(.vertical, 11)
-                        .background(.primary.opacity(0.065), in: RoundedRectangle(cornerRadius: 16))
-                }
-            }.frame(maxWidth: .infinity, alignment: .trailing)
+        if message.role == .user {
+            UserMessageBubble(text: message.content) { messageContent(message) }
         } else { messageContent(message).frame(maxWidth: .infinity, alignment: .leading) }
     }
 
@@ -122,7 +115,7 @@ struct ChatView: View {
             if compact {
                 Text(message.role == .user ? "YOU" : "LORCA")
                     .font(.system(size: 9, weight: .bold)).tracking(1.2)
-                    .foregroundStyle(message.role == .user ? Color.secondary : .lorcaBlue)
+                    .foregroundStyle(message.role == .user ? Color.white.opacity(0.8) : .lorcaBlue)
             }
             if !message.attachments.isEmpty {
                 AttachmentStrip(attachments: message.attachments, storage: store.imageStore, compact: compact)
@@ -130,10 +123,10 @@ struct ChatView: View {
             if message.role == .assistant && message.content.isEmpty && (store.isGenerating || store.currentAgentActive) {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.mini)
-                    Text("Thinking…").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text("Generating response…").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
             } else {
-                MarkdownText(text: message.content, size: textSize).textSelection(.enabled)
+                MarkdownText(text: message.content, size: textSize, showsCopyButton: message.role != .user, userMessage: message.role == .user).equatable().textSelection(.enabled)
             }
         }
     }
@@ -181,5 +174,24 @@ private struct UserMessageLayout: Layout {
     }
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         subviews.first?.place(at: bounds.origin, proposal: ProposedViewSize(bounds.size))
+    }
+}
+
+// Reused by both chat sizes and native interaction acceptance.
+struct UserMessageBubble<Content: View>: View {
+    let text: String
+    @ViewBuilder var content: Content
+    var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            Spacer(minLength: 28)
+            UserMessageLayout {
+                content.padding(.horizontal, 14).padding(.vertical, 11)
+                    .background {
+                        RoundedRectangle(cornerRadius: 16).fill(Color(nsColor: .systemBlue))
+                            .contextMenu { Button("Copy message") { NativeClipboard.copy(text) } }
+                    }
+                    .foregroundStyle(.white)
+            }
+        }.frame(maxWidth: .infinity, alignment: .trailing)
     }
 }

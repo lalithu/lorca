@@ -149,17 +149,18 @@ impl Core {
                 .find(|m| m.role == "user")
                 .map(|m| m.content.as_str())
                 .unwrap_or("");
-            crate::context::Context::default().fit(
+            let budget = crate::context::GenerationBudget::new(capacity, false);
+            crate::context::Context::default().fit_budgeted(
                 &mut messages,
                 &[],
-                capacity,
+                budget,
                 objective,
                 &json!({}),
             )?;
             provider::stream_reply(
                 self.client.clone(),
                 &host,
-                provider::chat_body(&model, messages),
+                provider::chat_body_budgeted(&model, messages, budget),
                 &tx,
             )
             .await

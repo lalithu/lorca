@@ -27,6 +27,24 @@ impl Drop for Sessions {
     }
 }
 impl Sessions {
+    pub async fn settle_for_revision(&self) -> Result<()> {
+        // Existing command deadlines remain authoritative. Never start revised effects
+        // while an earlier asynchronous command can still write the workspace.
+        let sessions = self
+            .records
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for session in sessions {
+            while session.state.lock().unwrap().result.is_none() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        Ok(())
+    }
+
     pub fn require(&self, id: &str) -> Result<()> {
         self.record(id).map(|_| ())
     }
@@ -151,6 +169,35 @@ mod tests {
         .unwrap();
         std::fs::write(root.join("src/lib.rs"), body).unwrap();
         root
+    }
+    #[tokio::test]
+    async fn revision_waits_for_existing_command_to_finish_before_new_effects() {
+        let root = fixture(
+            "#[test] fn slow(){std::thread::sleep(std::time::Duration::from_millis(150));std::fs::write(\"settled.txt\",\"done\").unwrap();}",
+        );
+        let workspace = Workspace::new(&root).unwrap();
+        let registry = Registry::default();
+        let limits = Limits::default();
+        let (_tx, cancel) = watch::channel(false);
+        let tool = registry.get("exec_command").unwrap();
+        let prepared = tool
+            .prepare(
+                &workspace,
+                json!({"executable":"cargo","arguments":["test"],"yield_time_ms":0}),
+                &limits,
+            )
+            .unwrap();
+        let result = tool
+            .execute(&workspace, &prepared, &limits, cancel, &mut |_| {})
+            .await
+            .unwrap();
+        assert_eq!(result["running"], true);
+        registry.settle_for_revision().await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("settled.txt")).unwrap(),
+            "done"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[tokio::test]
     async fn sessions_poll_and_accept_approved_stdin_and_report_exit() {

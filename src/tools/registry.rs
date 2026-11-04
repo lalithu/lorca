@@ -67,6 +67,13 @@ impl Default for Registry {
     }
 }
 impl Registry {
+    pub(crate) async fn settle_for_revision(&self) -> Result<()> {
+        for tool in self.tools.values() {
+            tool.settle_for_revision().await?;
+        }
+        Ok(())
+    }
+
     /// Explicit custom registries retain their original schemas and capabilities (e.g. Job Apps).
     pub fn empty() -> Self {
         Self {

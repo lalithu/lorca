@@ -13,6 +13,10 @@ pub async fn execute(
     cancel: watch::Receiver<bool>,
     authority: &Authority,
 ) -> Result<Value> {
+    let revision = agent.objective_revision();
+    if agent.revision_pending() {
+        return Err("Task revised".into());
+    }
     authority.validate(call)?;
     let tool = registry.get(&call.name)?;
     let mut prepared = tool.prepare_optional(w, call.arguments.clone(), limits)?;
@@ -26,7 +30,7 @@ pub async fn execute(
     }
     let task_id = agent.snapshot().ok_or("Task disappeared")?.id;
     prepared.action["taskId"] = json!(task_id);
-    prepared.action["objectiveRevision"] = json!(1);
+    prepared.action["objectiveRevision"] = json!(revision);
     if prepared.approval {
         match agent
             .approval(call, prepared.action.clone(), cancel.clone())
@@ -42,10 +46,13 @@ pub async fn execute(
     if *cancel.borrow() || agent.snapshot().is_none_or(|v| v.id != task_id) {
         return Err("Cancelled".into());
     }
-    agent.emit(
-        "tool_started",
+    if agent.revision_pending() || agent.objective_revision() != revision {
+        return Err("Task revised".into());
+    }
+    agent.begin_action(
+        revision,
         json!({"callId":call.id,"tool":call.name,"action":prepared.action}),
-    );
+    )?;
     let mut output = |data| agent.emit("terminal_output", json!({"callId":call.id,"output":data}));
     let result = tool
         .execute_optional(w, &prepared, limits, cancel, &mut output)
@@ -144,6 +151,7 @@ mod contract_policy_tests {
             outcomes: vec![super::super::intent::Outcome {
                 kind: super::super::intent::OutcomeKind::Edit,
                 target: Some("CHOSEN.md".into()),
+                inspection: None,
             }],
             edit_targets: vec!["CHOSEN.md".into()],
             forbidden_targets: vec![],

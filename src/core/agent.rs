@@ -92,6 +92,39 @@ impl Inference for CoreInference {
         budget: crate::context::GenerationBudget,
         updates: &'a (dyn Fn(ModelUpdate) + Send + Sync),
     ) -> FutureResult<'a, Turn> {
+        self.generate_at_stage(
+            messages,
+            tools,
+            budget,
+            updates,
+            crate::agent_types::ThinkingStage::Execution,
+        )
+    }
+    fn generate_interpretation<'a>(
+        &'a self,
+        messages: &'a [Value],
+        tools: &'a [Value],
+        budget: crate::context::GenerationBudget,
+        updates: &'a (dyn Fn(ModelUpdate) + Send + Sync),
+    ) -> FutureResult<'a, Turn> {
+        self.generate_at_stage(
+            messages,
+            tools,
+            budget,
+            updates,
+            crate::agent_types::ThinkingStage::Interpretation,
+        )
+    }
+}
+impl CoreInference {
+    fn generate_at_stage<'a>(
+        &'a self,
+        messages: &'a [Value],
+        tools: &'a [Value],
+        budget: crate::context::GenerationBudget,
+        updates: &'a (dyn Fn(ModelUpdate) + Send + Sync),
+        stage: crate::agent_types::ThinkingStage,
+    ) -> FutureResult<'a, Turn> {
         Box::pin(async move {
             self.ready().await?;
             let provider = provider::agent::OllamaAgent {
@@ -99,12 +132,24 @@ impl Inference for CoreInference {
                 host: self.core.host(&self.session)?,
                 model: self.model.clone(),
             };
+            let forward = |update| match update {
+                ModelUpdate::Reasoning {
+                    request_id,
+                    state,
+                    text,
+                } => self
+                    .core
+                    .agent()
+                    .reasoning_update(request_id, stage, state, text),
+                other => updates(other),
+            };
             provider
-                .generate_for_effort(messages, tools, budget, self.effort, updates)
+                .generate_for_effort(messages, tools, budget, self.effort, &forward)
                 .await
         })
     }
 }
+
 impl Core {
     pub(super) fn agent_command(
         self: &Arc<Self>,
@@ -114,6 +159,20 @@ impl Core {
     ) -> Result<Value> {
         match op {
             "agent_start" => self.start_agent(session, v),
+            "agent_revise" => {
+                self.agent
+                    .revise(session, text(v, "taskId")?, text(v, "task")?)?;
+                Ok(json!({"accepted":true,"taskId":v["taskId"]}))
+            }
+            "agent_status" => {
+                let task = self.agent.snapshot().ok_or("No active task")?;
+                if task.owner != session {
+                    return Err("Task belongs to another session".into());
+                }
+                Ok(
+                    json!({"taskId":task.id,"status":task.status,"task":task.task,"revision":self.agent.objective_revision()}),
+                )
+            }
             "agent_snapshot" => Ok(json!(self.agent.snapshot())),
             "agent_decide" => {
                 let decision: Decision = serde_json::from_value(v["decision"].clone())

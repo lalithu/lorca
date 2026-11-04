@@ -225,3 +225,143 @@ fn recovery_falls_back_to_smaller_steps_when_larger_output_would_displace_the_go
     assert_eq!(messages, original);
     chosen.check(context.tokens(&messages, &[])).unwrap();
 }
+
+fn long_history(latest: &str) -> Vec<serde_json::Value> {
+    let mut v = vec![json!({"role":"system","content":"Never infer approval."})];
+    for n in 0..12 {
+        v.push(json!({"role":"user","content":format!("old task {n}")}));
+        v.push(json!({"role":"assistant","content":"old output ".repeat(2000)}));
+    }
+    v.push(json!({"role":"user","content":latest}));
+    v
+}
+#[test]
+fn latest_7534_bytes_retains_its_final_constraint() {
+    let task = format!("{}PRESERVE_FINAL_CONSTRAINT", "a".repeat(7510));
+    let mut m = long_history(&task);
+    Context::default()
+        .fit(&mut m, &[], 8192, "objective", &json!({}))
+        .unwrap();
+    assert!(m.iter().any(|v| v["content"] == task));
+}
+#[test]
+fn protected_overflow_is_transactional() {
+    let task = "constraint ".repeat(20000);
+    let mut m = long_history(&task);
+    let before = m.clone();
+    let mut c = Context::default();
+    assert!(
+        c.fit(&mut m, &[], 4096, "objective", &json!({}))
+            .unwrap_err()
+            .contains("essential")
+    );
+    assert_eq!(m, before);
+    assert_eq!(c.compactions, 0);
+}
+fn tool_result() -> serde_json::Value {
+    json!({"role":"tool","tool_call_id":"original","tool_name":"exec_command","content":json!({"ok":false,"verified":false,"exitCode":17,"sessionId":"s","running":false,"output":"log ".repeat(5000)}).to_string()})
+}
+#[test]
+fn large_json_result_reduction_is_parseable() {
+    let mut m = tool_result();
+    lorca::context::reduce_tool_message(&mut m, 1200);
+    assert!(serde_json::from_str::<serde_json::Value>(m["content"].as_str().unwrap()).is_ok());
+}
+#[test]
+fn reduction_preserves_outcomes_and_correlation() {
+    let mut m = tool_result();
+    lorca::context::reduce_tool_message(&mut m, 1200);
+    let v: serde_json::Value = serde_json::from_str(m["content"].as_str().unwrap()).unwrap();
+    assert_eq!(v["exitCode"], 17);
+    assert_eq!(v["verified"], false);
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["originalCallId"], "original");
+    assert_eq!(m["tool_call_id"], "original");
+}
+#[test]
+fn structured_reduction_is_idempotent() {
+    let mut m = tool_result();
+    lorca::context::reduce_tool_message(&mut m, 1200);
+    let before = m.clone();
+    lorca::context::reduce_tool_message(&mut m, 1200);
+    assert_eq!(m, before);
+}
+#[test]
+fn complete_exchanges_retain_order() {
+    let mut m = long_history("current");
+    Context::default()
+        .fit(&mut m, &[], 8192, "current", &json!({}))
+        .unwrap();
+    let users: Vec<_> = m
+        .iter()
+        .filter_map(|v| v["content"].as_str())
+        .filter(|s| s.starts_with("old task"))
+        .collect();
+    assert!(users.windows(2).all(|w| {
+        w[0].split_whitespace()
+            .last()
+            .unwrap()
+            .parse::<u32>()
+            .unwrap()
+            < w[1]
+                .split_whitespace()
+                .last()
+                .unwrap()
+                .parse::<u32>()
+                .unwrap()
+    }));
+    assert_eq!(m.last().unwrap()["content"], "current");
+}
+#[test]
+fn orphaned_results_reject_compaction() {
+    let mut m = long_history("current");
+    m.push(tool_result());
+    let before = m.clone();
+    assert!(
+        Context::default()
+            .fit(&mut m, &[], 8192, "current", &json!({}))
+            .is_err()
+    );
+    assert_eq!(m, before);
+}
+#[test]
+fn objective_and_active_corrections_survive() {
+    let mut m = long_history("Actually preserve the exact filename and do not run commands.");
+    Context::default().fit(&mut m,&[],8192,"Repair the code",&json!({"activeInstructions":["Do not change other files","Use the latest correction"]})).unwrap();
+    let s = serde_json::to_string(&m).unwrap();
+    for text in [
+        "Repair the code",
+        "Actually preserve",
+        "Do not change other files",
+        "Use the latest correction",
+    ] {
+        assert!(s.contains(text));
+    }
+}
+#[test]
+fn archive_bytes_are_unchanged_by_fitting() {
+    let archive = long_history("current");
+    let bytes = serde_json::to_vec(&archive).unwrap();
+    let mut projected = archive.clone();
+    Context::default()
+        .fit(&mut projected, &[], 8192, "current", &json!({}))
+        .unwrap();
+    assert_eq!(serde_json::to_vec(&archive).unwrap(), bytes);
+}
+#[test]
+fn exchange_policy_fits_small_and_65k_budgets() {
+    for n in [4096, 8192, 65536] {
+        let mut m = long_history("current instruction");
+        let mut c = Context::default();
+        let b = lorca::context::GenerationBudget::new(n, false);
+        c.fit_budgeted(&mut m, &[], b, "current instruction", &json!({}))
+            .unwrap();
+        b.check(c.tokens(&m, &[])).unwrap();
+        let before = m.clone();
+        assert!(
+            !c.fit_budgeted(&mut m, &[], b, "current instruction", &json!({}))
+                .unwrap()
+        );
+        assert_eq!(m, before);
+    }
+}

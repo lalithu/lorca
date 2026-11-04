@@ -32,6 +32,86 @@ impl Core {
     pub(super) fn start_agent(self: &Arc<Self>, session: &str, v: &Value) -> Result<Value> {
         let mut s = self.state.lock().unwrap();
         let si = Self::session_index(&s, session)?;
+        if let Some(active) = self.agent.snapshot().filter(|a| a.status.active()) {
+            let instruction = v["task"].as_str().unwrap_or("").trim();
+            let same = active.owner == session
+                && active.conversation_id.as_deref() == v["conversationId"].as_str()
+                && active.workspace == v["workspace"].as_str().unwrap_or("");
+            if same
+                && let Some(chat) = s
+                    .view
+                    .conversations
+                    .iter()
+                    .find(|c| Some(c.id.as_str()) == active.conversation_id.as_deref())
+                && let Some(prior) = chat
+                    .messages
+                    .iter()
+                    .find(|m| m.extra.get("agentRequestId") == v.get("requestId"))
+            {
+                return Ok(json!({"taskId":active.id,"alreadyAccepted":true,"request":prior.id}));
+            }
+            if same
+                && matches!(
+                    instruction.to_ascii_lowercase().trim_end_matches('?'),
+                    "status" | "what are you doing" | "what is the status" | "what's the status"
+                )
+            {
+                let ci = Self::chat_index(
+                    &s,
+                    active.conversation_id.as_deref().ok_or("No conversation")?,
+                )?;
+                let mut chat = s.view.conversations[ci].clone();
+                let mut message = Message::new("user", instruction.into());
+                message
+                    .extra
+                    .insert("agentRequestId".into(), v["requestId"].clone());
+                chat.messages.push(message);
+                chat.messages.push(Message::new(
+                    "assistant",
+                    format!(
+                        "Current task: {}. Status: {:?}. Task revision {}.",
+                        active.task,
+                        active.status,
+                        self.agent.objective_revision()
+                    ),
+                ));
+                chat.draft.clear();
+                self.repository.save(&chat).map_err(|e| e.to_string())?;
+                s.view.conversations[ci] = chat;
+                self.publish(&mut s);
+                return Ok(json!({"taskId":active.id,"status":active.status,"statusOnly":true}));
+            }
+            if same
+                && [
+                    "actually",
+                    "correction:",
+                    "instead",
+                    "now change",
+                    "change the",
+                    "correct ",
+                ]
+                .iter()
+                .any(|p| instruction.to_ascii_lowercase().starts_with(p))
+            {
+                let ci = Self::chat_index(
+                    &s,
+                    active.conversation_id.as_deref().ok_or("No conversation")?,
+                )?;
+                let mut chat = s.view.conversations[ci].clone();
+                let mut message = Message::new("user", instruction.into());
+                message
+                    .extra
+                    .insert("agentRequestId".into(), v["requestId"].clone());
+                chat.messages.push(message);
+                chat.draft.clear();
+                self.repository.save(&chat).map_err(|e| e.to_string())?;
+                self.agent.revise(session, &active.id, instruction)?;
+                s.view.conversations[ci] = chat;
+                self.publish(&mut s);
+                return Ok(json!({"taskId":active.id,"revised":true}));
+            }
+        }
+
         let model = v["model"]
             .as_str()
             .unwrap_or(&s.view.sessions[si].model)

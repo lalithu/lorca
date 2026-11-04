@@ -17,7 +17,7 @@ impl Agent {
         w: Option<&Workspace>,
         limits: &Limits,
         inference: Arc<dyn Inference>,
-        registry: Registry,
+        registry: &Registry,
         mut cancel: watch::Receiver<bool>,
         history: super::context::RunHistory,
     ) -> Result<String> {
@@ -26,8 +26,6 @@ impl Agent {
             evidence: mut resume_evidence,
             pending_task,
         } = history;
-        let mut registry = registry;
-        registry.attach_inference(inference.clone());
         let mut task = self.snapshot().unwrap().task;
         if let Some(w) = w {
             w.restore_references(&history);
@@ -63,15 +61,23 @@ impl Agent {
         let mut status_only = false;
         let interpreted = inference.interprets_tasks() && capacity.is_some();
         if interpreted {
-            let intent = super::intent::interpret(
+            let mut intent = super::intent::interpret(
                 inference.as_ref(),
                 &task,
                 pending_task.as_ref(),
+                &registry
+                    .schemas()
+                    .iter()
+                    .filter_map(|s| s["function"]["name"].as_str().map(str::to_owned))
+                    .collect::<Vec<_>>(),
                 capacity.unwrap(),
                 limits,
                 cancel.clone(),
             )
             .await?;
+            if self.objective_revision() > 1 {
+                intent.relation = super::intent::Relation::Correct;
+            }
             if pending_task.as_ref().is_some_and(|p| p.completed) {
                 resume_evidence.clear();
             }
@@ -122,10 +128,17 @@ impl Agent {
                 task.clone()
             };
             contract.objective.requested_outcome = intent.objective.clone();
-            contract.objective.completion = super::verification::Requirements::interpreted(
-                &format!("{}\n{}", intent.objective, task),
-                &intent,
-            );
+            contract.objective.completion =
+                super::verification::Requirements::interpreted(&task, &intent);
+            if continuing
+                && let Some(previous) = &pending_task
+                && let Some(original) = previous
+                    .contract
+                    .as_ref()
+                    .and_then(|c| c["objective"]["original_instruction"].as_str())
+            {
+                contract.objective.completion.retain_inspection(original);
+            }
             contract.authority = if continuing && let Some(previous) = &pending_task {
                 super::authority::Authority::continued(
                     previous,
@@ -140,11 +153,12 @@ impl Agent {
                     &contract.objective.completion,
                 )
             };
-            self.emit("task_interpreted",json!({"interpretation":intent,"parent":if continuing {pending_task.as_ref().map(|p|&p.id)}else{None},"revision":1}));
+            self.emit("task_interpreted",json!({"interpretation":intent,"parent":if continuing {pending_task.as_ref().map(|p|&p.id)}else{None},"revision":self.objective_revision()}));
             task = intent.objective.clone();
             self.state.lock().unwrap().view.as_mut().unwrap().task = task.clone();
             let mut saved = json!(contract);
-            saved["revision"] = json!(1);
+            saved["revision"] = json!(self.objective_revision());
+            saved["instructionHistory"] = json!(self.instruction_history());
             saved["relation"] = json!(intent.relation);
             if intent.relation == super::intent::Relation::New {
                 saved["supersedesTaskId"] = json!(
@@ -183,7 +197,7 @@ impl Agent {
             if let Some(question) = intent.clarification.as_ref() {
                 return super::recovery::question(
                     self,
-                    &registry,
+                    registry,
                     w,
                     limits,
                     cancel.clone(),
@@ -228,16 +242,28 @@ impl Agent {
         let mut progress = HashSet::new();
         let mut observations = HashSet::new();
         let mut unchanged_observations = 0;
-        let (mut plan, mut working_checkpoint) = super::context::working_notes(&resume_evidence);
+        let (mut plan, mut working_checkpoint) = if self.objective_revision() > 1 {
+            (Value::Null, Value::Null)
+        } else {
+            super::context::working_notes(&resume_evidence)
+        };
         let mut checkpoint_turns = 0;
         let mut invalid_turns = 0;
+        let mut overflow_retries = 0;
         let mut expanded_output = false;
         let mut truncation_retries = 0;
         // A successful read must not renew the malformed-runtime-call allowance.
         let mut interrupted_tool_retries = 0;
         let mut finalizing = false;
         let mut finalization_used = false;
+        let mut revisions = self.revision_receiver();
         for iteration in 1..=limits.iterations {
+            if !self.take_iteration() {
+                break;
+            }
+            if self.revision_pending() {
+                return Err("Task revised".into());
+            }
             if *cancel.borrow() {
                 return Err("Cancelled".into());
             }
@@ -260,6 +286,7 @@ impl Agent {
             operational["unresolved"] = json!(unresolved.keys().collect::<Vec<_>>());
             operational["denied"] = json!(denied);
             let schemas = registry.active_schemas();
+            operational["activeInstructions"] = json!(self.instruction_history());
             operational["unavailableTools"] = json!(registry.unavailable());
             let offered = if finalizing || status_only {
                 &[][..]
@@ -305,12 +332,16 @@ impl Agent {
                 match update {
                     ModelUpdate::Text(text) => v.assistant_text.push_str(&text),
                     ModelUpdate::Usage(usage) => v.usage = usage,
+                    ModelUpdate::Reasoning { .. } => {}
                 }
                 drop(s);
                 self.changed();
             };
             let before = self.snapshot().unwrap().assistant_text.len();
-            let generated = tokio::select! {biased; _=cancel.changed()=>return Err("Cancelled".into()),result=tokio::time::timeout(Duration::from_secs(model_seconds),inference.generate_budgeted(&messages,offered,budget,&updates))=>result.map_err(|_|"Model request timed out")?};
+            let generated = tokio::select! {biased; _=revisions.changed()=>return Err("Task revised".into()), _=cancel.changed()=>return Err("Cancelled".into()),result=tokio::time::timeout(Duration::from_secs(model_seconds),inference.generate_budgeted(&messages,offered,budget,&updates))=>result.map_err(|_|"Model request timed out")?};
+            if self.revision_pending() {
+                return Err("Task revised".into());
+            }
             let turn = match generated {
                 Ok(turn) => turn,
                 Err(error)
@@ -329,7 +360,7 @@ impl Agent {
                     if invalid_turns >= 1 {
                         return super::recovery::guidance(
                             self,
-                            &registry,
+                            registry,
                             w,
                             limits,
                             cancel.clone(),
@@ -340,6 +371,25 @@ impl Agent {
                     }
                     invalid_turns += 1;
                     messages.push(json!({"role":"user","content":format!("No tool executed: {error}. Return a native tool call whose arguments are a JSON object, using the exact current tool schema. Do not serialize nested arrays or objects as strings. Correct this once; preserve the original task.")}));
+                    continue;
+                }
+                Err(error)
+                    if overflow_retries < 2
+                        && [
+                            "context length",
+                            "context window",
+                            "input length",
+                            "Context cannot fit essential input",
+                        ]
+                        .iter()
+                        .any(|s| error.contains(s)) =>
+                {
+                    overflow_retries += 1;
+                    context.confirm(estimated, estimated.saturating_mul(5) / 4);
+                    self.emit(
+                        "context_overflow_retry",
+                        json!({"attempt":overflow_retries,"error":error}),
+                    );
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -446,7 +496,7 @@ impl Agent {
                 {
                     return super::recovery::question(
                         self,
-                        &registry,
+                        registry,
                         w,
                         limits,
                         cancel.clone(),
@@ -486,7 +536,7 @@ impl Agent {
                 if let Some(blocker) = requirements.read_blocker(&current) {
                     return super::recovery::guidance(
                         self,
-                        &registry,
+                        registry,
                         w,
                         limits,
                         cancel.clone(),
@@ -519,7 +569,7 @@ impl Agent {
                     };
                     return super::recovery::guidance(
                         self,
-                        &registry,
+                        registry,
                         w,
                         limits,
                         cancel.clone(),
@@ -570,6 +620,13 @@ impl Agent {
                     self.skip_calls(&calls[call_index..], "Cancelled before execution");
                     return Err("Cancelled".into());
                 }
+                if self.revision_pending() {
+                    self.skip_calls(
+                        &calls[call_index..],
+                        "Instructions superseded; action not executed",
+                    );
+                    return Err("Task revised".into());
+                }
                 let key = call_key(&call);
                 let cache_key = if call.name != "apply_patch" {
                     format!("{mutation}:{key}")
@@ -613,7 +670,7 @@ impl Agent {
                 } else {
                     authority::execute(
                         self,
-                        &registry,
+                        registry,
                         w,
                         &call,
                         limits,
@@ -638,7 +695,7 @@ impl Agent {
                     self.emit("tool_recovery",json!({"callId":call.id,"tool":call.name,"error":original_error,"attempt":1}));
                     result = super::recovery::read_file(
                         self,
-                        &registry,
+                        registry,
                         workspace,
                         &call,
                         limits,
@@ -667,7 +724,7 @@ impl Agent {
                     .iter()
                     .any(|event| event.kind == "tool_started" && event.data["callId"] == call.id);
                 let invalid_arguments = (!started
-                    && argument_feedback(&registry, &call, &mut value))
+                    && argument_feedback(registry, &call, &mut value))
                     || (value["blockedIdenticalRetry"] == true
                         && failures
                             .get(&cache_key)
@@ -786,23 +843,9 @@ impl Agent {
                     .unwrap()
                     .transcript
                     .push(full);
-                let encoded = value.to_string();
-                let content = if matches!(
-                    call.name.as_str(),
-                    "run_command" | "exec_command" | "write_stdin"
-                ) && encoded.len() > 10000
-                {
-                    let mut observation = value.clone();
-                    observation["output"] =
-                        json!(bounded(value["output"].as_str().unwrap_or(""), 7000));
-                    observation["truncated"] = json!(true);
-                    observation.to_string()
-                } else if call.name != "read_file" && encoded.len() > 10000 {
-                    json!({"ok":ok,"truncated":true,"excerpt":bounded(&encoded,10000)}).to_string()
-                } else {
-                    encoded
-                };
-                messages.push(json!({"role":"tool","tool_name":call.name,"tool_call_id":call.id,"content":content}));
+                let mut visible = json!({"role":"tool","tool_name":call.name,"tool_call_id":call.id,"content":value.to_string()});
+                crate::context::reduce_tool_message(&mut visible, 10000);
+                messages.push(visible);
                 if value["needsUserInput"] == true {
                     self.skip_calls(
                         &calls[call_index + 1..],
@@ -824,7 +867,7 @@ impl Agent {
                     );
                 }
                 if unchanged_observations >= 3 {
-                    return super::recovery::guidance(self, &registry, w, limits, cancel.clone(), &contract.authority,
+                    return super::recovery::guidance(self, registry, w, limits, cancel.clone(), &contract.authority,
                         "Repeated inspections returned unchanged results without advancing the objective").await;
                 }
                 if failures.get(&cache_key).map_or(0, |f| f.attempts) >= 3
@@ -841,7 +884,7 @@ impl Agent {
                     );
                     return super::recovery::guidance(
                         self,
-                        &registry,
+                        registry,
                         w,
                         limits,
                         cancel.clone(),
@@ -854,7 +897,7 @@ impl Agent {
         }
         super::recovery::guidance(
             self,
-            &registry,
+            registry,
             w,
             limits,
             cancel,

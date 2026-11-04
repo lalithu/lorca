@@ -24,6 +24,9 @@ fn yield_default() -> u64 {
     1000
 }
 impl Tool for ExecCommand {
+    fn settle_for_revision(&self) -> FutureResult<'_, ()> {
+        Box::pin(self.sessions.settle_for_revision())
+    }
     fn schema(&self) -> Value {
         let mut properties = json!({"executable":{"type":"string","enum":["cargo"],"description":"Executable name only; do not include it in arguments."},"arguments":{"type":"array","items":{"type":"string"},"description":"A JSON array such as [\"test\"], never a serialized string or shell command."},"directory":{"type":"string","description":"Workspace-relative directory; use . for the workspace root, never cd or an absolute path."}});
         if !self.legacy {

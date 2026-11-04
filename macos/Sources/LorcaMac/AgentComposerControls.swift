@@ -24,14 +24,15 @@ struct AgentComposerControls: View {
         .accessibilityIdentifier("agent-workspace")
     }
     private var effort: some View {
-        Picker("Thinking effort", selection: $store.thinkingEffort) {
-            ForEach(ThinkingEffort.allCases) { effort in Text(effort.label).tag(effort) }
+        Toggle(isOn:Binding(get:{store.thinkingEffort != .off},set:{store.thinkingEffort=$0 ? .nominal:.off})) {
+            ThinkingControlLabel(enabled: store.thinkingEffort != .off, nextTask: store.currentAgentActive)
         }
-        .pickerStyle(.segmented).labelsHidden().controlSize(.small).frame(width: 170)
-        .accessibilityLabel("Thinking effort")
-        .disabled(store.agent.busy)
-        .help("Off disables thinking where supported. Nominal and High allow more time and bounded planning; native thinking depends on the model's supported controls.")
-        .accessibilityIdentifier("thinking-effort")
+        .toggleStyle(.button).controlSize(.small)
+        .accessibilityLabel("Model thinking").accessibilityIdentifier("thinking-toggle")
+        .help(store.currentAgentActive ? "Applies to the next task. Current inference and task remain unchanged." : "Show actual local-model thinking when supported. Reasoning is retained only in this session.")
+        .contextMenu {
+            Picker("Thinking effort",selection:$store.thinkingEffort) {ForEach(ThinkingEffort.allCases) {Text($0.label).tag($0)}}
+        }
     }
     @ViewBuilder private var approval: some View {
         if store.agentWorkspace != nil {
@@ -46,6 +47,20 @@ struct AgentComposerControls: View {
         let conversation=store.library.selectedID
         panel.beginSheetModal(for:window){response in
             if response == .OK,let url=panel.url{store.agent.workspaces[conversation]=url}
+        }
+    }
+}
+
+// The selected label/icon change immediately; the toggle's behavior is unchanged.
+struct ThinkingControlLabel: View {
+    let enabled: Bool
+    var nextTask = false
+    static let enabledColor = Color(red: 34 / 255, green: 197 / 255, blue: 94 / 255)
+    var body: some View {
+        HStack(spacing: 4) {
+            if nextTask { Text("Next task:").foregroundStyle(.secondary) }
+            Label(enabled ? "Thinking ON" : "Thinking OFF", systemImage: "brain")
+                .foregroundStyle(enabled ? Self.enabledColor : Color.primary)
         }
     }
 }

@@ -19,6 +19,16 @@ final class AgentStore: ObservableObject {
     private var buffered: AgentTaskSnapshot?
     private var blockedApprovals = Set<String>()
     private var order: [String] = []
+    // Manual presentation choices live only as long as the corresponding cached run.
+    private var thinkingExpansion: [String: [String: Bool]] = [:]
+    func thinkingExpanded(taskID: String, block: AgentThinkingBlock) -> Bool {
+        thinkingExpansion[taskID]?[block.id] ?? block.active
+    }
+    func setThinkingExpanded(_ expanded: Bool, taskID: String, blockID: String) {
+        objectWillChange.send()
+        thinkingExpansion[taskID, default: [:]][blockID] = expanded
+    }
+
     var active: AgentTaskSnapshot? { latest.flatMap { $0.status.active ? $0 : nil } }
     var busy: Bool { active != nil || submitting || unconfirmedSubmission }
     var sessionID: String? { client.backend.sessionID }
@@ -62,7 +72,7 @@ final class AgentStore: ObservableObject {
     }
     func apply(_ snapshot: AgentTaskSnapshot?) {
         guard var snapshot else {
-            if let id = latest?.id, latest?.status.active == true { runs.removeValue(forKey: id); activities.removeValue(forKey: id) }
+            if let id = latest?.id, latest?.status.active == true { runs.removeValue(forKey: id); activities.removeValue(forKey: id); thinkingExpansion.removeValue(forKey: id) }
             latest = nil
             return
         }
@@ -75,10 +85,14 @@ final class AgentStore: ObservableObject {
         if runs[snapshot.id]?.events != snapshot.events {
             activities[snapshot.id] = AgentActivity.make(from: snapshot.events)
         }
+        if let blocks = snapshot.thinking {
+            let ids = Set(blocks.map(\.id))
+            thinkingExpansion[snapshot.id] = thinkingExpansion[snapshot.id]?.filter { ids.contains($0.key) }
+        }
         runs[snapshot.id] = snapshot
         if !known { order.append(snapshot.id) }
         while order.count > 8 {
-            let old = order.removeFirst(); runs.removeValue(forKey: old); activities.removeValue(forKey: old)
+            let old = order.removeFirst(); runs.removeValue(forKey: old); activities.removeValue(forKey: old); thinkingExpansion.removeValue(forKey: old)
         }
         if latest == nil || latest?.id == snapshot.id || !known { latest = snapshot }
     }
@@ -96,13 +110,13 @@ final class AgentStore: ObservableObject {
                 while order.count>8 {
                     let old=order.removeFirst()
                     if old==latest?.id {order.append(old);continue}
-                    runs.removeValue(forKey:old);activities.removeValue(forKey:old)
+                    runs.removeValue(forKey:old);activities.removeValue(forKey:old);thinkingExpansion.removeValue(forKey:old)
                 }
             }
         }
     }
-    func reserveSubmission() -> Bool {
-        guard !busy else { return false }
+    func reserveSubmission(allowActive: Bool = false) -> Bool {
+        guard !submitting && !unconfirmedSubmission && (allowActive || active == nil) else { return false }
         submitting = true; error = nil
         return true
     }
@@ -124,7 +138,7 @@ final class AgentStore: ObservableObject {
         }
     }
     func canDecide(_ task: AgentTaskSnapshot, approval: AgentApproval) -> Bool {
-        connected && deciding == nil && !cancelling && !blockedApprovals.contains(approval.id)
+        !task.correctionPending && latest?.correctionPending != true && connected && deciding == nil && !cancelling && !blockedApprovals.contains(approval.id)
             && task.owner == sessionID && latest?.id == task.id && latest?.approval?.id == approval.id && task.status == .awaitingApproval
     }
     func decide(task: AgentTaskSnapshot, approval: AgentApproval, decision: String) async {

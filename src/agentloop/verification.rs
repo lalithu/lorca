@@ -33,7 +33,9 @@ pub struct Requirements {
     edit: bool,
     paths: Vec<String>,
     empty_paths: Vec<String>,
+    // Only references extracted from user instructions; model labels never enter here.
     read_paths: Vec<String>,
+    read_collections: Vec<super::inspection::Collection>,
     commands: Vec<String>,
     report_only: bool,
 }
@@ -90,7 +92,6 @@ impl Requirements {
         let has = |verbs: &[&str]| tokens.iter().any(|w| verbs.contains(&w.as_str()));
         let edit_requested = !explanatory && has(EDIT_VERBS);
         let mut paths = vec![];
-        let mut read_paths = vec![];
         let mut editing = false;
         if !explanatory {
             // Keep input reads separate from edit targets. A bare coordinated
@@ -102,7 +103,6 @@ impl Requirements {
                     .any(|w| ["read", "inspect", "review", "examine"].contains(&w.as_str()))
                 {
                     editing = false;
-                    read_paths.extend(requested_read_paths(clause));
                 } else if tokens.iter().any(|w| EDIT_VERBS.contains(&w.as_str())) {
                     editing = true;
                     paths.extend(requested_paths(clause));
@@ -119,6 +119,8 @@ impl Requirements {
         paths = paths.into_iter().map(|p| normalized_path(&p)).collect();
         paths.sort();
         paths.dedup();
+        // Preserve exact spelling, quoted names and extensionless references.
+        let mut read_paths = super::inspection::explicit_files(task);
         read_paths.sort();
         read_paths.dedup();
         // Writing a poem or reading a greeting aloud is conversation, not an
@@ -214,6 +216,7 @@ impl Requirements {
             paths,
             empty_paths,
             read_paths,
+            read_collections: super::inspection::collections(task),
             report_only: !edit_requested,
             commands,
         }
@@ -236,22 +239,8 @@ impl Requirements {
         value.paths.extend(semantic_paths);
         value.paths.sort();
         value.paths.dedup();
-        value.read_paths.extend(
-            intent
-                .outcomes
-                .iter()
-                .filter(|o| o.kind == Inspect)
-                .filter_map(|o| o.target.clone())
-                // Abstract inspection subjects are not literal file references.
-                // Keep concrete paths subject to the existing read-evidence check.
-                .filter(|p| {
-                    !matches!(
-                        p.to_ascii_lowercase().as_str(),
-                        "." | "repository" | "repo" | "workspace" | "project" | "directory"
-                    )
-                })
-                .collect::<Vec<_>>(),
-        );
+        // Inspection labels (including typed proposals) cannot add paths.
+        // Self::new derives file/collection obligations from user clauses only.
         value.report_only = !value.edit && !intent.outcomes.iter().any(|o| o.kind == RepairVerify);
         if intent
             .outcomes
@@ -269,6 +258,20 @@ impl Requirements {
             // Do not erase a command explicitly required by the user.
         }
         value
+    }
+    pub(super) fn retain_inspection(&mut self, instruction: &str) {
+        // Reconstruct trusted references on resume; do not resurrect a legacy
+        // model-generated filename from the serialized contract.
+        let previous = Self::new(instruction);
+        self.inspect |= previous.inspect;
+        self.read_paths.extend(previous.read_paths);
+        self.read_paths.sort();
+        self.read_paths.dedup();
+        for collection in previous.read_collections {
+            if !self.read_collections.contains(&collection) {
+                self.read_collections.push(collection);
+            }
+        }
     }
     pub(crate) fn requires_edit(&self) -> bool {
         self.edit
@@ -317,7 +320,7 @@ impl Requirements {
                 Some("read_file") if result["ok"] == true && result["content"].is_string() => {
                     read = true;
                     if let Some(path) = result["path"].as_str() {
-                        read_paths.push(path.to_lowercase());
+                        read_paths.push(path.to_owned());
                     }
                 }
                 Some("apply_patch") if result["ok"] == true && result["verified"] == true => {
@@ -373,7 +376,7 @@ impl Requirements {
             }
         }
         let mut missing = vec![];
-        if self.inspect && !read {
+        if self.inspect && !read && self.read_collections.is_empty() {
             missing.push("Inspect relevant real files with read_file; a listing or a promise is not file inspection".into());
         }
         for path in &self.read_paths {
@@ -382,6 +385,9 @@ impl Requirements {
                     "Read the requested real file {path} with read_file"
                 ));
             }
+        }
+        for collection in &self.read_collections {
+            missing.extend(collection.missing(current));
         }
         if self.edit {
             if self.paths.is_empty() && patches.is_empty() {
@@ -431,7 +437,7 @@ impl Requirements {
         let successful: Vec<String> = results
             .iter()
             .filter(|v| v["ok"] == true && v["content"].is_string())
-            .filter_map(|v| v["path"].as_str().map(str::to_lowercase))
+            .filter_map(|v| v["path"].as_str().map(str::to_owned))
             .collect();
         for requested in &self.read_paths {
             if read_satisfies(requested, &successful) {
@@ -442,7 +448,7 @@ impl Requirements {
                 .rev()
                 .filter(|v| v["ok"] != true)
                 .find_map(|v| {
-                    let path = v["path"].as_str()?.to_lowercase();
+                    let path = v["path"].as_str()?.to_owned();
                     (path == *requested || read_satisfies(requested, &[path]))
                         .then(|| v["error"].as_str())
                         .flatten()
@@ -519,34 +525,6 @@ fn read_satisfies(requested: &str, observed: &[String]) -> bool {
             .count()
             == 1
 }
-fn requested_read_paths(clause: &str) -> Vec<String> {
-    let mut paths = requested_paths(clause);
-    let words: Vec<_> = clause
-        .split_whitespace()
-        .map(|w| w.trim_matches(['`', '\"', '\'', ',', ';', ':']))
-        .collect();
-    let directories: std::collections::BTreeSet<_> = words
-        .windows(2)
-        .filter_map(|pair| {
-            let dir = pair[1].trim_end_matches('/');
-            (["in", "under", "inside"].contains(&pair[0])
-                && dir.contains('/')
-                && std::path::Path::new(dir).extension().is_none())
-            .then(|| super::recovery::path_key(dir))
-            .flatten()
-        })
-        .collect();
-    if directories.len() == 1 {
-        let dir = directories.first().unwrap();
-        for path in &mut paths {
-            if !path.contains('/') {
-                *path = format!("{dir}/{path}");
-            }
-        }
-    }
-    paths
-}
-
 pub(super) fn requested_paths(clause: &str) -> Vec<String> {
     let end = [" to ", " from ", " based on ", " using ", " for "]
         .iter()
@@ -747,7 +725,7 @@ mod tests {
         assert_eq!(req.paths, vec!["readme.md", "src/lib.rs"]);
         let req = Requirements::new("Read Cargo.toml and update README.md from src/lib.rs");
         assert_eq!(req.paths, vec!["readme.md"]);
-        assert_eq!(req.read_paths, vec!["cargo.toml"]);
+        assert_eq!(req.read_paths, vec!["Cargo.toml"]);
         assert!(
             !req.missing(&[
                 result(
@@ -899,5 +877,177 @@ mod empty_file_tests {
                 .missing(&[result(8)])
                 .is_empty()
         );
+    }
+}
+#[cfg(test)]
+mod inspection_target_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn interpreted(task: &str, target: Value) -> Requirements {
+        let intent = serde_json::from_value(json!({
+            "relation":"new", "objective":"Read hallucinated.md and inspect files present",
+            "outcomes":[{"kind":"inspect","target":"files present","inspection":target}],
+            "edit_targets":[],"forbidden_targets":[],"read_only":true,
+            "commands_forbidden":true,"clarification":null
+        }))
+        .unwrap();
+        Requirements::interpreted(task, &intent)
+    }
+    fn observation(tool: &str, value: Value) -> Value {
+        json!({"role":"tool","tool_name":tool,"content":value.to_string()})
+    }
+    fn listing(directory: &str, paths: &[&str], truncated: bool) -> Value {
+        observation(
+            "list_directory",
+            json!({"ok":true,"path":directory,"truncated":truncated,
+            "entries":paths.iter().map(|p|json!({"path":p,"kind":"file"})).collect::<Vec<_>>() }),
+        )
+    }
+    fn read(path: &str, offset: usize, total: usize, content: &str) -> Value {
+        observation(
+            "read_file",
+            json!({"ok":true,"path":path,"offset":offset,
+            "totalBytes":total,"content":content,"truncated":offset+content.len()<total}),
+        )
+    }
+    #[test]
+    fn model_descriptions_and_type_labels_cannot_manufacture_file_requirements() {
+        for description in [
+            "files present",
+            "source files",
+            "repository contents",
+            "phantom.md",
+        ] {
+            let intent = serde_json::from_value(json!({
+                "relation":"new","objective":"Read hallucinated.md",
+                "outcomes":[{"kind":"inspect","target":description,
+                    "inspection":{"type":"file","path":description}}],
+                "edit_targets":[],"forbidden_targets":[],"read_only":true,
+                "commands_forbidden":true,"clarification":null
+            }))
+            .unwrap();
+            let req = Requirements::interpreted("Inspect this repository", &intent);
+            assert!(req.read_paths.is_empty(), "{description}");
+            assert!(req.missing(&[read("README.md", 0, 4, "real")]).is_empty());
+        }
+    }
+    #[test]
+    fn explicit_references_survive_subject_labels_and_preserve_spelling() {
+        for (task, path) in [
+            ("Read README.md", "README.md"),
+            ("Read `Project Notes.md`", "Project Notes.md"),
+            ("Read LICENSE", "LICENSE"),
+            ("Read the file named config", "config"),
+            ("Read `設定.txt`", "設定.txt"),
+            ("Read ./src/Exact.rs", "src/Exact.rs"),
+            ("Read mod.rs in src/agent/", "src/agent/mod.rs"),
+        ] {
+            let req = interpreted(task, json!({"type":"subject"}));
+            assert_eq!(req.read_paths, [path], "{task}");
+            assert!(!req.missing(&[]).is_empty());
+            assert!(
+                req.missing(&[read(path, 0, 4, "real")]).is_empty(),
+                "{task}"
+            );
+        }
+        let req = interpreted("Read MISSING.md", Value::Null);
+        assert!(
+            req.missing(&[read("missing.md", 0, 4, "real")])
+                .iter()
+                .any(|m| m.contains("MISSING.md"))
+        );
+        assert!(
+            !req.missing(&[observation(
+                "read_file",
+                json!({"ok":false,"path":"MISSING.md","error":"not found"})
+            )])
+            .is_empty()
+        );
+        assert!(
+            req.read_blocker(&[observation(
+                "read_file",
+                json!({"ok":false,"path":"MISSING.md","error":"not found"})
+            )])
+            .is_some()
+        );
+    }
+    #[test]
+    fn full_collection_needs_a_complete_listing_and_all_complete_reads() {
+        let req = interpreted("Read the files and report back", Value::Null);
+        assert!(req.read_paths.is_empty());
+        assert!(!req.missing(&[]).is_empty());
+        let mut evidence = vec![listing(".", &["a.txt", "b.txt", "c.txt"], false)];
+        assert!(!req.missing(&evidence).is_empty());
+        evidence.push(read("a.txt", 0, 4, "real"));
+        assert!(!req.missing(&evidence).is_empty());
+        // A last excerpt does not cover byte zero; duplicate ranges don't close gaps.
+        evidence.extend([
+            read("b.txt", 2, 4, "al"),
+            read("b.txt", 2, 4, "al"),
+            read("c.txt", 0, 4, "re"),
+        ]);
+        assert_eq!(req.missing(&evidence).len(), 2);
+        evidence.extend([read("b.txt", 0, 4, "re"), read("c.txt", 2, 4, "al")]);
+        assert!(req.missing(&evidence).is_empty());
+        evidence[0] = listing(".", &["a.txt", "b.txt", "c.txt"], true);
+        assert!(!req.missing(&evidence).is_empty());
+    }
+    #[test]
+    fn collection_scope_is_exact_and_empty_collections_are_valid() {
+        let req = interpreted("Read all files in src/", Value::Null);
+        let mut evidence = vec![
+            listing("src", &["src/A.txt"], false),
+            read("other/A.txt", 0, 4, "real"),
+        ];
+        assert!(!req.missing(&evidence).is_empty());
+        evidence.push(read("src/A.txt", 0, 4, "real"));
+        assert!(req.missing(&evidence).is_empty());
+        let req = interpreted("Read the files", Value::Null);
+        assert!(req.missing(&[listing(".", &[], false)]).is_empty());
+        assert!(!req.missing(&[listing(".", &[], true)]).is_empty());
+        assert!(!req.missing(&[listing("elsewhere", &[], false)]).is_empty());
+    }
+    #[test]
+    fn relevant_inspection_does_not_require_every_repository_file() {
+        let req = interpreted("Read relevant source files", Value::Null);
+        assert!(
+            req.missing(&[
+                listing(".", &["a.rs", "b.rs"], false),
+                read("a.rs", 0, 4, "real")
+            ])
+            .is_empty()
+        );
+    }
+    #[test]
+    fn unreadable_collection_members_and_changed_lengths_do_not_certify_coverage() {
+        let req = interpreted("Read the files", Value::Null);
+        let symlink = observation(
+            "list_directory",
+            json!({"ok":true,"path":".","truncated":false,
+            "entries":[{"kind":"symlink","path":null,"name":"linked"}]}),
+        );
+        assert!(!req.missing(&[symlink]).is_empty());
+        assert!(
+            !req.missing(&[
+                listing(".", &["a.txt"], false),
+                read("a.txt", 0, 4, "real"),
+                read("a.txt", 4, 8, "more")
+            ])
+            .is_empty()
+        );
+    }
+    #[test]
+    fn continuation_rebuilds_inspection_from_user_references_without_legacy_labels() {
+        let mut req = interpreted("Continue and report back. Do not edit files.", Value::Null);
+        req.retain_inspection("Read README.md. Do not edit files.");
+        assert_eq!(req.read_paths, ["README.md"]);
+        assert!(!req.requires_edit());
+        assert!(req.missing(&[read("README.md", 0, 4, "real")]).is_empty());
+        let mut req = interpreted("Continue", Value::Null);
+        req.retain_inspection("Inspect this repository, read the files, report back.");
+        assert!(req.read_paths.is_empty());
+        assert!(!req.read_collections.is_empty());
+        assert!(!req.missing(&[]).is_empty());
     }
 }

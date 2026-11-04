@@ -1,6 +1,7 @@
 pub mod authority;
 pub mod context;
 mod execution;
+mod inspection;
 pub mod intent;
 pub mod objective;
 mod recovery;

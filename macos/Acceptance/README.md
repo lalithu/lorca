@@ -27,3 +27,33 @@ Use an installed Ollama model name; the alias does not imply a native MLX backen
 Thinking effort defaults to nominal and is recorded by the runner. Both exec_command
 and its legacy run_command name are recognized for fixture-scoped Cargo approval.
 The runner closes its session without unloading a model shared with another client.
+
+
+Chunk 2 thinking and visual acceptance:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+python3 macos/Acceptance/run.py --ui --skip-build --model m2max-fast:latest --effort off \
+  --sdk /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
+```
+
+Build beforehand with `LORCA_BUILD_ONLY=1 ./macos/build.sh`; never restart the
+production application for acceptance. `--ui` uses isolated preferences and data,
+checks live OFF/ON streams and a revision-invalidated approval, then captures real
+SwiftUI components, Mini and both appearances. A separate conversation isolates
+the write scenario from the explicitly read-only preceding task. Component fixtures
+and captured reasoning replays are labelled; they are not live execution claims.
+`ui-report.json` contains timings, states, byte counts and last-request token usage,
+not reasoning text. The regular JSON report also excludes ephemeral thinking.
+Screenshots can intentionally contain local-model reasoning: keep the temporary
+artifacts local and remove them when no longer needed. Reopening these screenshots
+is not evidence that reasoning survives a backend restart.
+
+Final UI fixes add `--selection` (use the same model/SDK and `--skip-build` options).
+This entry point uses a real NSApplication event loop, native mouse drags and Cmd+C
+in actual message/reasoning/output views. `selection-report.json` records copied
+ranges, multiline checks and the native Copy menu; do not infer success merely
+from the process finishing. `layout-report.json` measures wrapped reasoning at
+narrow/wide widths. Blue bubbles and green ON/neutral OFF/Next task labels are
+captured in both appearances. These fixtures do not run a model or touch production
+conversations. The runner restores original pasteboard representations afterward.

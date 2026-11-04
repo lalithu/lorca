@@ -25,15 +25,20 @@ final class ChatStore: ObservableObject {
     var draft: String { get { library.current.draft } set { if newValue != "Continue the unfinished task." { continuation = nil }; library.setDraft(newValue) } }
     var draftImages: [ChatAttachment] { library.current.draftImages }
     var imageStore: AttachmentStore { AttachmentStore(directory: backend.root.appendingPathComponent("attachments")) }
-    var canSend: Bool { canSendChat && !agent.busy && !jobs.running }
-    var canSendChat: Bool { ready && !closing && !isManagingModel && !agent.submitting && !currentAgentActive && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftImages.isEmpty)
-        && !isGenerating && !isImportingImages && !modelSession.isLoading && !modelSession.isClosing }
+    var canSteerActive: Bool {
+        guard currentAgentActive, agent.active?.owner == agent.sessionID else { return false }
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return ["status", "what are you doing", "what is the status", "what's the status"].contains(text.trimmingCharacters(in: CharacterSet(charactersIn: "?"))) || ["actually", "correction:", "instead", "now change", "change the", "correct "].contains(where: text.hasPrefix)
+    }
+    var canSend: Bool { canSendChat && (!agent.busy || canSteerActive) && !jobs.running }
+    var canSendChat: Bool { ready && !closing && !isManagingModel && !agent.submitting && (!currentAgentActive || canSteerActive) && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftImages.isEmpty)
+        && (!isGenerating || canSteerActive) && !isImportingImages && !modelSession.isLoading && !modelSession.isClosing }
     let uiZoom: AppZoom
     @Published var isImportingImages = false
     @Published private(set) var isReloadingModel = false
     @Published private(set) var isUnloadingModel = false
     var isManagingModel: Bool { isReloadingModel || isUnloadingModel }
-    var canReloadModel: Bool { ready && !closing && !isManagingModel && !isGenerating && !agent.busy && !jobs.running && !jobs.busy && !isChecking && !modelSession.isLoading && !modelSession.isClosing }
+    var canReloadModel: Bool { ready && !closing && !isManagingModel && (!isGenerating || canSteerActive) && !agent.busy && !jobs.running && !jobs.busy && !isChecking && !modelSession.isLoading && !modelSession.isClosing }
     var canUnloadModel: Bool { canReloadModel && modelSession.activeModel != nil }
     @Published private(set) var models: [String] = []
     @Published var selectedModel: String {
@@ -251,7 +256,7 @@ final class ChatStore: ObservableObject {
         } else { usage = session.usage }
     }
     func send() {
-        guard !closing, canSend, agent.reserveSubmission() else { return }
+        guard !closing, canSend, agent.reserveSubmission(allowActive: canSteerActive) else { return }
         let conversation = library.selectedID, request = UUID(), text = draft, model = selectedModel
         let workspace=agentWorkspace, effort=thinkingEffort.rawValue
         let continueTaskID = continuation?.conversation == conversation ? continuation?.task : nil

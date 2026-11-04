@@ -77,6 +77,12 @@ struct AgentTaskSnapshot: Codable, Equatable, Identifiable, Sendable {
     var assistantText: String? = nil
     var usage: ChatUsage? = nil
     var generating: Bool? = nil
+    var thinking: [AgentThinkingBlock]? = nil
+    var correctionPending: Bool {
+        let requested=events.last(where:{$0.kind == "task_revision_requested"})?.sequence ?? 0
+        let applied=events.last(where:{$0.kind == "task_revised"})?.sequence ?? 0
+        return status.active && requested > applied
+    }
     var presentationStatus: String {
         if status == .awaitingApproval {return status.label}
         if status == .running {
@@ -85,4 +91,37 @@ struct AgentTaskSnapshot: Codable, Equatable, Identifiable, Sendable {
         }
         return status.label
     }
+}
+
+// Decoded only from the live TaskView. Never stored on Conversation/ChatMessage.
+struct AgentThinkingBlock: Codable, Equatable, Identifiable, Sendable {
+    let id: String
+    var state: String
+    var text: String
+    let afterSequence: UInt64
+    let textOffset: Int
+    var truncated: Bool
+    enum Stage: String, Codable, Sendable { case interpretation, execution }
+    var stage: Stage? = nil
+    var stageTitle: String { stage == .interpretation ? "Understanding request" : "Thinking" }
+    var active: Bool { state == "running" }
+    var label: String {
+        switch state {case "running": stageTitle;case "complete": "\(stageTitle) · complete";case "empty": "No thinking emitted";case "interrupted": "Thinking interrupted";case "unavailable": "Thinking unavailable for this model";default: "Thinking off"}
+    }
+}
+
+extension AgentJSON {
+    var redacted: AgentJSON {
+        switch self {
+        case .object(let fields): return .object(fields.mapValuesWithKeys { key,value in
+            let lower=key.lowercased().replacingOccurrences(of:"_",with:"")
+            return ["token","apikey","authorization","password","secret","cookie","clientsecret","session","sessionid","taskid"].contains(where: {lower == $0 || lower.hasSuffix($0)}) ? .string("[redacted]") : value.redacted
+        })
+        case .array(let values): return .array(values.map(\.redacted))
+        default: return self
+        }
+    }
+}
+private extension Dictionary where Key == String, Value == AgentJSON {
+    func mapValuesWithKeys(_ transform:(String,AgentJSON)->AgentJSON)->[String:AgentJSON] { Dictionary(uniqueKeysWithValues:map {($0.key,transform($0.key,$0.value))}) }
 }
