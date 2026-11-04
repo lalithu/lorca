@@ -32,9 +32,32 @@ struct Server {
     requests: Mutex<Vec<Value>>,
     slow: bool,
 }
+fn routes_turn(request: &Value) -> bool {
+    request["tools"].as_array().is_some_and(|tools| {
+        tools
+            .iter()
+            .any(|tool| tool["function"]["name"] == "interpret_task")
+    })
+}
 async fn chat(State(s): State<Arc<Server>>, Json(v): Json<Value>) -> Json<Value> {
     s.requests.lock().unwrap().push(v.clone());
-    let message = if v.get("tools").is_none() {
+    let message = if routes_turn(&v) {
+        let messages = v["messages"].as_array().unwrap();
+        let input: Value =
+            serde_json::from_str(messages.last().unwrap()["content"].as_str().unwrap()).unwrap();
+        if input["availableTools"].as_array().unwrap().is_empty() {
+            json!({"role":"assistant","content":"Hello. I remember our conversation."})
+        } else {
+            json!({"role":"assistant","tool_calls":[{"id":"route","function":{
+                "name":"interpret_task","arguments":{
+                    "relation":"new","objective":input["latestUserMessage"],
+                    "outcomes":[{"kind":"edit","target":"created.txt"}],
+                    "edit_targets":[],"forbidden_targets":[],"read_only":false,
+                    "commands_forbidden":false,"clarification":null
+                }
+            }}]})
+        }
+    } else if v.get("tools").is_none() {
         json!({"role":"assistant","content":"Hello. I remember our conversation."})
     } else if v["messages"]
         .as_array()
@@ -139,7 +162,7 @@ async fn unified_core_native_ollama_tools_permissions_and_model_lease() {
     );
     let chats: Vec<_> = requests
         .iter()
-        .filter(|v| v.get("tools").is_some())
+        .filter(|v| v.get("tools").is_some() && !routes_turn(v))
         .collect();
     assert_eq!(chats.len(), 2);
     assert_eq!(chats[0]["stream"], true);
@@ -164,10 +187,13 @@ async fn unified_core_native_ollama_tools_permissions_and_model_lease() {
         ]
     );
     let messages = chats[1]["messages"].as_array().unwrap();
-    assert_eq!(messages[2]["tool_calls"][1]["id"], "patch");
-    assert_eq!(messages[4]["tool_call_id"], "patch");
+    assert!(messages.iter().any(|m| m["tool_calls"][1]["id"] == "patch"));
+    let patch_result = messages
+        .iter()
+        .find(|m| m["tool_call_id"] == "patch")
+        .unwrap();
     assert!(
-        messages[4]["content"]
+        patch_result["content"]
             .as_str()
             .unwrap()
             .contains("verified")
@@ -387,7 +413,7 @@ async fn unified_greetings_followups_and_images_preserve_history_without_workspa
             .filter(|r| r["messages"].is_array())
             .collect::<Vec<_>>();
         assert_eq!(models.len(), 4);
-        assert!(models.iter().all(|r| r.get("tools").is_none()));
+        assert!(models.iter().all(|r| routes_turn(r)));
         assert!(
             models[2]["messages"]
                 .as_array()

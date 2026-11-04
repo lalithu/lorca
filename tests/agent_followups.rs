@@ -56,7 +56,21 @@ async fn chat(State(s): State<Arc<Server>>, Json(r): Json<Value>) -> Json<Value>
     let new = latest.contains("2 + 2");
     let status = latest.contains("status of");
     let follow = latest.contains("Now change");
-    let message = if interpretation {
+    let needs_input = latest.contains("Choose an output");
+    let conversational = latest.contains("Can we talk");
+    let message = if interpretation && conversational {
+        json!({"role":"assistant","content":"Of course. What is on your mind?"})
+    } else if interpretation && needs_input {
+        call(
+            "interpret_task",
+            json!({
+                "relation":"new","objective":"Choose an output format",
+                "outcomes":[{"kind":"explain","target":null}],
+                "edit_targets":[],"forbidden_targets":[],"read_only":false,
+                "commands_forbidden":true,"clarification":"Which output format should I use?"
+            }),
+        )
+    } else if interpretation {
         call(
             "interpret_task",
             json!({"relation":if new {"new"} else if status {"status"} else if follow {"continue"} else {"new"},"objective":if new {"Explain 2 + 2"} else if status {"Report the status of the previous change"} else if follow {"Change CHOSEN.md to second"} else {"Create CHOSEN.md containing first"},"outcomes":[{"kind":if new||status {"explain"}else{"edit"},"target":if new||status {Value::Null}else{json!("CHOSEN.md")}}],"edit_targets":if new||status {json!([])} else {json!(["CHOSEN.md"])},"forbidden_targets":[],"read_only":new||status,"commands_forbidden":true,"clarification":null}),
@@ -99,7 +113,7 @@ async fn chat(State(s): State<Arc<Server>>, Json(r): Json<Value>) -> Json<Value>
     };
     Json(json!({"message":message,"done":true,"done_reason":"stop"}))
 }
-async fn wait(core: &Arc<Core>, session: &str) {
+async fn wait(core: &Arc<Core>, session: &str, expected: Status) {
     tokio::time::timeout(Duration::from_secs(12),async {loop {
         core.maintenance();
         let t=core.agent().snapshot().unwrap();
@@ -108,7 +122,7 @@ async fn wait(core: &Arc<Core>, session: &str) {
             assert!(rejected.is_err());
             assert_eq!(core.agent().snapshot().unwrap().id,t.id);
             core.command(json!({"op":"agent_decide","session":session,"taskId":t.id,"approvalId":a.id,"decision":"allow_once"})).await.unwrap();}
-        if !t.status.active() {assert_eq!(t.status,Status::Completed,"{:?}",t.result);core.maintenance();return;}
+        if !t.status.active() {assert_eq!(t.status,expected,"{:?}",t.result);core.maintenance();return;}
         tokio::time::sleep(Duration::from_millis(10)).await;
     }}).await.unwrap();
 }
@@ -155,11 +169,27 @@ async fn completed_followup_gets_context_but_needs_fresh_evidence_and_status_is_
         "Now change its content to second.",
         "What is the status of the previous change?",
         "New request: explain 2 + 2. Do not edit files or run commands.",
+        "Choose an output format.",
+        "Can we talk about something else?",
+        "What is the status of the pending request?",
     ] {
         core.command(json!({"op":"agent_start","session":session,"model":"fixture","task":prompt,"workspace":work.0,"conversationId":conversation,"requestId":lorca::types::id()})).await.unwrap();
-        wait(&core, &session).await;
+        let expected = if prompt.starts_with("Choose") {
+            Status::WaitingForInput
+        } else {
+            Status::Completed
+        };
+        wait(&core, &session, expected).await;
         let t = core.agent().snapshot().unwrap();
         ids.push(t.id);
+        if prompt.starts_with("Can we talk") {
+            assert_eq!(
+                t.result.as_deref(),
+                Some("Of course. What is on your mind?")
+            );
+            assert_eq!(t.contract.as_ref().unwrap()["pendingTask"]["id"], ids[4]);
+            assert!(!t.audit.iter().any(|a| a.kind == "tool_started"));
+        }
         if prompt.starts_with("Now") {
             assert!(
                 t.audit
@@ -202,6 +232,15 @@ async fn completed_followup_gets_context_but_needs_fresh_evidence_and_status_is_
         .collect();
     assert_eq!(interpreted[1]["previousTask"]["completed"], true);
     assert_eq!(interpreted[1]["previousTask"]["id"], ids[0]);
+    assert_eq!(interpreted[6]["previousTask"]["id"], ids[4]);
+    assert_eq!(interpreted[6]["previousTask"]["completed"], false);
+    assert!(
+        requests
+            .iter()
+            .any(|r| r["messages"].as_array().unwrap().iter().any(|m| {
+                m["role"] == "assistant" && m["content"] == "Of course. What is on your mind?"
+            }))
+    );
     for m in &core
         .snapshot()
         .conversations
@@ -211,7 +250,12 @@ async fn completed_followup_gets_context_but_needs_fresh_evidence_and_status_is_
         .messages
     {
         if m.role == "assistant" {
-            assert_eq!(m.extra["agentStatus"], "completed");
+            let expected = if m.extra["agentTaskId"] == ids[4] {
+                "waiting_for_input"
+            } else {
+                "completed"
+            };
+            assert_eq!(m.extra["agentStatus"], expected);
         }
     }
     http.abort();

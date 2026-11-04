@@ -190,10 +190,14 @@ impl Core {
                 m.role == "assistant"
                     && (m.extra.get("agentStatus") == Some(&json!("waiting_for_input"))
                         || m.extra.get("agentContract").is_some_and(|c| {
-                            c["relation"] == "status" && c["pendingTask"].is_object()
+                            matches!(c["relation"].as_str(), Some("status" | "conversation"))
+                                && c["pendingTask"].is_object()
                         })
                         || (v["continueTaskId"].as_str().is_some()
                             && m.extra.get("agentTaskId") == v.get("continueTaskId")
+                            && m.extra
+                                .get("agentContract")
+                                .is_some_and(|c| c.is_object() && c["relation"] != "conversation")
                             && matches!(
                                 m.extra.get("agentStatus").and_then(Value::as_str),
                                 Some("incomplete" | "failed" | "cancelled")
@@ -227,7 +231,7 @@ impl Core {
                 if let Some(saved) = previous
                     .extra
                     .get("agentContract")
-                    .filter(|c| c["relation"] == "status")
+                    .filter(|c| matches!(c["relation"].as_str(), Some("status" | "conversation")))
                     .and_then(|c| c.get("pendingTask"))
                     && let Ok(task) = serde_json::from_value::<crate::agentloop::intent::PendingTask>(
                         saved.clone(),
@@ -238,7 +242,7 @@ impl Core {
                 if effective_task.len() > 8000 {
                     return Err("The continued objective is too long; start a new request with a concise objective.".into());
                 }
-                parent = previous.extra.get("agentTaskId").cloned();
+                parent = pending_task.as_ref().map(|task| json!(task.id));
                 resume_evidence =
                     linked_evidence(chat, parent.as_ref().and_then(Value::as_str).unwrap_or(""))?;
             }
@@ -251,6 +255,7 @@ impl Core {
             && let Some(previous) = s.view.conversations[ci].messages.last().filter(|m| {
                 m.role == "assistant"
                     && m.extra.get("agentStatus") == Some(&json!("completed"))
+                    && m.extra.get("agentContract").is_some_and(|c| c.is_object())
                     && m.extra
                         .get("agentWorkspace")
                         .and_then(Value::as_str)
@@ -289,13 +294,6 @@ impl Core {
             message.attachments = std::mem::take(&mut chat.draft_images);
             chat.messages.push(message);
             history = self.repository.wire_messages(chat)?;
-            if parent.is_some()
-                && let Some(message) = history.last_mut()
-            {
-                message["content"] = json!(format!(
-                    "Continue the pending request. {effective_task}\nDetermine whether the latest user message answers, corrects, cancels, or replaces the pending task; do not assume it is an answer. Choices never grant execution permission."
-                ));
-            }
         }
         let id = self.agent.submit_continuation(
             Submission {

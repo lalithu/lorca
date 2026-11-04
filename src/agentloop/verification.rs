@@ -282,6 +282,22 @@ impl Requirements {
     pub fn action(&self) -> bool {
         self.inspect || self.edit || !self.commands.is_empty()
     }
+    // "Relevant files" is open-ended. Only explicit coverage can close the
+    // tool phase before the model offers a final answer.
+    pub(super) fn bounded_inspection_complete(&self, current: &[Value]) -> bool {
+        if self.edit
+            || !self.commands.is_empty()
+            || (self.read_paths.is_empty() && self.read_collections.is_empty())
+            || self
+                .read_collections
+                .iter()
+                .any(|collection| !collection.is_flat_and_exhaustive(current))
+        {
+            return false;
+        }
+        let complete = super::inspection::complete_reads(current);
+        self.read_paths.iter().all(|path| complete.contains(path))
+    }
     pub(super) fn validate_patch(&self, payload: &Value) -> Result<(), String> {
         let path = normalized_path(payload["path"].as_str().unwrap_or(""));
         if self.empty_paths.contains(&path) && payload["replacement"] != "" {

@@ -59,26 +59,57 @@ impl Agent {
             .usage
             .context_limit = capacity;
         let mut status_only = false;
-        let interpreted = inference.interprets_tasks() && capacity.is_some();
+        let interpreted = inference.interprets_tasks();
         if interpreted {
-            let mut intent = super::intent::interpret(
+            if let Some(previous) = pending_task.as_ref().filter(|previous| !previous.completed) {
+                self.state.lock().unwrap().view.as_mut().unwrap().contract =
+                    Some(json!({"relation":"conversation","pendingTask":previous}));
+            }
+            let route = super::intent::route(
                 inference.as_ref(),
                 &task,
+                &messages[1..],
                 pending_task.as_ref(),
                 &registry
                     .schemas()
                     .iter()
                     .filter_map(|s| s["function"]["name"].as_str().map(str::to_owned))
                     .collect::<Vec<_>>(),
-                capacity.unwrap(),
+                capacity.unwrap_or(crate::context::DEFAULT_CAPACITY),
                 limits,
                 cancel.clone(),
+                &|attempt, reason, elapsed| {
+                    self.emit(
+                        "interpretation_rejected",
+                        json!({"attempt":attempt,"reason":reason,"elapsedMs":elapsed.as_millis()}),
+                    );
+                },
             )
             .await?;
+            if self.revision_pending() {
+                return Err("Task revised".into());
+            }
+            let mut intent = match route {
+                super::intent::Route::Reply(text) => {
+                    self.state
+                        .lock()
+                        .unwrap()
+                        .view
+                        .as_mut()
+                        .unwrap()
+                        .transcript
+                        .push(json!({"role":"assistant","content":text}));
+                    self.emit("conversation_replied", Value::Null);
+                    return Ok(text);
+                }
+                super::intent::Route::Task(intent) => intent,
+            };
             if self.objective_revision() > 1 {
                 intent.relation = super::intent::Relation::Correct;
             }
-            if pending_task.as_ref().is_some_and(|p| p.completed) {
+            if intent.relation == super::intent::Relation::New
+                || pending_task.as_ref().is_some_and(|p| p.completed)
+            {
                 resume_evidence.clear();
             }
             if intent.relation == super::intent::Relation::Cancel {
@@ -255,7 +286,7 @@ impl Agent {
         // A successful read must not renew the malformed-runtime-call allowance.
         let mut interrupted_tool_retries = 0;
         let mut finalizing = false;
-        let mut finalization_used = false;
+        let mut finalization_started = false;
         let mut revisions = self.revision_receiver();
         for iteration in 1..=limits.iterations {
             if !self.take_iteration() {
@@ -282,7 +313,31 @@ impl Agent {
                 .chain(self.snapshot().unwrap().transcript.iter())
                 .cloned()
                 .collect::<Vec<_>>();
-            operational["outstanding"] = json!(requirements.missing(&verified));
+            let outstanding = requirements.missing(&verified);
+            if !finalizing
+                && !status_only
+                && contract.authority.scope.read_only
+                && resume_evidence.is_empty()
+                && evidence
+                    .iter()
+                    .any(|fact| fact["tool"] == "read_file" && fact["ok"] == true)
+                && evidence.iter().all(|fact| fact["running"] != true)
+                && plan.is_null()
+                && failures.is_empty()
+                && unresolved.is_empty()
+                && denied.is_empty()
+                && outstanding.is_empty()
+                && requirements.bounded_inspection_complete(&verified)
+            {
+                finalizing = true;
+            }
+            if finalizing && !finalization_started {
+                finalization_started = true;
+                self.emit("finalization_requested", json!({"toolsDisabled":true}));
+                messages.push(json!({"role":"user","content":format!(
+                    "Tools are unavailable in this step. Give one concise final answer to the active request using the actual tool results already in context. Do not repeat or invent work; report command exit codes accurately. Verified operation records: {}",json!(evidence))}));
+            }
+            operational["outstanding"] = json!(outstanding);
             operational["unresolved"] = json!(unresolved.keys().collect::<Vec<_>>());
             operational["denied"] = json!(denied);
             let schemas = registry.active_schemas();
@@ -464,7 +519,7 @@ impl Agent {
                 continue;
             }
             if (finalizing || status_only) && !turn.calls.is_empty() {
-                return Err("Task incomplete: tool-free finalization requested tools; no action was executed".into());
+                return Err("Task incomplete: model requested tools during a tool-free turn; no action was executed".into());
             }
             if turn.calls.is_empty() {
                 let current = resume_evidence
@@ -549,16 +604,8 @@ impl Agent {
                     return Err("Task incomplete: tools settled, but the single tool-free finalization did not produce a verified final answer. See preserved tool results.".into());
                 }
                 messages.push(turn.message);
-                if empty
-                    && missing.is_empty()
-                    && evidence.iter().any(|v| v["ok"] == true)
-                    && !finalization_used
-                {
+                if empty && missing.is_empty() && evidence.iter().any(|v| v["ok"] == true) {
                     finalizing = true;
-                    finalization_used = true;
-                    self.emit("finalization_requested", json!({"toolsDisabled":true}));
-                    messages.push(json!({"role":"user","content":format!(
-                        "Tools are unavailable in this step. All requested operations have settled. Give one concise final summary using only these real results: {}. Do not announce, repeat, or invent work; report command exit codes accurately.",json!(evidence))}));
                     continue;
                 }
                 if no_progress >= 2 || !requirements.action() || schemas.is_empty() {

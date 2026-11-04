@@ -45,7 +45,9 @@ struct AgentActivityView: View {
                             .font(.system(size: 11)).foregroundStyle(.secondary)
                     }
                 }
-                if [.incomplete, .failed, .cancelled].contains(task.status), let resume = onContinue {
+                if [.incomplete, .failed, .cancelled].contains(task.status),
+                   events.contains(where: { $0.kind == "task_contract" || $0.kind == "task_interpreted" }),
+                   let resume = onContinue {
                     Button("Continue task", action: resume).buttonStyle(.bordered).controlSize(.small)
                 }
                 if let clarification {

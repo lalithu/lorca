@@ -48,6 +48,36 @@ async fn chat(
 ) -> axum::response::Response {
     server.requests.lock().unwrap().push(request.clone());
     let messages = request["messages"].as_array().unwrap();
+    if request["tools"].as_array().is_some_and(|tools| {
+        tools
+            .iter()
+            .any(|tool| tool["function"]["name"] == "interpret_task")
+    }) {
+        let input: Value =
+            serde_json::from_str(messages.last().unwrap()["content"].as_str().unwrap()).unwrap();
+        let continuing = input["previousTask"].is_object();
+        let objective = if continuing {
+            format!(
+                "{}\nUser decision: {}",
+                input["previousTask"]["objective"].as_str().unwrap(),
+                input["latestUserMessage"].as_str().unwrap()
+            )
+        } else {
+            input["latestUserMessage"].as_str().unwrap().to_owned()
+        };
+        let message = call(
+            "route",
+            "interpret_task",
+            json!({
+                "relation":if continuing {"continue"} else {"new"},
+                "objective":objective,
+                "outcomes":[{"kind":"edit","target":"README.md"},{"kind":"edit","target":"notes.txt"}],
+                "edit_targets":[],"forbidden_targets":[],"read_only":false,
+                "commands_forbidden":true,"clarification":null
+            }),
+        );
+        return Json(json!({"message":message,"done":true})).into_response();
+    }
     let answered = messages.last().is_some_and(|m| {
         m["content"]
             .as_str()
@@ -57,7 +87,7 @@ async fn chat(
     // On subsequent turns the answer remains in the user history.
     let answered = answered
         || messages.iter().any(|m| {
-            m["role"] == "user"
+            matches!(m["role"].as_str(), Some("user" | "system"))
                 && m["content"]
                     .as_str()
                     .unwrap_or("")
@@ -231,7 +261,7 @@ async fn restart_continuation(interrupted: bool) {
         resumed.audit.iter().any(|e| e.kind == "approval_required"),
         "an answer must not grant edit permission"
     );
-    assert_eq!(server.requests.lock().unwrap().len(), 6);
+    assert_eq!(server.requests.lock().unwrap().len(), 8);
     http.abort();
 }
 

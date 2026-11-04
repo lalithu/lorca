@@ -18,8 +18,21 @@ async fn cli_returns_without_waiting_for_stdin_eof() {
         .route("/api/generate",post(|Json(v):Json<Value>|async move{Json(json!({"done":true,"model":v["model"],"done_reason":"load"}))}))
         .route("/api/ps",get(||async{Json(json!({"models":[]}))}))
         .route("/api/chat",post(|Json(v):Json<Value>|async move{
-            let has_tool=v["messages"].as_array().unwrap().iter().any(|v|v["role"]=="tool");
-            Json(json!({"done":true,"message":if has_tool{json!({"role":"assistant","content":"Verified the directory listing."})}else{json!({"role":"assistant","tool_calls":[{"function":{"name":"list_directory","arguments":{"path":"."}}}]})}}))
+            let routing = v["tools"].as_array().is_some_and(|tools| tools.iter().any(|tool| {
+                tool["function"]["name"] == "interpret_task"
+            }));
+            let message = if routing {
+                json!({"role":"assistant","tool_calls":[{"function":{"name":"interpret_task","arguments":{
+                    "relation":"new","objective":"List the directory","outcomes":[{"kind":"inspect","target":null}],
+                    "edit_targets":[],"forbidden_targets":[],"read_only":false,
+                    "commands_forbidden":false,"clarification":null
+                }}}]})
+            } else if v["messages"].as_array().unwrap().iter().any(|message| message["role"] == "tool") {
+                json!({"role":"assistant","content":"Verified the directory listing."})
+            } else {
+                json!({"role":"assistant","tool_calls":[{"function":{"name":"list_directory","arguments":{"path":"."}}}]})
+            };
+            Json(json!({"done":true,"message":message}))
         }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let host = format!("http://{}", listener.local_addr().unwrap());

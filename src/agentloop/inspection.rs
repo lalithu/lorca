@@ -243,7 +243,7 @@ fn observations(history: &[Value], tool: &str) -> Vec<Value> {
 
 // Full coverage requires actual UTF-8 byte intervals, including byte zero.
 // The last excerpt alone, duplicate chunks and gaps cannot certify a full read.
-fn complete_reads(history: &[Value]) -> Vec<String> {
+pub(super) fn complete_reads(history: &[Value]) -> Vec<String> {
     let mut reads: BTreeMap<String, (u64, Vec<(u64, u64)>)> = BTreeMap::new();
     for result in observations(history, "read_file") {
         if result["ok"] != true {
@@ -288,11 +288,29 @@ fn complete_reads(history: &[Value]) -> Vec<String> {
 }
 
 impl Collection {
+    fn latest_listing(&self, history: &[Value]) -> Option<Value> {
+        observations(history, "list_directory")
+            .into_iter()
+            .rev()
+            .find(|v| {
+                v["ok"] == true
+                    && v["path"].as_str().and_then(path_key) == path_key(&self.directory)
+            })
+    }
+
+    pub(super) fn is_flat_and_exhaustive(&self, history: &[Value]) -> bool {
+        // Immediate coverage cannot settle a potentially recursive request.
+        self.coverage == InspectionCoverage::AllImmediate
+            && self.latest_listing(history).is_some_and(|listing| {
+                listing["truncated"] == false
+                    && listing["entries"]
+                        .as_array()
+                        .is_some_and(|entries| entries.iter().all(|entry| entry["kind"] == "file"))
+            })
+    }
+
     pub(super) fn missing(&self, history: &[Value]) -> Vec<String> {
-        let listings = observations(history, "list_directory");
-        let listing = listings.iter().rev().find(|v| {
-            v["ok"] == true && v["path"].as_str().and_then(path_key) == path_key(&self.directory)
-        });
+        let listing = self.latest_listing(history);
         let Some(listing) = listing.filter(|v| v["truncated"] == false && v["entries"].is_array())
         else {
             return vec![format!(

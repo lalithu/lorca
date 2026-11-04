@@ -31,7 +31,7 @@ impl Drop for Fixture {
 }
 struct Script {
     turns: Mutex<VecDeque<Value>>,
-    calls: Mutex<Vec<bool>>,
+    calls: Mutex<Vec<(bool, usize)>>,
 }
 impl Inference for Script {
     fn interprets_tasks(&self) -> bool {
@@ -46,11 +46,12 @@ impl Inference for Script {
         tools: &'a [Value],
     ) -> FutureResult<'a, Turn> {
         Box::pin(async move {
-            self.calls.lock().unwrap().push(
+            self.calls.lock().unwrap().push((
                 tools
                     .iter()
                     .any(|t| t["function"]["name"] == "interpret_task"),
-            );
+                tools.len(),
+            ));
             parse_turn(
                 self.turns
                     .lock()
@@ -81,6 +82,14 @@ fn reads(names: &[&str]) -> Value {
         "id":format!("read-{i}"),"function":{"name":"read_file","arguments":{"path":p}}})).collect::<Vec<_>>()})
 }
 async fn run(request: &str, turns: Vec<Value>) -> (TaskView, Arc<Script>, Fixture) {
+    run_with_workspace(request, turns, true).await
+}
+
+async fn run_with_workspace(
+    request: &str,
+    turns: Vec<Value>,
+    use_workspace: bool,
+) -> (TaskView, Arc<Script>, Fixture) {
     let fixture = Fixture::new();
     let script = Arc::new(Script {
         turns: Mutex::new(turns.into()),
@@ -91,7 +100,11 @@ async fn run(request: &str, turns: Vec<Value>) -> (TaskView, Arc<Script>, Fixtur
         .start(
             "fixture",
             request,
-            &fixture.0,
+            if use_workspace {
+                &fixture.0
+            } else {
+                std::path::Path::new("")
+            },
             Limits::default(),
             script.clone(),
             Registry::default(),
@@ -127,12 +140,23 @@ async fn exact_report_request_finishes_once_without_false_filename_or_extra_call
             json!({"role":"assistant","content":"Repository report: three files inspected. No changes made."}),
         ]).await;
         assert_eq!(view.status, Status::Completed, "{:?}", view.result);
-        assert_eq!(*script.calls.lock().unwrap(), [true, false, false, false]);
+        let calls = script.calls.lock().unwrap();
+        assert_eq!(calls.len(), 4);
+        assert!(calls[0].0);
+        assert!(calls[1..3].iter().all(|&(_, count)| count > 0));
+        assert_eq!(calls[3], (false, 0));
+        assert!(
+            view.events
+                .iter()
+                .any(|e| e.kind == "finalization_requested")
+        );
         assert!(script.turns.lock().unwrap().is_empty());
-        assert!(!view.events.iter().any(|e| matches!(
-            e.kind.as_str(),
-            "task_continued" | "task_waiting_for_input" | "finalization_requested"
-        )));
+        assert!(
+            !view
+                .events
+                .iter()
+                .any(|e| matches!(e.kind.as_str(), "task_continued" | "task_waiting_for_input"))
+        );
         let contract = view.contract.unwrap();
         assert_eq!(contract["objective"]["completion"]["read_paths"], json!([]));
         assert_eq!(
@@ -166,7 +190,7 @@ async fn explicit_missing_file_still_blocks_without_summary_retries() {
     )
     .await;
     assert_eq!(view.status, Status::WaitingForInput, "{:?}", view.result);
-    assert_eq!(*script.calls.lock().unwrap(), [true, false, false]);
+    assert_eq!(script.calls.lock().unwrap().len(), 3);
     assert!(!view.events.iter().any(|e| e.kind == "task_continued"));
     assert!(view.result.unwrap().contains("MISSING.md"));
 }
@@ -185,7 +209,55 @@ async fn reading_one_of_three_files_cannot_complete_the_collection() {
     )
     .await;
     assert_eq!(view.status, Status::WaitingForInput, "{:?}", view.result);
-    assert_eq!(script.calls.lock().unwrap().len(), 6);
+    let calls = script.calls.lock().unwrap();
+    assert_eq!(calls.len(), 6);
+    assert!(calls.iter().all(|&(_, count)| count > 0));
     assert!(view.result.as_ref().unwrap().contains("index.html"));
     assert!(view.result.as_ref().unwrap().contains("lalith.txt"));
+}
+
+#[tokio::test]
+async fn finalization_waits_for_the_last_excerpt() {
+    let (view, script, _) = run(
+        REQUEST,
+        vec![
+            json!({"role":"assistant","content":""}),
+            interpretation(Value::Null),
+            tool("list_directory", json!({"path":"."})),
+            reads(&["index.html", "lalith.txt"]),
+            tool("read_file", json!({"path":"README.md","length":4})),
+            tool("read_file", json!({"path":"README.md","offset":4})),
+            json!({"role":"assistant","content":"All three files were inspected."}),
+        ],
+    )
+    .await;
+    assert_eq!(view.status, Status::Completed, "{:?}", view.result);
+    let calls = script.calls.lock().unwrap();
+    assert_eq!(calls.len(), 7);
+    assert!(calls[..6].iter().all(|&(_, count)| count > 0));
+    assert_eq!(calls[6], (false, 0));
+    assert!(view.events.iter().any(|e| {
+        e.kind == "interpretation_rejected"
+            && e.data["attempt"] == 1
+            && e.data["reason"] == "unexpected_tool_calls"
+    }));
+}
+
+#[tokio::test]
+async fn conversational_reply_needs_one_routing_turn_with_or_without_workspace() {
+    for use_workspace in [true, false] {
+        let (view, script, _) = run_with_workspace(
+            "Can we talk through an idea?",
+            vec![json!({"role":"assistant","content":"Of course. What are you thinking?"})],
+            use_workspace,
+        )
+        .await;
+        assert_eq!(view.status, Status::Completed, "{:?}", view.result);
+        assert_eq!(
+            view.result.as_deref(),
+            Some("Of course. What are you thinking?")
+        );
+        assert_eq!(*script.calls.lock().unwrap(), [(true, 1)]);
+        assert!(view.contract.is_none());
+    }
 }
