@@ -38,6 +38,7 @@ impl Tool for ListDirectory {
             {
                 let a: PathArgs = parse(p.payload.clone())?;
                 let dir = w.directory(&a.path)?;
+                let version = Workspace::version(&dir.dir_metadata().map_err(|e| e.to_string())?);
                 let mut entries = vec![];
                 let mut truncated = false;
                 for entry in dir.entries().map_err(|e| e.to_string())? {
@@ -47,22 +48,27 @@ impl Tool for ListDirectory {
                     }
                     let e = entry.map_err(|e| e.to_string())?;
                     let ty = e.file_type().map_err(|e| e.to_string())?;
-                    let name = e.file_name().to_string_lossy().to_string();
+                    let name = e.file_name();
+                    let valid_name = name.to_str().is_some();
+                    let name = name.to_string_lossy().to_string();
                     let path = if a.path == "." {
                         name.clone()
                     } else {
                         format!("{}/{name}", a.path)
                     };
-                    let reference = if ty.is_symlink() {
+                    let reference = if !valid_name || ty.is_symlink() {
                         None
                     } else {
                         w.remember(&path).ok()
                     };
-                    entries.push(json!({"name":name,"path":reference,"kind":if ty.is_dir(){"directory"}else if ty.is_symlink(){"symlink"}else{"file"}}));
+                    entries.push(json!({"name":name,"path":reference,"kind":if ty.is_dir(){"directory"}else if ty.is_symlink(){"symlink"}else if ty.is_file(){"file"}else{"unsupported"}}));
+                }
+                if version != Workspace::version(&dir.dir_metadata().map_err(|e| e.to_string())?) {
+                    return Err("Directory changed during enumeration; list it again".into());
                 }
                 entries.sort_by_key(|e| e["name"].as_str().unwrap_or("").to_string());
                 Ok(
-                    json!({"ok":true,"path":a.path,"empty":entries.is_empty() && !truncated,"includesHidden":true,"entries":entries,"truncated":truncated}),
+                    json!({"ok":true,"path":a.path,"empty":entries.is_empty() && !truncated,"includesHidden":true,"entries":entries,"truncated":truncated,"workspace":w.root,"version":version}),
                 )
             }
         })

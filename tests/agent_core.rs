@@ -412,8 +412,15 @@ async fn unified_greetings_followups_and_images_preserve_history_without_workspa
             .iter()
             .filter(|r| r["messages"].is_array())
             .collect::<Vec<_>>();
-        assert_eq!(models.len(), 4);
-        assert!(models.iter().all(|r| routes_turn(r)));
+        assert_eq!(models.len(), 8);
+        assert!(
+            models
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .all(|pair| routes_turn(pair[0]) && !routes_turn(pair[1]))
+        );
+        let models = models.into_iter().step_by(2).collect::<Vec<_>>();
         assert!(
             models[2]["messages"]
                 .as_array()

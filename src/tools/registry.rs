@@ -112,6 +112,13 @@ impl Registry {
         self.unavailable.remove(name);
         self.tools.insert(name.into(), tool);
     }
+    pub(crate) fn may_mutate(&self, name: &str) -> bool {
+        self.catalog
+            .read()
+            .unwrap()
+            .get(name)
+            .is_some_and(|m| m.authority == Authority::Approval)
+    }
     pub(crate) fn requires_approval(&self, name: &str, arguments: &Value) -> bool {
         self.adaptive
             && self

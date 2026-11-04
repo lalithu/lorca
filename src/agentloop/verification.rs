@@ -35,6 +35,8 @@ pub struct Requirements {
     empty_paths: Vec<String>,
     // Only references extracted from user instructions; model labels never enter here.
     read_paths: Vec<String>,
+    read_range: Option<(u64, u64)>,
+    unresolved_replacement: bool,
     read_collections: Vec<super::inspection::Collection>,
     commands: Vec<String>,
     report_only: bool,
@@ -207,7 +209,8 @@ impl Requirements {
         };
         Self {
             inspect: !explanatory
-                && has(&["inspect", "review", "read", "examine"])
+                && (has(&["inspect", "review", "read", "examine"])
+                    || positive.contains("look at "))
                 && (workspace_action || !read_paths.is_empty() || lower.contains("directory")),
             directory_only: lower.contains("directory")
                 && !lower.contains("repo")
@@ -215,7 +218,11 @@ impl Requirements {
             edit,
             paths,
             empty_paths,
+            read_range: (read_paths.len() == 1)
+                .then(|| requested_range(task))
+                .flatten(),
             read_paths,
+            unresolved_replacement: false,
             read_collections: super::inspection::collections(task),
             report_only: !edit_requested,
             commands,
@@ -225,62 +232,105 @@ impl Requirements {
         use super::intent::OutcomeKind::*;
         let mut value = Self::new(task);
         value.inspect |= intent.outcomes.iter().any(|o| o.kind == Inspect);
-        value.edit |= intent
-            .outcomes
-            .iter()
-            .any(|o| matches!(o.kind, Edit | RepairVerify));
-        let semantic_paths: Vec<_> = intent
-            .outcomes
-            .iter()
-            .filter(|o| matches!(o.kind, Edit | RepairVerify))
-            .filter_map(|o| o.target.as_ref())
-            .map(|p| normalized_path(p))
-            .collect();
-        value.paths.extend(semantic_paths);
-        value.paths.sort();
-        value.paths.dedup();
-        // Inspection labels (including typed proposals) cannot add paths.
-        // Self::new derives file/collection obligations from user clauses only.
-        value.report_only = !value.edit && !intent.outcomes.iter().any(|o| o.kind == RepairVerify);
-        if intent
-            .outcomes
-            .iter()
-            .any(|o| matches!(o.kind, ExecuteReport | RepairVerify))
-            && value.commands.is_empty()
-        {
-            value.commands.push(String::new());
+
+        if !value.report_only {
+            value.edit |= intent
+                .outcomes
+                .iter()
+                .any(|o| matches!(o.kind, Edit | RepairVerify));
         }
-        if !intent
-            .outcomes
-            .iter()
-            .any(|o| matches!(o.kind, ExecuteReport | RepairVerify))
-        {
-            // Do not erase a command explicitly required by the user.
-        }
+        // Model outcomes describe the work. Concrete requirements are grounded
+        // exclusively in the user's instruction.
+        value.report_only = !value.edit;
         value
     }
-    pub(super) fn retain_inspection(&mut self, instruction: &str) {
-        // Reconstruct trusted references on resume; do not resurrect a legacy
-        // model-generated filename from the serialized contract.
-        let previous = Self::new(instruction);
-        self.inspect |= previous.inspect;
-        self.read_paths.extend(previous.read_paths);
-        self.read_paths.sort();
-        self.read_paths.dedup();
-        for collection in previous.read_collections {
-            if !self.read_collections.contains(&collection) {
-                self.read_collections.push(collection);
+    pub(super) fn revise_inspection(&mut self, instructions: &[String]) {
+        self.read_paths.clear();
+        self.read_range = None;
+        self.unresolved_replacement = false;
+        self.read_collections.clear();
+        for instruction in instructions {
+            let mut next = Self::new(instruction);
+            let replacement = instruction
+                .to_ascii_lowercase()
+                .split(|c: char| !c.is_alphabetic())
+                .any(|word| word == "instead");
+            if replacement && !next.read_paths.is_empty() {
+                let lower = instruction.to_ascii_lowercase();
+                if let Some(index) = lower.find("instead of ") {
+                    let old = super::inspection::explicit_files(&format!(
+                        "Read {}",
+                        &instruction[index + "instead of ".len()..]
+                    ));
+                    let before = self.read_paths.len();
+                    self.read_paths.retain(|path| !old.contains(path));
+                    self.unresolved_replacement = before == self.read_paths.len() && before > 0;
+                } else if self.read_paths.len() <= 1 {
+                    self.read_paths.clear();
+                    self.unresolved_replacement = false;
+                } else {
+                    self.unresolved_replacement = true;
+                }
+            }
+            if replacement && !next.read_collections.is_empty() {
+                self.read_collections.clear();
+            }
+            self.inspect |= next.inspect;
+            if !next.read_paths.is_empty() {
+                self.read_range = if self.read_paths.is_empty() {
+                    next.read_range
+                } else {
+                    None
+                };
+                self.read_paths.append(&mut next.read_paths);
+            }
+            for collection in next.read_collections {
+                if !self.read_collections.contains(&collection) {
+                    self.read_collections.push(collection);
+                }
             }
         }
+        self.read_paths.sort();
+        self.read_paths.dedup();
     }
+
+    pub(super) fn terminal_read_blocker(&self, current: &[Value]) -> Option<String> {
+        let complete = super::inspection::covered_reads(current, self.read_range);
+        let complete_files = super::inspection::complete_reads(current);
+        super::inspection::observations(current, "read_file")
+            .iter()
+            .find_map(|result| {
+                let path = result["path"].as_str()?;
+                let error = result["error"].as_str()?;
+                (result["ok"] != true
+                    && (error == "File is not UTF-8 text" || error == "Expected a regular file")
+                    && (self.read_paths.iter().any(|requested| {
+                        !read_satisfies(requested, &complete)
+                            && read_satisfies(requested, &[path.into()])
+                    }) || self.read_collections.iter().any(|collection| {
+                        collection.coverage != super::intent::InspectionCoverage::Relevant
+                            && !complete_files.iter().any(|actual| actual == path)
+                            && collection.lists_member(current, path)
+                    })))
+                .then(|| format!("Could not read {path}: {error}"))
+            })
+    }
+
     pub(crate) fn requires_edit(&self) -> bool {
         self.edit
+    }
+    pub(super) fn requests_command(&self) -> bool {
+        !self.commands.is_empty()
     }
     pub(super) fn reports_failure(&self) -> bool {
         self.report_only && !self.commands.is_empty()
     }
     pub fn action(&self) -> bool {
-        self.inspect || self.edit || !self.commands.is_empty()
+        self.inspect
+            || self.edit
+            || !self.commands.is_empty()
+            || !self.read_paths.is_empty()
+            || !self.read_collections.is_empty()
     }
     // "Relevant files" is open-ended. Only explicit coverage can close the
     // tool phase before the model offers a final answer.
@@ -288,15 +338,16 @@ impl Requirements {
         if self.edit
             || !self.commands.is_empty()
             || (self.read_paths.is_empty() && self.read_collections.is_empty())
-            || self
-                .read_collections
-                .iter()
-                .any(|collection| !collection.is_flat_and_exhaustive(current))
+            || self.read_collections.iter().any(|collection| {
+                collection.coverage == super::intent::InspectionCoverage::Relevant
+            })
         {
             return false;
         }
-        let complete = super::inspection::complete_reads(current);
-        self.read_paths.iter().all(|path| complete.contains(path))
+        let complete = super::inspection::covered_reads(current, self.read_range);
+        self.read_paths
+            .iter()
+            .all(|path| read_satisfies(path, &complete))
     }
     pub(super) fn validate_patch(&self, payload: &Value) -> Result<(), String> {
         let path = normalized_path(payload["path"].as_str().unwrap_or(""));
@@ -306,8 +357,6 @@ impl Requirements {
         Ok(())
     }
     pub fn missing(&self, current: &[Value]) -> Vec<String> {
-        let mut read = false;
-        let mut read_paths = vec![];
         let mut patches = vec![];
         let mut patch_bytes = std::collections::HashMap::new();
         let mut commands = vec![];
@@ -326,19 +375,6 @@ impl Requirements {
                 result = result["evidence"].clone();
             }
             match m["tool_name"].as_str() {
-                Some("list_directory")
-                    if self.directory_only
-                        && result["ok"] == true
-                        && result["entries"].is_array() =>
-                {
-                    read = true
-                }
-                Some("read_file") if result["ok"] == true && result["content"].is_string() => {
-                    read = true;
-                    if let Some(path) = result["path"].as_str() {
-                        read_paths.push(path.to_owned());
-                    }
-                }
                 Some("apply_patch") if result["ok"] == true && result["verified"] == true => {
                     if let Some(path) = result["path"].as_str() {
                         patches.push(normalized_path(path));
@@ -391,20 +427,11 @@ impl Requirements {
                 _ => (),
             }
         }
-        let mut missing = vec![];
-        if self.inspect && !read && self.read_collections.is_empty() {
-            missing.push("Inspect relevant real files with read_file; a listing or a promise is not file inspection".into());
-        }
-        for path in &self.read_paths {
-            if !read_satisfies(path, &read_paths) {
-                missing.push(format!(
-                    "Read the requested real file {path} with read_file"
-                ));
-            }
-        }
-        for collection in &self.read_collections {
-            missing.extend(collection.missing(current));
-        }
+        let mut missing: Vec<_> = self
+            .inspection_status(current)
+            .into_iter()
+            .flat_map(|requirement| requirement.missing)
+            .collect();
         if self.edit {
             if self.paths.is_empty() && patches.is_empty() {
                 missing.push("Apply and verify the requested file change with apply_patch".into());
@@ -450,11 +477,7 @@ impl Requirements {
             .filter(|m| m["role"] == "tool" && m["tool_name"] == "read_file")
             .filter_map(|m| serde_json::from_str(m["content"].as_str()?).ok())
             .collect();
-        let successful: Vec<String> = results
-            .iter()
-            .filter(|v| v["ok"] == true && v["content"].is_string())
-            .filter_map(|v| v["path"].as_str().map(str::to_owned))
-            .collect();
+        let successful = super::inspection::covered_reads(current, self.read_range);
         for requested in &self.read_paths {
             if read_satisfies(requested, &successful) {
                 continue;
@@ -517,6 +540,25 @@ pub(super) fn clarification_question(text: &str) -> Option<&str> {
     (recognized(text) || text.lines().any(recognized)).then_some(text)
 }
 
+fn requested_range(task: &str) -> Option<(u64, u64)> {
+    let words: Vec<_> = task.split_whitespace().collect();
+    for words in words.windows(2) {
+        if words[0].eq_ignore_ascii_case("bytes") {
+            let Some((start, end)) = words[1].trim_end_matches([',', '.', ';']).split_once("..")
+            else {
+                continue;
+            };
+            let (start, end) = (start.parse::<u64>().ok()?, end.parse::<u64>().ok()?);
+            return (start < end).then_some((start, end));
+        }
+    }
+    words.windows(3).find_map(|w| {
+        (w[0].eq_ignore_ascii_case("first") && w[2].eq_ignore_ascii_case("bytes"))
+            .then(|| w[1].parse::<u64>().ok().filter(|n| *n > 0).map(|n| (0, n)))
+            .flatten()
+    })
+}
+
 fn normalized_path(path: &str) -> String {
     super::recovery::path_key(path)
         .unwrap_or_else(|| path.to_owned())
@@ -524,6 +566,7 @@ fn normalized_path(path: &str) -> String {
 }
 
 fn read_satisfies(requested: &str, observed: &[String]) -> bool {
+    let qualified = requested.contains('/');
     let Some(requested) = super::recovery::path_key(requested) else {
         return false;
     };
@@ -534,7 +577,7 @@ fn read_satisfies(requested: &str, observed: &[String]) -> bool {
     if observed.contains(&requested) {
         return true;
     }
-    !requested.contains('/')
+    !qualified
         && observed
             .iter()
             .filter(|p| p.rsplit('/').next() == Some(requested.as_str()))
@@ -724,7 +767,7 @@ mod tests {
                 result(
                     "read_file",
                     "read",
-                    json!({"ok":true,"path":"Cargo.toml","content":"actual"})
+                    json!({"ok":true,"path":"Cargo.toml","content":"actual","offset":0,"totalBytes":6,"truncated":false})
                 ),
                 result(
                     "apply_patch",
@@ -805,24 +848,175 @@ mod tests {
 pub struct Report {
     pub satisfied: bool,
     pub satisfied_requirements: Vec<String>,
+    pub inspection_requirements: Vec<InspectionCheck>,
     pub unsatisfied: Vec<String>,
     pub evidence: Vec<serde_json::Value>,
 }
+#[derive(Debug, Serialize)]
+pub struct InspectionCheck {
+    id: String,
+    #[serde(flatten)]
+    target: InspectionRequirement,
+    satisfied: bool,
+    missing: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum InspectionRequirement {
+    ExplicitFile {
+        path: String,
+        required_range: Option<(u64, u64)>,
+    },
+    Collection {
+        scope: super::inspection::Collection,
+    },
+    Unresolved {
+        description: String,
+    },
+    Subject {
+        directory: Option<String>,
+    },
+}
+
+impl InspectionCheck {
+    fn new(id: String, target: InspectionRequirement, missing: Vec<String>) -> Self {
+        Self {
+            id,
+            target,
+            satisfied: missing.is_empty(),
+            missing,
+        }
+    }
+}
+
 impl Requirements {
+    pub(super) fn inspection_contract(&self, instructions: &[String]) -> Vec<Value> {
+        let declared: Vec<_> = instructions
+            .iter()
+            .map(|instruction| Self::new(instruction).inspection_status(&[]))
+            .collect();
+        self.inspection_status(&[]).into_iter().map(|requirement| {
+            let origins = declared.iter().enumerate()
+                .filter(|(_, candidates)| candidates.iter().any(|candidate| candidate.id == requirement.id))
+                .map(|(i, _)| serde_json::json!({"instruction":instructions[i],"instructionIndex":i,"source":"user"}))
+                .collect::<Vec<_>>();
+            let mut value = serde_json::json!(requirement);
+            let record = value.as_object_mut().unwrap();
+            record.remove("missing");
+            record.remove("satisfied");
+            record.insert("origins".into(), serde_json::json!(origins));
+            value
+        }).collect()
+    }
+
+    fn inspection_status(&self, history: &[Value]) -> Vec<InspectionCheck> {
+        let complete = super::inspection::covered_reads(history, self.read_range);
+        let mut requirements = vec![];
+        for path in &self.read_paths {
+            let missing = if read_satisfies(path, &complete) {
+                vec![]
+            } else {
+                vec![format!(
+                    "Read the requested real file {path} with read_file and cover the required bytes"
+                )]
+            };
+            requirements.push(InspectionCheck::new(
+                format!("file:{path}"),
+                InspectionRequirement::ExplicitFile {
+                    path: path.clone(),
+                    required_range: self.read_range,
+                },
+                missing,
+            ));
+        }
+        for collection in &self.read_collections {
+            requirements.push(InspectionCheck::new(
+                format!(
+                    "collection:{:?}:{}",
+                    collection.coverage, collection.directory
+                ),
+                if collection.unresolved {
+                    InspectionRequirement::Unresolved {
+                        description: "collection directory".into(),
+                    }
+                } else {
+                    InspectionRequirement::Collection {
+                        scope: collection.clone(),
+                    }
+                },
+                collection.missing(history),
+            ));
+        }
+        if self.unresolved_replacement {
+            requirements.push(InspectionCheck::new(
+                "inspection:unresolved-replacement".into(),
+                InspectionRequirement::Unresolved {
+                    description: "which prior target the correction replaces".into(),
+                },
+                vec!["Specify which prior file the correction replaces".into()],
+            ));
+        }
+        if requirements.is_empty() && self.inspect {
+            let missing = if self.directory_only {
+                let listed = super::inspection::observations(history, "list_directory")
+                    .iter()
+                    .any(|v| {
+                        v["ok"] == true
+                            && v["error"].is_null()
+                            && v["truncated"] == false
+                            && v["entries"].is_array()
+                            && v["path"]
+                                .as_str()
+                                .and_then(super::recovery::path_key)
+                                .as_deref()
+                                == Some("")
+                    });
+                if listed {
+                    vec![]
+                } else {
+                    vec!["List the workspace directory completely with list_directory".into()]
+                }
+            } else {
+                let read = super::inspection::observations(history, "read_file")
+                    .iter()
+                    .any(|v| v["ok"] == true && v["error"].is_null() && v["content"].is_string());
+                if read {
+                    vec![]
+                } else {
+                    vec!["Inspect relevant real files with read_file; a listing or a promise is not file inspection".into()]
+                }
+            };
+            requirements.push(InspectionCheck::new(
+                "inspection:subject".into(),
+                InspectionRequirement::Subject {
+                    directory: self.directory_only.then(|| ".".into()),
+                },
+                missing,
+            ));
+        }
+        requirements
+    }
+
     pub fn report(&self, history: &[Value]) -> Report {
         let unsatisfied = self.missing(history);
+        let inspection_requirements = self.inspection_status(history);
         let evidence:Vec<_>=history.iter().filter(|m|m["role"]=="tool").filter_map(|m| {
             let value=serde_json::from_str::<Value>(m["content"].as_str()?).ok()?;
-            Some(serde_json::json!({"tool":m["tool_name"],"callId":m["tool_call_id"],"ok":value["ok"],"exitCode":value["exitCode"],"path":value["path"],"verified":value["verified"]}))
+            Some(serde_json::json!({"tool":m["tool_name"],"callId":m["tool_call_id"],"ok":value["ok"],
+                "exitCode":value["exitCode"],"path":value["path"],"verified":value["verified"],
+                "offset":value["offset"],"nextOffset":value["nextOffset"],"totalBytes":value["totalBytes"],
+                "version":value["version"],"truncated":value["truncated"]}))
         }).collect();
-        let satisfied_requirements = self
-            .missing(&[])
-            .into_iter()
-            .filter(|r| !unsatisfied.contains(r))
+        let satisfied_requirements = inspection_requirements
+            .iter()
+            .filter(|r| r.satisfied)
+            .map(|r| r.id.clone())
             .collect();
         Report {
             satisfied: unsatisfied.is_empty(),
             satisfied_requirements,
+            inspection_requirements,
             unsatisfied,
             evidence,
         }
@@ -833,7 +1027,7 @@ impl Requirements {
 mod read_identity_tests {
     use super::*;
     fn read(path: &str, ok: bool) -> Value {
-        serde_json::json!({"role":"tool","tool_name":"read_file","content":serde_json::json!({"ok":ok,"path":path,"content":"real content"}).to_string()})
+        serde_json::json!({"role":"tool","tool_name":"read_file","content":serde_json::json!({"ok":ok,"path":path,"content":"real content","offset":0,"totalBytes":12,"truncated":false}).to_string()})
     }
     #[test]
     fn bare_filename_matches_one_successful_path_without_losing_explicit_scope() {
@@ -924,7 +1118,7 @@ mod inspection_target_tests {
         observation(
             "read_file",
             json!({"ok":true,"path":path,"offset":offset,
-            "totalBytes":total,"content":content,"truncated":offset+content.len()<total}),
+            "totalBytes":total,"version":"fixture","content":content,"truncated":offset+content.len()<total}),
         )
     }
     #[test]
@@ -1056,14 +1250,123 @@ mod inspection_target_tests {
     #[test]
     fn continuation_rebuilds_inspection_from_user_references_without_legacy_labels() {
         let mut req = interpreted("Continue and report back. Do not edit files.", Value::Null);
-        req.retain_inspection("Read README.md. Do not edit files.");
+        req.revise_inspection(&[String::from("Read README.md. Do not edit files.")]);
         assert_eq!(req.read_paths, ["README.md"]);
         assert!(!req.requires_edit());
         assert!(req.missing(&[read("README.md", 0, 4, "real")]).is_empty());
         let mut req = interpreted("Continue", Value::Null);
-        req.retain_inspection("Inspect this repository, read the files, report back.");
+        req.revise_inspection(&[String::from(
+            "Inspect this repository, read the files, report back.",
+        )]);
         assert!(req.read_paths.is_empty());
         assert!(!req.read_collections.is_empty());
         assert!(!req.missing(&[]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod repair_regressions {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn coordinated_targets_and_revisions_preserve_exact_identity() {
+        for request in [
+            "Read README.md, index.html, and lalith.txt, then explain what each contains.",
+            "Read README.md, index.html and lalith.txt",
+            "Read README.md; then index.html and lalith.txt",
+        ] {
+            assert_eq!(
+                Requirements::new(request).read_paths,
+                ["README.md", "index.html", "lalith.txt"]
+            );
+        }
+        assert_eq!(Requirements::new("Read README").read_paths, ["README"]);
+        assert_eq!(Requirements::new("Read config").read_paths, ["config"]);
+        let mut req = Requirements::new("Continue");
+        req.revise_inspection(
+            &[
+                "Read OLD.md",
+                "Read NEW.md instead.",
+                "Keep going",
+                "Also inspect config.toml",
+                "Continue",
+            ]
+            .map(str::to_owned),
+        );
+        assert_eq!(req.read_paths, ["NEW.md", "config.toml"]);
+    }
+
+    fn observation(tool: &str, result: Value) -> Value {
+        json!({"role":"tool","tool_name":tool,"content":result.to_string()})
+    }
+
+    fn range(path: &str, offset: usize, bytes: &str, total: usize, version: &str) -> Value {
+        observation(
+            "read_file",
+            json!({"path":path,"ok":true,"offset":offset,"content":bytes,
+            "totalBytes":total,"version":version,"truncated":offset+bytes.len()<total}),
+        )
+    }
+
+    #[test]
+    fn full_read_rejects_wrong_paths_gaps_and_mixed_same_size_versions() {
+        let req = Requirements::new("Read ./a.txt");
+        assert!(
+            !req.missing(&[range("different/a.txt", 0, "abcdef", 6, "v")])
+                .is_empty()
+        );
+        assert!(
+            !req.missing(&[
+                range("a.txt", 0, "abc", 6, "v"),
+                range("a.txt", 3, "XYZ", 6, "v2")
+            ])
+            .is_empty()
+        );
+        assert!(
+            !req.missing(&[
+                range("a.txt", 0, "ab", 6, "v"),
+                range("a.txt", 3, "def", 6, "v")
+            ])
+            .is_empty()
+        );
+        assert!(
+            req.missing(&[
+                range("a.txt", 2, "cdef", 6, "v"),
+                range("a.txt", 0, "abc", 6, "v")
+            ])
+            .is_empty()
+        );
+        assert!(req.missing(&[range("a.txt", 0, "", 0, "empty")]).is_empty());
+    }
+
+    #[test]
+    fn recursive_collection_requires_every_enumerated_directory_and_file() {
+        let req = Requirements::new("Read all files recursively in `version.1`");
+        let list = |path: &str, entries: Value| {
+            observation(
+                "list_directory",
+                json!({
+            "path":path,"ok":true,"truncated":false,"entries":entries}),
+            )
+        };
+        let root = list(
+            "version.1",
+            json!([{"kind":"directory","path":"version.1/nested"}]),
+        );
+        let nested = list(
+            "version.1/nested",
+            json!([{"kind":"file","path":"version.1/nested/a.txt"}]),
+        );
+        assert!(!req.missing(std::slice::from_ref(&root)).is_empty());
+        assert!(!req.missing(&[root.clone(), nested.clone()]).is_empty());
+        assert!(
+            req.missing(&[
+                root,
+                nested,
+                range("version.1/nested/a.txt", 0, "real", 4, "v")
+            ])
+            .is_empty()
+        );
     }
 }

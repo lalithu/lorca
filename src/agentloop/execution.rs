@@ -75,6 +75,7 @@ impl Agent {
                     .iter()
                     .filter_map(|s| s["function"]["name"].as_str().map(str::to_owned))
                     .collect::<Vec<_>>(),
+                self.objective_revision() > 1,
                 capacity.unwrap_or(crate::context::DEFAULT_CAPACITY),
                 limits,
                 cancel.clone(),
@@ -89,158 +90,174 @@ impl Agent {
             if self.revision_pending() {
                 return Err("Task revised".into());
             }
-            let mut intent = match route {
-                super::intent::Route::Reply(text) => {
-                    self.state
-                        .lock()
-                        .unwrap()
-                        .view
-                        .as_mut()
-                        .unwrap()
-                        .transcript
-                        .push(json!({"role":"assistant","content":text}));
-                    self.emit("conversation_replied", Value::Null);
-                    return Ok(text);
+            if let super::intent::Route::Task(mut intent) = route {
+                if self.objective_revision() > 1 {
+                    intent.relation = super::intent::Relation::Correct;
                 }
-                super::intent::Route::Task(intent) => intent,
-            };
-            if self.objective_revision() > 1 {
-                intent.relation = super::intent::Relation::Correct;
-            }
-            if intent.relation == super::intent::Relation::New
-                || pending_task.as_ref().is_some_and(|p| p.completed)
-            {
-                resume_evidence.clear();
-            }
-            if intent.relation == super::intent::Relation::Cancel {
-                if let Some(owner) = self.snapshot().map(|v| v.owner) {
-                    self.cancel_owner(&owner);
-                }
-                let mut saved = json!(contract);
-                saved["supersedesTaskId"] = json!(
-                    pending_task
-                        .as_ref()
-                        .filter(|p| !p.completed)
-                        .map(|p| &p.id)
-                );
-                self.state.lock().unwrap().view.as_mut().unwrap().contract = Some(saved);
-                return Err("Cancelled".into());
-            }
-            let continuing = matches!(
-                intent.relation,
-                super::intent::Relation::Continue | super::intent::Relation::Correct
-            );
-            let authority_text = if continuing {
-                pending_task
-                    .as_ref()
-                    .map(|p| {
-                        format!(
-                            "{}\nLatest user instruction: {}",
-                            p.contract
-                                .as_ref()
-                                .and_then(|c| c["objective"]["original_instruction"].as_str())
-                                .unwrap_or(&p.objective),
-                            task
-                        )
-                    })
-                    .unwrap_or_else(|| task.clone())
-            } else {
-                resume_evidence.clear();
-                task.clone()
-            };
-            contract.objective.original_instruction = if continuing {
-                pending_task
-                    .as_ref()
-                    .and_then(|p| p.contract.as_ref())
-                    .and_then(|c| c["objective"]["original_instruction"].as_str())
-                    .unwrap_or(&task)
-                    .into()
-            } else {
-                task.clone()
-            };
-            contract.objective.requested_outcome = intent.objective.clone();
-            contract.objective.completion =
-                super::verification::Requirements::interpreted(&task, &intent);
-            if continuing
-                && let Some(previous) = &pending_task
-                && let Some(original) = previous
-                    .contract
-                    .as_ref()
-                    .and_then(|c| c["objective"]["original_instruction"].as_str())
-            {
-                contract.objective.completion.retain_inspection(original);
-            }
-            contract.authority = if continuing && let Some(previous) = &pending_task {
-                super::authority::Authority::continued(
-                    previous,
-                    &task,
-                    &intent,
-                    &contract.objective.completion,
-                )
-            } else {
-                super::authority::Authority::interpreted(
-                    &authority_text,
-                    &intent,
-                    &contract.objective.completion,
-                )
-            };
-            self.emit("task_interpreted",json!({"interpretation":intent,"parent":if continuing {pending_task.as_ref().map(|p|&p.id)}else{None},"revision":self.objective_revision()}));
-            task = intent.objective.clone();
-            self.state.lock().unwrap().view.as_mut().unwrap().task = task.clone();
-            let mut saved = json!(contract);
-            saved["revision"] = json!(self.objective_revision());
-            saved["instructionHistory"] = json!(self.instruction_history());
-            saved["relation"] = json!(intent.relation);
-            if intent.relation == super::intent::Relation::New {
-                saved["supersedesTaskId"] = json!(
-                    pending_task
-                        .as_ref()
-                        .filter(|p| !p.completed)
-                        .map(|p| &p.id)
-                );
-            }
-            // Prior tool observations are background, not fresh task evidence.
-            let ids: HashSet<_> = resume_evidence
-                .iter()
-                .filter_map(|m| m["tool_call_id"].as_str())
-                .map(str::to_owned)
-                .collect();
-            for message in messages.iter_mut().skip(1) {
-                if message["tool_calls"].is_array()
-                    || message["role"] == "tool"
-                        && !ids.contains(message["tool_call_id"].as_str().unwrap_or(""))
+                if intent.relation == super::intent::Relation::New
+                    || pending_task.as_ref().is_some_and(|p| p.completed)
                 {
-                    if message["tool_calls"].as_array().is_some_and(|calls| {
-                        calls
-                            .iter()
-                            .all(|c| ids.contains(c["id"].as_str().unwrap_or("")))
-                    }) {
-                        continue;
-                    }
-                    *message = json!({"role":"assistant","content":format!("Earlier task context (not current execution evidence): {}",bounded(&message.to_string(),900))});
+                    resume_evidence.clear();
                 }
-            }
-            if intent.relation == super::intent::Relation::Status {
-                saved["pendingTask"] = json!(pending_task);
+                if intent.relation == super::intent::Relation::Cancel {
+                    if let Some(owner) = self.snapshot().map(|v| v.owner) {
+                        self.cancel_owner(&owner);
+                    }
+                    let mut saved = json!(contract);
+                    saved["supersedesTaskId"] = json!(
+                        pending_task
+                            .as_ref()
+                            .filter(|p| !p.completed)
+                            .map(|p| &p.id)
+                    );
+                    self.state.lock().unwrap().view.as_mut().unwrap().contract = Some(saved);
+                    return Err("Cancelled".into());
+                }
+                let continuing = matches!(
+                    intent.relation,
+                    super::intent::Relation::Continue | super::intent::Relation::Correct
+                );
+                let authority_text = if continuing {
+                    pending_task
+                        .as_ref()
+                        .map(|p| {
+                            format!(
+                                "{}\nLatest user instruction: {}",
+                                p.contract
+                                    .as_ref()
+                                    .and_then(|c| c["objective"]["original_instruction"].as_str())
+                                    .unwrap_or(&p.objective),
+                                task
+                            )
+                        })
+                        .unwrap_or_else(|| task.clone())
+                } else {
+                    resume_evidence.clear();
+                    task.clone()
+                };
+                contract.objective.original_instruction = if continuing {
+                    pending_task
+                        .as_ref()
+                        .and_then(|p| p.contract.as_ref())
+                        .and_then(|c| c["objective"]["original_instruction"].as_str())
+                        .unwrap_or(&task)
+                        .into()
+                } else {
+                    task.clone()
+                };
+                contract.objective.requested_outcome = intent.objective.clone();
+                contract.objective.completion =
+                    super::verification::Requirements::interpreted(&task, &intent);
+                let mut instructions = if continuing {
+                    pending_task
+                        .as_ref()
+                        .and_then(|p| p.contract.as_ref())
+                        .map(|c| {
+                            serde_json::from_value::<Vec<String>>(c["instructionHistory"].clone())
+                                .unwrap_or_else(|_| {
+                                    c["objective"]["original_instruction"]
+                                        .as_str()
+                                        .into_iter()
+                                        .map(str::to_owned)
+                                        .collect()
+                                })
+                        })
+                        .unwrap_or_default()
+                } else {
+                    vec![]
+                };
+                if instructions.last() != Some(&task) {
+                    instructions.push(task.clone());
+                }
+                if continuing {
+                    contract
+                        .objective
+                        .completion
+                        .revise_inspection(&instructions);
+                }
+                contract.authority = if continuing && let Some(previous) = &pending_task {
+                    super::authority::Authority::continued(
+                        previous,
+                        &task,
+                        &intent,
+                        &contract.objective.completion,
+                    )
+                } else {
+                    super::authority::Authority::interpreted(
+                        &authority_text,
+                        &intent,
+                        &contract.objective.completion,
+                    )
+                };
+                self.emit("task_interpreted",json!({"interpretation":intent,"parent":if continuing {pending_task.as_ref().map(|p|&p.id)}else{None},"revision":self.objective_revision()}));
+                task = intent.objective.clone();
+                self.state.lock().unwrap().view.as_mut().unwrap().task = task.clone();
+                let mut saved = json!(contract);
+                saved["revision"] = json!(self.objective_revision());
+                saved["inspectionRequirements"] = json!(
+                    contract
+                        .objective
+                        .completion
+                        .inspection_contract(&instructions)
+                );
+                saved["instructionHistory"] = json!(instructions);
+                saved["relation"] = json!(intent.relation);
+                if intent.relation == super::intent::Relation::New {
+                    saved["supersedesTaskId"] = json!(
+                        pending_task
+                            .as_ref()
+                            .filter(|p| !p.completed)
+                            .map(|p| &p.id)
+                    );
+                }
+                // Prior tool observations are background, not fresh task evidence.
+                let ids: HashSet<_> = resume_evidence
+                    .iter()
+                    .filter_map(|m| m["tool_call_id"].as_str())
+                    .map(str::to_owned)
+                    .collect();
+                for message in messages.iter_mut().skip(1) {
+                    if message["tool_calls"].is_array()
+                        || message["role"] == "tool"
+                            && !ids.contains(message["tool_call_id"].as_str().unwrap_or(""))
+                    {
+                        if message["tool_calls"].as_array().is_some_and(|calls| {
+                            calls
+                                .iter()
+                                .all(|c| ids.contains(c["id"].as_str().unwrap_or("")))
+                        }) {
+                            continue;
+                        }
+                        *message = json!({"role":"assistant","content":format!("Earlier task context (not current execution evidence): {}",bounded(&message.to_string(),900))});
+                    }
+                }
+                if intent.relation == super::intent::Relation::Status {
+                    saved["pendingTask"] = json!(pending_task);
+                    status_only = true;
+                }
+                self.state.lock().unwrap().view.as_mut().unwrap().contract = Some(saved);
+                if let Some(question) = intent.clarification.as_ref() {
+                    return super::recovery::question(
+                        self,
+                        registry,
+                        w,
+                        limits,
+                        cancel.clone(),
+                        &contract.authority,
+                        question,
+                    )
+                    .await;
+                }
+                if intent.relation == super::intent::Relation::Status {
+                    messages.push(json!({"role":"system","content":"Answer the status question from saved observations only. Do not request any tools or replace the prior task."}));
+                }
+                messages.push(json!({"role":"system","content":format!("Active task revision {}: {}. This interpretation is a working objective, not permission or execution evidence.",self.objective_revision(),json!(intent))}));
+            } else {
                 status_only = true;
+                resume_evidence.clear();
+                self.emit("conversation_replied", Value::Null);
+                messages.push(json!({"role":"system","content":"Answer the latest conversational request directly using the conversation. Tools are unavailable. Do not claim fresh execution."}));
             }
-            self.state.lock().unwrap().view.as_mut().unwrap().contract = Some(saved);
-            if let Some(question) = intent.clarification.as_ref() {
-                return super::recovery::question(
-                    self,
-                    registry,
-                    w,
-                    limits,
-                    cancel.clone(),
-                    &contract.authority,
-                    question,
-                )
-                .await;
-            }
-            if intent.relation == super::intent::Relation::Status {
-                messages.push(json!({"role":"system","content":"Answer the status question from saved observations only. Do not request any tools or replace the prior task."}));
-            }
-            messages.push(json!({"role":"system","content":format!("Active task revision 1: {}. This interpretation is a working objective, not permission or execution evidence.",json!(intent))}));
         } else if let Some(previous) = pending_task.as_ref().filter(|p| !p.completed) {
             task = format!("{}\nUser decision: {}", previous.objective, task);
             contract = super::TaskContract::new(
@@ -256,7 +273,9 @@ impl Agent {
         {
             last["content"] = json!(task);
         }
-        self.emit("task_contract", json!(contract));
+        if !status_only {
+            self.emit("task_contract", json!(contract));
+        }
         let requirements = &contract.objective.completion;
         let mut capacity = capacity.unwrap_or(crate::context::DEFAULT_CAPACITY);
         let mut evidence = Vec::<Value>::new();
@@ -313,6 +332,7 @@ impl Agent {
                 .chain(self.snapshot().unwrap().transcript.iter())
                 .cloned()
                 .collect::<Vec<_>>();
+            let verified = super::inspection::current_observations(verified, w);
             let outstanding = requirements.missing(&verified);
             if !finalizing
                 && !status_only
@@ -331,11 +351,15 @@ impl Agent {
             {
                 finalizing = true;
             }
+            if let Some(blocker) = requirements.terminal_read_blocker(&verified) {
+                self.emit("task_verification", json!(requirements.report(&verified)));
+                return Err(format!("Task incomplete: {blocker}"));
+            }
             if finalizing && !finalization_started {
                 finalization_started = true;
                 self.emit("finalization_requested", json!({"toolsDisabled":true}));
                 messages.push(json!({"role":"user","content":format!(
-                    "Tools are unavailable in this step. Give one concise final answer to the active request using the actual tool results already in context. Do not repeat or invent work; report command exit codes accurately. Verified operation records: {}",json!(evidence))}));
+                    "Internal Lorca finalization. Tools are unavailable in this step. Distinguish observed file contents from inferred purpose and unimplemented functionality. Documentation does not establish implementation. Give one concise final answer to the active request using the actual tool results already in context. Do not repeat or invent work; report command exit codes accurately. Verified operation records: {}",json!(evidence))}));
             }
             operational["outstanding"] = json!(outstanding);
             operational["unresolved"] = json!(unresolved.keys().collect::<Vec<_>>());
@@ -425,7 +449,7 @@ impl Agent {
                         .await;
                     }
                     invalid_turns += 1;
-                    messages.push(json!({"role":"user","content":format!("No tool executed: {error}. Return a native tool call whose arguments are a JSON object, using the exact current tool schema. Do not serialize nested arrays or objects as strings. Correct this once; preserve the original task.")}));
+                    messages.push(json!({"role":"user","content":format!("Internal Lorca tool validation feedback. No tool executed: {error}. Return a native tool call whose arguments are a JSON object, using the exact current tool schema. Do not serialize nested arrays or objects as strings. Correct this once; preserve the original task.")}));
                     continue;
                 }
                 Err(error)
@@ -515,7 +539,7 @@ impl Agent {
                     )
                 };
                 messages.push(json!({"role":"user","content":format!(
-                    "{cause} No tool calls from that interrupted response executed. Resume the same user request using the verified results already present. Use small, targeted patches or one action per turn; do not rewrite an entire file unnecessarily or replay completed actions. Existing approvals and restrictions still apply. This is an internal generation failure, not missing user instructions.")}));
+                    "Internal Lorca generation recovery. {cause} No tool calls from that interrupted response executed. Resume the same user request using the verified results already present. Use small, targeted patches or one action per turn; do not rewrite an entire file unnecessarily or replay completed actions. Existing approvals and restrictions still apply. This is an internal generation failure, not missing user instructions.")}));
                 continue;
             }
             if (finalizing || status_only) && !turn.calls.is_empty() {
@@ -527,6 +551,7 @@ impl Agent {
                     .chain(self.snapshot().unwrap().transcript.iter())
                     .cloned()
                     .collect::<Vec<_>>();
+                let current = super::inspection::current_observations(current, w);
                 let mut report = requirements.report(&current);
                 if unresolved.keys().any(|k| {
                     !requirements.reports_failure()
@@ -630,7 +655,7 @@ impl Agent {
                     missing.push("Finish the existing objective and give a factual result, rather than announcing another action".into());
                 }
                 let correction = format!(
-                    "This task is still incomplete. Unverified outcomes: {}. Continue this same task with the existing native tools and approval checks. Reuse verified paths; do not replay settled operations. If blocked, state the specific blocker.",
+                    "Internal Lorca verification feedback, not a new user message. This task is still incomplete. Unverified outcomes: {}. Continue this same task with the existing native tools and approval checks. Reuse verified paths; do not replay settled operations. If blocked, state the specific blocker.",
                     missing.join("; ")
                 );
                 self.emit(

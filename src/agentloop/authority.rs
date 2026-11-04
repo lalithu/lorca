@@ -18,6 +18,12 @@ pub async fn execute(
         return Err("Task revised".into());
     }
     authority.validate(call)?;
+    if authority.scope.read_only
+        && authority.scope.commands_forbidden
+        && registry.may_mutate(&call.name)
+    {
+        return Err("Task restriction forbids tools with possible mutations".into());
+    }
     let tool = registry.get(&call.name)?;
     let mut prepared = tool.prepare_optional(w, call.arguments.clone(), limits)?;
     if call.name == "apply_patch" {
@@ -81,6 +87,12 @@ const EDIT_RESTRICTIONS: &[&str] = &[
     "read-only",
     "read only",
     "no edits",
+    "inspection only",
+    "do not implement",
+    "do not make any changes",
+    "don't make any changes",
+    "without making changes",
+    "no changes",
 ];
 const COMMAND_RESTRICTIONS: &[&str] = &[
     "do not run",
@@ -91,6 +103,28 @@ const COMMAND_RESTRICTIONS: &[&str] = &[
     "do not execute",
     "without running",
 ];
+
+fn prohibits_edits(instruction: &str) -> bool {
+    let lower = instruction.to_lowercase();
+    EDIT_RESTRICTIONS.iter().any(|marker| {
+        lower
+            .match_indices(marker)
+            .any(|(start, _)| !lower[start + marker.len()..].starts_with(" other "))
+    })
+}
+
+fn prohibits_mutating_commands(
+    instruction: &str,
+    requirements: &super::verification::Requirements,
+) -> bool {
+    let lower = instruction.to_lowercase();
+    // A user can request Cargo verification while protecting source files.
+    // CommandSpec and the OS sandbox still restrict executable and write scope.
+    prohibits_edits(instruction)
+        && !(requirements.requests_command()
+            && lower.contains("do not modify any source files")
+            && !lower.contains("do not make any changes"))
+}
 
 /// Conservative recognition of explicit restrictions over existing capabilities.
 /// Unrecognized language never adds tools or waives the permission gateway.
@@ -133,11 +167,17 @@ pub struct Authority {
 }
 impl Authority {
     pub fn new(instruction: &str) -> Self {
+        let requirements = super::verification::Requirements::new(instruction);
+        let commands_forbidden = prohibits_mutating_commands(instruction, &requirements);
         Self {
             instruction: instruction.into(),
-            patch_requirements: super::verification::Requirements::new(instruction),
+            patch_requirements: requirements,
             requires_action_approval: true,
-            scope: Scope::default(),
+            scope: Scope {
+                read_only: prohibits_edits(instruction),
+                commands_forbidden,
+                ..Scope::default()
+            },
         }
     }
 }
@@ -339,8 +379,9 @@ impl Authority {
             patch_requirements: requirements.clone(),
             requires_action_approval: true,
             scope: Scope {
-                read_only: i.read_only,
-                commands_forbidden: i.commands_forbidden,
+                read_only: i.read_only || prohibits_edits(instruction),
+                commands_forbidden: i.commands_forbidden
+                    || prohibits_mutating_commands(instruction, requirements),
                 targets: i.edit_targets.clone(),
                 forbidden: i.forbidden_targets.clone(),
             },
@@ -420,12 +461,13 @@ impl Authority {
             }
         }
         let mut value = Self::interpreted(&format!("{raw}\n{latest}"), intent, requirements);
+        value.scope.commands_forbidden = intent.commands_forbidden
+            || prohibits_edits(latest)
+            || (!commands_allowed && previous_scope.commands_forbidden);
         if previous_scope.read_only && grants.is_empty() {
             value.scope.read_only = true;
         }
-        if previous_scope.commands_forbidden && !commands_allowed {
-            value.scope.commands_forbidden = true;
-        }
+
         let mut bounds = previous_scope.targets;
         if previous_scope.read_only && !grants.is_empty() {
             bounds = grants.clone();

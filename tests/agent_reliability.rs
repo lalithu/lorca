@@ -745,7 +745,7 @@ async fn prohibited_reads_never_trigger_discovery_or_claim_success() {
 async fn recovery_preserves_read_excerpt_arguments() {
     let (view, _, _) = drive_in(
         module_fixture(),
-        "Read src/tools/agent/mod.rs",
+        "Read src/tools/agent/mod.rs bytes 4..8",
         vec![
             tool(
                 "read_file",
@@ -1412,6 +1412,30 @@ async fn distinct_deep_read_paths_use_bounded_internal_discovery_without_model_b
     assert_eq!(read_results(&view).len(), 4);
     assert!(read_results(&view).iter().all(|r| r["ok"] == true));
     assert!(read_results(&view).iter().all(|r| r["truncated"] == false));
+    let recovery: Vec<_> = view
+        .events
+        .iter()
+        .filter(|event| event.kind == "tool_recovery")
+        .collect();
+    assert_eq!(recovery.len(), 1);
+    let first_call = &recovery[0].data["callId"];
+    assert!(
+        view.events
+            .iter()
+            .any(|event| event.kind == "tool_completed"
+                && event.data["recoveryOf"] == *first_call
+                && event.data["tool"] == "list_directory")
+    );
+    let paths: Vec<_> = read_results(&view)
+        .into_iter()
+        .map(|r| r["path"].clone())
+        .collect();
+    assert_eq!(
+        paths,
+        (0..4)
+            .map(|n| json!(format!("src/tools/agent/deep-{n}.rs")))
+            .collect::<Vec<_>>()
+    );
     assert!(questions(&view).is_empty());
     assert!(!view.events.iter().any(|e| e.kind == "tool_failed"));
 }
@@ -1474,6 +1498,20 @@ async fn corrected_minor_errors_do_not_consume_a_stale_global_failure_budget() {
             .iter()
             .filter(|r| r["ok"] == true)
             .all(|r| r["truncated"] == false)
+    );
+    let reads = read_results(&view);
+    assert_eq!(reads.len(), 12);
+    for (n, pair) in reads.as_chunks::<2>().0.iter().enumerate() {
+        assert_eq!(pair[0]["ok"], false);
+        assert_eq!(pair[0]["code"], "invalid_arguments");
+        assert_eq!(pair[1]["ok"], true);
+        assert_eq!(pair[1]["path"], format!("file-{n}.txt"));
+    }
+    assert!(
+        !view
+            .events
+            .iter()
+            .any(|event| event.kind == "approval_required")
     );
     assert!(questions(&view).is_empty());
 }

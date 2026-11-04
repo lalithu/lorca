@@ -244,11 +244,14 @@ async fn finalization_waits_for_the_last_excerpt() {
 }
 
 #[tokio::test]
-async fn conversational_reply_needs_one_routing_turn_with_or_without_workspace() {
+async fn conversation_routes_then_executes_without_tools_with_or_without_workspace() {
     for use_workspace in [true, false] {
         let (view, script, _) = run_with_workspace(
             "Can we talk through an idea?",
-            vec![json!({"role":"assistant","content":"Of course. What are you thinking?"})],
+            vec![
+                json!({"role":"assistant","content":"Conversation"}),
+                json!({"role":"assistant","content":"Of course. What are you thinking?"}),
+            ],
             use_workspace,
         )
         .await;
@@ -257,7 +260,96 @@ async fn conversational_reply_needs_one_routing_turn_with_or_without_workspace()
             view.result.as_deref(),
             Some("Of course. What are you thinking?")
         );
-        assert_eq!(*script.calls.lock().unwrap(), [(true, 1)]);
+        assert_eq!(*script.calls.lock().unwrap(), [(true, 1), (false, 0)]);
         assert!(view.contract.is_none());
     }
+}
+
+#[tokio::test]
+async fn explicit_excerpt_cannot_be_reported_as_a_completed_full_read() {
+    let (view, _, _) = run(
+        "Read index.html. Do not edit files.",
+        vec![
+            interpretation(Value::Null),
+            tool("read_file", json!({"path":"index.html","length":4})),
+            json!({"role":"assistant","content":"The file begins with <htm."}),
+            json!({"role":"assistant","content":"That was all I read."}),
+            json!({"role":"assistant","content":"Only four bytes were read."}),
+        ],
+    )
+    .await;
+    assert_ne!(view.status, Status::Completed);
+    assert!(
+        view.events
+            .iter()
+            .any(|e| e.kind == "task_verification" && e.data["satisfied"] == false)
+    );
+    assert!(
+        !view
+            .events
+            .iter()
+            .any(|e| e.kind == "finalization_requested")
+    );
+}
+
+#[tokio::test]
+async fn prose_does_not_route_an_actionable_read_to_conversation() {
+    let (view, script, _) = run(
+        "Read README.md and tell me what it says.",
+        vec![
+            json!({"role":"assistant","content":"The document describes a project."}),
+            json!({"role":"assistant","content":"It has a short introduction."}),
+        ],
+    )
+    .await;
+    assert_eq!(view.status, Status::Incomplete);
+    assert_eq!(*script.calls.lock().unwrap(), [(true, 1), (true, 1)]);
+    assert!(
+        !view
+            .events
+            .iter()
+            .any(|e| e.kind == "conversation_replied" || e.kind == "task_completed")
+    );
+}
+
+#[tokio::test]
+async fn raw_no_changes_prohibition_blocks_misclassified_mutation_before_approval() {
+    let mut proposal = interpretation(Value::Null);
+    proposal["tool_calls"][0]["function"]["arguments"]["read_only"] = json!(false);
+    proposal["tool_calls"][0]["function"]["arguments"]["commands_forbidden"] = json!(false);
+    let (view, _, fixture) = run(
+        REQUEST,
+        vec![
+            proposal,
+            tool(
+                "apply_patch",
+                json!({"path":"README.md","old_text":"Readme","new_text":"changed"}),
+            ),
+            tool(
+                "exec_command",
+                json!({"executable":"cargo","arguments":["test"]}),
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(fixture.0.join("README.md")).unwrap(),
+        "Readme"
+    );
+    let contract = view.contract.unwrap();
+    assert_eq!(contract["authority"]["scope"]["read_only"], true);
+    assert_eq!(contract["authority"]["scope"]["commands_forbidden"], true);
+    assert_eq!(
+        view.events
+            .iter()
+            .filter(|e| e.kind == "tool_failed")
+            .count(),
+        2
+    );
+    assert!(
+        !view
+            .events
+            .iter()
+            .any(|e| matches!(e.kind.as_str(), "tool_started" | "approval_required"))
+    );
 }

@@ -49,6 +49,7 @@ async fn chat(State(s): State<Arc<Server>>, Json(r): Json<Value>) -> Json<Value>
                     || t.contains("Now change")
                     || t.contains("2 + 2")
                     || t.contains("status of")
+                    || t.contains("Can we talk")
             })
             .unwrap_or("")
             .into()
@@ -58,7 +59,7 @@ async fn chat(State(s): State<Arc<Server>>, Json(r): Json<Value>) -> Json<Value>
     let follow = latest.contains("Now change");
     let needs_input = latest.contains("Choose an output");
     let conversational = latest.contains("Can we talk");
-    let message = if interpretation && conversational {
+    let message = if conversational {
         json!({"role":"assistant","content":"Of course. What is on your mind?"})
     } else if interpretation && needs_input {
         call(

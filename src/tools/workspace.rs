@@ -193,6 +193,48 @@ impl Workspace {
         }
         String::from_utf8(bytes).map_err(|_| "File is not UTF-8 text".into())
     }
+    #[cfg(unix)]
+    pub(super) fn version(metadata: &cap_std::fs::Metadata) -> serde_json::Value {
+        use cap_std::fs::MetadataExt;
+        serde_json::json!([
+            metadata.dev(),
+            metadata.ino(),
+            metadata.len(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+            metadata.ctime(),
+            metadata.ctime_nsec()
+        ])
+    }
+
+    #[cfg(not(unix))]
+    pub(super) fn version(_: &cap_std::fs::Metadata) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
+    pub(crate) fn matches_observation(&self, tool: &str, result: &serde_json::Value) -> bool {
+        if result["workspace"]
+            .as_str()
+            .is_none_or(|root| self.root != Path::new(root))
+            || result["version"].is_null()
+        {
+            return false;
+        }
+        let Some(path) = result["path"]
+            .as_str()
+            .and_then(|path| Self::path(path).ok())
+        else {
+            return false;
+        };
+        self.dir.symlink_metadata(path).is_ok_and(|metadata| {
+            (if tool == "read_file" {
+                metadata.is_file()
+            } else {
+                metadata.is_dir()
+            }) && Self::version(&metadata) == result["version"]
+        })
+    }
+
     pub fn excerpt(&self, path: &str, offset: usize, length: usize) -> Result<serde_json::Value> {
         let mut file = self
             .dir
@@ -209,9 +251,14 @@ impl Workspace {
         file.seek(SeekFrom::Start(offset as u64))
             .map_err(|e| e.to_string())?;
         let mut bytes = Vec::new();
-        file.take(length as u64)
+        (&mut file)
+            .take(length as u64)
             .read_to_end(&mut bytes)
             .map_err(|e| e.to_string())?;
+        let version = Self::version(&metadata);
+        if version != Self::version(&file.metadata().map_err(|e| e.to_string())?) {
+            return Err("File changed during read; start again at byte zero".into());
+        }
         let content = match std::str::from_utf8(&bytes) {
             Ok(text) => text,
             Err(error)
@@ -220,6 +267,7 @@ impl Workspace {
                 std::str::from_utf8(&bytes[..error.valid_up_to()])
                     .map_err(|_| "File is not UTF-8 text")?
             }
+            Err(_) if offset == 0 => return Err("File is not UTF-8 text".into()),
             Err(_) => {
                 return Err(
                     "Read requires UTF-8 text and a valid byte boundary; use nextOffset".into(),
@@ -229,7 +277,7 @@ impl Workspace {
         let end = offset as u64 + content.len() as u64;
         Ok(
             serde_json::json!({"ok":true,"path":path,"offset":offset,"content":content,
-            "truncated":end<total,"nextOffset":if end<total {Some(end)} else {None},"totalBytes":total}),
+            "workspace":self.root,"version":version,"truncated":end<total,"nextOffset":if end<total {Some(end)} else {None},"totalBytes":total}),
         )
     }
     /// Hold the parent directory capability during validation and replacement. Reject write
