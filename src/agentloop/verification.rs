@@ -1,5 +1,4 @@
 //! Deterministic stop checks over this task's real tool results, never model prose.
-use super::inspection::InspectionCoverage;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -212,11 +211,17 @@ impl Requirements {
         } else {
             Vec::new()
         };
+        let looks_at_path = positive.split_once("look at ").is_some_and(|(_, target)| {
+            target.trim_start().trim_start_matches(['`', '"', '\'']).starts_with('/')
+        });
         Self {
             inspect: !explanatory
                 && (has(&["inspect", "review", "read", "examine"])
                     || positive.contains("look at "))
-                && (workspace_action || !read_paths.is_empty() || lower.contains("directory")),
+                && (workspace_action
+                    || !read_paths.is_empty()
+                    || lower.contains("directory")
+                    || looks_at_path),
             directory_only: lower.contains("directory")
                 && !lower.contains("repo")
                 && !lower.contains("project"),
@@ -283,28 +288,6 @@ impl Requirements {
         self.read_paths.dedup();
     }
 
-    pub(super) fn terminal_read_blocker(&self, current: &[Value]) -> Option<String> {
-        let complete = super::inspection::covered_reads(current, self.read_range);
-        let complete_files = super::inspection::complete_reads(current);
-        super::inspection::observations(current, "read_file")
-            .iter()
-            .find_map(|result| {
-                let path = result["path"].as_str()?;
-                let error = result["error"].as_str()?;
-                (result["ok"] != true
-                    && (error == "File is not UTF-8 text" || error == "Expected a regular file")
-                    && (self.read_paths.iter().any(|requested| {
-                        !read_satisfies(requested, &complete)
-                            && read_satisfies(requested, &[path.into()])
-                    }) || self.read_collections.iter().any(|collection| {
-                        collection.coverage != InspectionCoverage::Relevant
-                            && !complete_files.iter().any(|actual| actual == path)
-                            && collection.lists_member(current, path)
-                    })))
-                .then(|| format!("Could not read {path}: {error}"))
-            })
-    }
-
     #[cfg(test)]
     pub(crate) fn requires_edit(&self) -> bool {
         self.edit
@@ -321,24 +304,6 @@ impl Requirements {
             || !self.commands.is_empty()
             || !self.read_paths.is_empty()
             || !self.read_collections.is_empty()
-    }
-    // "Relevant files" is open-ended. Only explicit coverage can close the
-    // tool phase before the model offers a final answer.
-    pub(super) fn bounded_inspection_complete(&self, current: &[Value]) -> bool {
-        if self.edit
-            || !self.commands.is_empty()
-            || (self.read_paths.is_empty() && self.read_collections.is_empty())
-            || self
-                .read_collections
-                .iter()
-                .any(|collection| collection.coverage == InspectionCoverage::Relevant)
-        {
-            return false;
-        }
-        let complete = super::inspection::covered_reads(current, self.read_range);
-        self.read_paths
-            .iter()
-            .all(|path| read_satisfies(path, &complete))
     }
     pub(super) fn validate_patch(&self, payload: &Value) -> Result<(), String> {
         let path = normalized_path(payload["path"].as_str().unwrap_or(""));
@@ -460,77 +425,11 @@ impl Requirements {
         }
         missing
     }
-    /// A failed requested read is a concrete blocker, not a reason to keep
-    /// asking the model to restate its completion summary.
-    pub(super) fn read_blocker(&self, current: &[Value]) -> Option<String> {
-        let results: Vec<Value> = current
-            .iter()
-            .filter(|m| m["role"] == "tool" && m["tool_name"] == "read_file")
-            .filter_map(|m| serde_json::from_str(m["content"].as_str()?).ok())
-            .collect();
-        let successful = super::inspection::covered_reads(current, self.read_range);
-        for requested in &self.read_paths {
-            if read_satisfies(requested, &successful) {
-                continue;
-            }
-            if let Some(error) = results
-                .iter()
-                .rev()
-                .filter(|v| v["ok"] != true)
-                .find_map(|v| {
-                    let path = v["path"].as_str()?.to_owned();
-                    (path == *requested || read_satisfies(requested, &[path]))
-                        .then(|| v["error"].as_str())
-                        .flatten()
-                })
-            {
-                return Some(format!("Could not read {requested}: {error}"));
-            }
-        }
-        if self.inspect
-            && self.read_paths.is_empty()
-            && successful.is_empty()
-            && let Some(failure) = results.iter().rev().find(|v| v["ok"] != true)
-            && let Some(error) = failure["error"].as_str()
-        {
-            return Some(format!("Could not inspect the requested file: {error}"));
-        }
-        None
-    }
 }
 
 // Explicit paths stay exact. A bare filename may identify one unique
 // successfully read workspace path; a same-name file elsewhere cannot satisfy
 // a directory-qualified request. Duplicate observations are not ambiguity.
-// Route a short standalone clarification through the existing question tool.
-// This recognizes presentation, not task intent; it never authorizes an action.
-pub(super) fn clarification_question(text: &str) -> Option<&str> {
-    let text = text.trim();
-    if text.len() > 2000 || !text.contains('?') {
-        return None;
-    }
-    let question = text.rsplit_once(". ").map_or(text, |(_, tail)| tail).trim();
-    let prefixes = [
-        "what ",
-        "which ",
-        "where ",
-        "how ",
-        "could you ",
-        "can you ",
-        "would you ",
-        "should ",
-    ];
-    let recognized = |s: &str| {
-        prefixes
-            .iter()
-            .any(|p| s.trim().to_lowercase().starts_with(p))
-    };
-    if text.matches('?').count() == 1 && recognized(question) {
-        return Some(question);
-    }
-    (recognized(text) || text.lines().any(recognized)).then_some(text)
-}
-
 fn requested_range(task: &str) -> Option<(u64, u64)> {
     let words: Vec<_> = task.split_whitespace().collect();
     for words in words.windows(2) {
@@ -601,31 +500,6 @@ pub(super) fn requested_paths(clause: &str) -> Vec<String> {
             .then(|| path.to_owned())
         })
         .collect()
-}
-
-pub(super) fn intent_only(text: &str) -> bool {
-    let lower = text.trim().to_lowercase();
-    let tail = lower
-        .lines()
-        .rev()
-        .find(|s| !s.trim().is_empty())
-        .unwrap_or("")
-        .trim();
-    [
-        "i'll ",
-        "i’ll ",
-        "i will ",
-        "let me ",
-        "now i'll ",
-        "now i’ll ",
-        "creating ",
-        "updating ",
-        "running ",
-    ]
-    .iter()
-    .any(|s| tail.starts_with(s))
-        && !tail.contains('?')
-        && !tail.contains("complete")
 }
 
 pub fn unverified_claim(task: &str, text: &str, history: &[Value]) -> Option<String> {
@@ -1126,6 +1000,16 @@ mod inspection_target_tests {
         }
     }
     #[test]
+    fn read_only_is_a_constraint_even_in_an_absolute_folder_request() {
+        let req = Requirements::new("Take a look at /tmp/playground. Read only. Report back.");
+        assert!(req.read_paths.is_empty());
+        assert!(!req.missing(&[]).is_empty());
+        assert!(req.missing(&[read("README.md", 0, 4, "real")]).is_empty());
+        assert_eq!(Requirements::new("Read only README.md").read_paths, ["README.md"]);
+        assert_eq!(Requirements::new("Read `only`").read_paths, ["only"]);
+    }
+
+    #[test]
     fn explicit_references_survive_subject_labels_and_preserve_spelling() {
         for (task, path) in [
             ("Read README.md", "README.md"),
@@ -1156,13 +1040,6 @@ mod inspection_target_tests {
                 json!({"ok":false,"path":"MISSING.md","error":"not found"})
             )])
             .is_empty()
-        );
-        assert!(
-            req.read_blocker(&[observation(
-                "read_file",
-                json!({"ok":false,"path":"MISSING.md","error":"not found"})
-            )])
-            .is_some()
         );
     }
     #[test]

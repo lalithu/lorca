@@ -6,6 +6,7 @@ pub(super) struct CoreInference {
     pub(super) session: String,
     pub(super) model: String,
     pub(super) engine: provider::Engine,
+    pub(super) context_window: Option<u64>,
     pub(super) effort: crate::agent_types::ThinkingEffort,
 }
 /// Keep the existing model preparation future alive until it has cleaned up its
@@ -61,10 +62,13 @@ impl Inference for CoreInference {
     fn capacity(&self) -> FutureResult<'_, Option<u64>> {
         Box::pin(async {
             self.ready().await?;
-            Ok(self
+            let allocated = self
                 .core
                 .context_limit_for(self.engine, &self.core.host(&self.session)?, &self.model)
-                .await)
+                .await;
+            Ok(self.context_window.map_or(allocated, |target| {
+                Some(target.min(allocated.unwrap_or(crate::context::DEFAULT_CAPACITY)))
+            }))
         })
     }
     fn generate_stream<'a>(
@@ -117,6 +121,14 @@ impl CoreInference {
                     .core
                     .agent()
                     .reasoning_update(request_id, stage, state, text),
+                ModelUpdate::Usage(mut usage) => {
+                    if self.context_window.is_some() {
+                        usage.context_limit = usage
+                            .context_limit
+                            .map(|limit| limit.min(budget.context_limit));
+                    }
+                    updates(ModelUpdate::Usage(usage));
+                }
                 other => updates(other),
             };
             provider

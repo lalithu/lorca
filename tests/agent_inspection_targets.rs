@@ -125,12 +125,7 @@ async fn exact_report_request_finishes_once_without_false_filename_or_extra_call
         assert_eq!(calls.len(), 3);
         assert!(!calls[0].0);
         assert!(calls[..2].iter().all(|&(_, count)| count > 0));
-        assert_eq!(calls[2], (false, 0));
-        assert!(
-            view.events
-                .iter()
-                .any(|e| e.kind == "finalization_requested")
-        );
+        assert!(calls.iter().all(|&(interpreting, count)| !interpreting && count > 0));
         assert!(script.turns.lock().unwrap().is_empty());
         assert!(
             !view
@@ -160,7 +155,7 @@ async fn exact_report_request_finishes_once_without_false_filename_or_extra_call
     }
 }
 #[tokio::test]
-async fn explicit_missing_file_still_blocks_without_summary_retries() {
+async fn explicit_missing_file_is_reported_without_summary_retries() {
     let (view, script, _) = run(
         "Read MISSING.md. Do not edit files.",
         vec![
@@ -169,34 +164,34 @@ async fn explicit_missing_file_still_blocks_without_summary_retries() {
         ],
     )
     .await;
-    assert_eq!(view.status, Status::WaitingForInput, "{:?}", view.result);
+    assert_eq!(view.status, Status::Completed, "{:?}", view.result);
     assert_eq!(script.calls.lock().unwrap().len(), 2);
     assert!(!view.events.iter().any(|e| e.kind == "task_continued"));
-    assert!(view.result.unwrap().contains("MISSING.md"));
+    assert!(view.events.iter().any(|event| event.kind == "tool_failed" && event.data["result"]["path"] == "MISSING.md"));
 }
 #[tokio::test]
-async fn reading_one_of_three_files_cannot_complete_the_collection() {
+async fn partial_collection_is_recorded_without_reopening_the_reply() {
     let (view, script, _) = run(
         REQUEST,
         vec![
             tool("list_directory", json!({"path":"."})),
             reads(&["README.md"]),
-            json!({"role":"assistant","content":"All files read."}),
-            json!({"role":"assistant","content":"All files read."}),
-            json!({"role":"assistant","content":"All files read."}),
+            json!({"role":"assistant","content":"I read README.md."}),
         ],
     )
     .await;
-    assert_eq!(view.status, Status::WaitingForInput, "{:?}", view.result);
+    assert_eq!(view.status, Status::Completed, "{:?}", view.result);
     let calls = script.calls.lock().unwrap();
-    assert_eq!(calls.len(), 5);
+    assert_eq!(calls.len(), 3);
     assert!(calls.iter().all(|&(_, count)| count > 0));
-    assert!(view.result.as_ref().unwrap().contains("index.html"));
-    assert!(view.result.as_ref().unwrap().contains("lalith.txt"));
+    let report = view.events.iter().find(|event| event.kind == "task_verification").unwrap();
+    assert_eq!(report.data["satisfied"], false);
+    assert!(report.data["unsatisfied"].to_string().contains("index.html"));
+    assert!(report.data["unsatisfied"].to_string().contains("lalith.txt"));
 }
 
 #[tokio::test]
-async fn finalization_waits_for_the_last_excerpt() {
+async fn the_model_can_read_remaining_excerpts_and_finish() {
     let (view, script, _) = run(
         REQUEST,
         vec![
@@ -211,8 +206,7 @@ async fn finalization_waits_for_the_last_excerpt() {
     assert_eq!(view.status, Status::Completed, "{:?}", view.result);
     let calls = script.calls.lock().unwrap();
     assert_eq!(calls.len(), 5);
-    assert!(calls[..4].iter().all(|&(_, count)| count > 0));
-    assert_eq!(calls[4], (false, 0));
+    assert!(calls.iter().all(|&(_, count)| count > 0));
     assert!(
         !view
             .events
@@ -243,18 +237,16 @@ async fn conversation_answers_in_one_request_with_or_without_workspace() {
 }
 
 #[tokio::test]
-async fn explicit_excerpt_cannot_be_reported_as_a_completed_full_read() {
+async fn audit_does_not_count_an_excerpt_as_a_full_read() {
     let (view, _, _) = run(
         "Read index.html. Do not edit files.",
         vec![
             tool("read_file", json!({"path":"index.html","length":4})),
             json!({"role":"assistant","content":"The file begins with <htm."}),
-            json!({"role":"assistant","content":"That was all I read."}),
-            json!({"role":"assistant","content":"Only four bytes were read."}),
         ],
     )
     .await;
-    assert_ne!(view.status, Status::Completed);
+    assert_eq!(view.status, Status::Completed);
     assert!(
         view.events
             .iter()
@@ -269,16 +261,16 @@ async fn explicit_excerpt_cannot_be_reported_as_a_completed_full_read() {
 }
 
 #[tokio::test]
-async fn prose_does_not_route_an_actionable_read_to_conversation() {
+async fn an_answer_without_a_tool_call_is_not_read_evidence() {
     let (view, script, _) = run(
         "Read README.md and tell me what it says.",
         vec![
             json!({"role":"assistant","content":"The document describes a project."}),
-            json!({"role":"assistant","content":"It has a short introduction."}),
         ],
     )
     .await;
-    assert_ne!(view.status, Status::Completed);
+    assert_eq!(view.status, Status::Completed);
+    assert_eq!(script.calls.lock().unwrap().len(), 1);
     assert!(
         script
             .calls
@@ -287,12 +279,7 @@ async fn prose_does_not_route_an_actionable_read_to_conversation() {
             .iter()
             .all(|(interpreting, count)| !interpreting && *count > 0)
     );
-    assert!(
-        !view
-            .events
-            .iter()
-            .any(|e| e.kind == "conversation_replied" || e.kind == "task_completed")
-    );
+    assert!(view.events.iter().any(|event| event.kind == "task_verification" && event.data["satisfied"] == false));
 }
 
 #[tokio::test]

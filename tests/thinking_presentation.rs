@@ -15,7 +15,16 @@ struct Server {
 }
 async fn chat(State(s): State<Arc<Server>>, Json(v): Json<Value>) -> String {
     s.requests.lock().unwrap().push(v.clone());
-    let message = json!({"role":"assistant","content":"Hello"});
+    let content = if v["messages"]
+        .as_array()
+        .and_then(|messages| messages.last())
+        .is_some_and(|message| message["content"] == "Reasoning-only fixture")
+    {
+        ""
+    } else {
+        "Hello"
+    };
+    let message = json!({"role":"assistant","content":content});
     format!(
         "{}\n{}\n{}\n",
         json!({"message":{"role":"assistant","thinking":"LOCAL_REASONING_SENTINEL"},"done":false}),
@@ -59,8 +68,13 @@ async fn core_thinking_is_ephemeral_and_off_is_fail_closed() {
         .unwrap()
         .selected_id
         .clone();
-    for effort in ["nominal", "off"] {
-        core.command(json!({"op":"agent_start","session":session,"conversationId":chat,"requestId":lorca::types::id(),"task":"Say hello","effort":effort})).await.unwrap();
+    for (instruction, effort, expected_status) in [
+        ("Say hello", "nominal", lorca::agent::Status::Completed),
+        ("Say hello", "off", lorca::agent::Status::Completed),
+        ("Reasoning-only fixture", "nominal", lorca::agent::Status::Completed),
+        ("Reasoning-only fixture", "off", lorca::agent::Status::Incomplete),
+    ] {
+        core.command(json!({"op":"agent_start","session":session,"conversationId":chat,"requestId":lorca::types::id(),"task":instruction,"effort":effort})).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if core.agent().snapshot().is_some_and(|v| !v.status.active()) {
@@ -73,7 +87,10 @@ async fn core_thinking_is_ephemeral_and_off_is_fail_closed() {
         .unwrap();
         core.maintenance();
         let task = core.agent().snapshot().unwrap();
-        assert_eq!(task.status, lorca::agent::Status::Completed);
+        assert_eq!(task.status, expected_status);
+        if instruction == "Reasoning-only fixture" {
+            assert!(task.assistant_text.is_empty());
+        }
         if effort == "nominal" {
             assert_eq!(
                 task.thinking.iter().map(|b| b.stage).collect::<Vec<_>>(),
@@ -103,11 +120,12 @@ async fn core_thinking_is_ephemeral_and_off_is_fail_closed() {
     let req = s.requests.lock().unwrap();
     assert_eq!(
         req.len(),
-        2,
+        4,
         "Each message uses one normal generation request"
     );
-    assert!(req[..1].iter().all(|v| v["think"] == true));
-    assert!(req[1..].iter().all(|v| v["think"] == false));
+    for (request, think) in req.iter().zip([true, false, true, false]) {
+        assert_eq!(request["think"], think);
+    }
     assert!(req.iter().all(|v| v["options"]["num_ctx"] == 65536));
     for conversation in &core.snapshot().conversations {
         assert!(

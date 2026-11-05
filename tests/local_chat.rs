@@ -151,7 +151,7 @@ async fn chat_folder_continuation_and_model_lifecycle_use_the_same_core() {
             Status::Completed,
         ),
     ] {
-        core.command(json!({"op":"agent_start","session":session,"conversationId":conversation,"requestId":lorca::types::id(),"task":task,"workspace":workspace})).await.unwrap();
+        core.command(json!({"op":"agent_start","session":session,"conversationId":conversation,"requestId":lorca::types::id(),"task":task,"workspace":workspace,"contextWindow":4096})).await.unwrap();
         wait(&core, expected.clone()).await;
         if expected == Status::WaitingForInput {
             assert_eq!(
@@ -166,7 +166,8 @@ async fn chat_folder_continuation_and_model_lifecycle_use_the_same_core() {
         "Reuse the already-loaded allocation without restarting it"
     );
     let task = core.agent().snapshot().unwrap();
-    assert_eq!(task.usage.context_limit, Some(8192));
+    assert_eq!(task.usage.context_limit, Some(4096));
+    assert_eq!(core.snapshot().sessions[0].allocated_context, Some(8192));
     assert_eq!(task.usage.prompt_duration_ns, Some(125_000_000));
     assert_eq!(task.usage.prompt_tokens_per_second, Some(800.0));
     assert!(!task.audit.iter().any(|e| e.kind == "approval_required"));

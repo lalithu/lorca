@@ -225,6 +225,7 @@ impl Core {
                 models: vec![],
                 is_connected: false,
                 error: None,
+                allocated_context: None,
                 usage: Usage {
                     context_used,
                     ..Default::default()

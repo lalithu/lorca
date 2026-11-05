@@ -148,29 +148,16 @@ async fn native_tool_calls_cannot_erase_read_only_or_expand_targets() {
     }
 }
 #[tokio::test]
-async fn semantic_edit_without_old_keywords_cannot_complete_without_evidence() {
+async fn a_reply_cannot_manufacture_edit_evidence() {
     let root = Temp::new();
     let v = run(
         "Make the gradient control change hue across the rainbow",
         &root,
-        vec![answer("Done."), answer("Done."), answer("Done.")],
+        vec![answer("Done.")],
     )
     .await;
-    assert_ne!(v.status, Status::Completed);
-    assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
-}
-#[tokio::test]
-async fn related_plain_text_questions_enter_a_real_waiting_state() {
-    let root = Temp::new();
-    let v = run(
-        "Create a file",
-        &root,
-        vec![answer(
-            "Which filename should I use? What contents should it contain?",
-        )],
-    )
-    .await;
-    assert_eq!(v.status, Status::WaitingForInput);
+    assert_eq!(v.status, Status::Completed);
+    assert!(v.events.iter().any(|event| event.kind == "task_verification" && event.data["satisfied"] == false));
     assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
 }
 

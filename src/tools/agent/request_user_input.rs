@@ -25,6 +25,12 @@ impl Tool for RequestUserInput {
     fn prepare_optional(&self, _: Option<&Workspace>, a: Value, _: &Limits) -> Result<Prepared> {
         check_size(&a)?;
         let q: Args = parse(a.clone())?;
+        if matches!(
+            q.question.trim().to_ascii_lowercase().as_str(),
+            "none" | "null"
+        ) {
+            return Err("Invalid arguments: supply a real question, or continue without calling request_user_input.".into());
+        }
         if q.question.trim().is_empty()
             || q.question.len() > 1000
             || q.recommendation.len() > 500

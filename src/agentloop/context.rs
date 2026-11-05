@@ -67,7 +67,7 @@ pub(super) fn operational(
     // The original instruction is pinned separately by Context::fit. Outcome
     // and restrictions are verbatim copies/substrings, not independent policy.
     json!({"context":contract.context,"requiresActionApproval":contract.authority.requires_action_approval,
-        "scope":contract.authority.scope,"requirements":contract.objective.completion,"operations":operations})
+        "scope":contract.authority.scope,"operations":operations})
 }
 
 #[cfg(test)]

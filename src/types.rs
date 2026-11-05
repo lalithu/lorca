@@ -108,6 +108,8 @@ pub struct SessionView {
     pub models: Vec<String>,
     pub is_connected: bool,
     pub error: Option<String>,
+    #[serde(default)]
+    pub allocated_context: Option<u64>,
     pub usage: Usage,
 }
 fn default_provider_name() -> String {

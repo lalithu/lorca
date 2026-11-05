@@ -156,6 +156,7 @@ impl Core {
                     .iter()
                     .find(|c| c.id == selected)
                     .and_then(|c| c.messages.is_empty().then_some(0));
+                s.view.sessions[i].allocated_context = limit;
                 s.view.sessions[i].usage = Usage {
                     context_used,
                     context_limit: limit,

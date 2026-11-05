@@ -94,6 +94,7 @@ pub enum ModelUpdate {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct Limits {
+    /// Zero allows the task to continue without a fixed turn cap.
     pub iterations: usize,
     pub model_seconds: u64,
     pub command_seconds: u64,
@@ -109,11 +110,11 @@ impl Default for Limits {
 }
 impl Limits {
     pub fn validate(&self) -> Result<()> {
-        if !(1..=32).contains(&self.iterations)
+        if self.iterations > 32
             || !(1..=180).contains(&self.model_seconds)
             || !(1..=120).contains(&self.command_seconds)
         {
-            return Err("Limits: iterations 1–32, modelSeconds 1–180, commandSeconds 1–120".into());
+            return Err("Limits: iterations 0–32 (0 means no fixed cap), modelSeconds 1–180, commandSeconds 1–120".into());
         }
         Ok(())
     }

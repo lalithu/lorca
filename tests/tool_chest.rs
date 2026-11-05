@@ -107,6 +107,8 @@ fn schemas_reject_unknown_arguments_and_invalid_plans() {
             json!({"reason":"test","scope":"all","granted":true}),
         ),
         ("request_user_input", json!({"question":""})),
+        ("request_user_input", json!({"question":" None "})),
+        ("request_user_input", json!({"question":"null"})),
         (
             "update_plan",
             json!({"steps":[{"step":"work","status":"made_up"}]}),

@@ -135,27 +135,20 @@ async fn greeting_and_factual_answers_do_not_trigger_action_recovery() {
     }
 }
 #[tokio::test]
-async fn inspect_requires_file_contents_not_just_listing_or_claims() {
-    let (v, _, _) = drive(
+async fn inspection_audit_distinguishes_a_listing_from_a_read() {
+    let (v, script, _) = drive(
         "Inspect this repository",
         vec![
             tool("list_directory", json!({"path":"."})),
             text("I inspected it."),
-            text("I'll inspect it"),
-            text("Let me inspect it"),
         ],
         Decision::Deny,
     )
     .await;
-    assert_eq!(v.status, Status::WaitingForInput);
-    assert_eq!(
-        v.events
-            .iter()
-            .filter(|e| e.kind == "task_continued")
-            .count(),
-        2
-    );
-    let (v, _, _) = drive(
+    assert_eq!(v.status, Status::Completed);
+    assert!(v.events.iter().any(|event| event.kind == "task_verification" && event.data["satisfied"] == false));
+    assert_eq!(script.seen.lock().unwrap().len(), 2);
+    let (v, script, _) = drive(
         "Inspect this repository",
         vec![
             tool("read_file", json!({"path":"src/lib.rs"})),
@@ -165,9 +158,11 @@ async fn inspect_requires_file_contents_not_just_listing_or_claims() {
     )
     .await;
     assert_eq!(v.status, Status::Completed);
+    assert_eq!(script.seen.lock().unwrap().len(), 2);
+    assert!(v.events.iter().any(|event| event.kind == "task_verification" && event.data["satisfied"] == true));
 }
 #[tokio::test]
-async fn readme_promises_are_bounded_and_do_not_change_files() {
+async fn tool_free_replies_stop_and_do_not_change_files() {
     for response in [
         "I'll update it",
         "Cannot update the workspace?",
@@ -175,25 +170,24 @@ async fn readme_promises_are_bounded_and_do_not_change_files() {
     ] {
         let (v, s, r) = drive(
             "Update README.md",
-            vec![text(response), text(response), text(response)],
+            vec![text(response)],
             Decision::Deny,
         )
         .await;
-        assert_eq!(v.status, Status::WaitingForInput);
-        assert_eq!(s.seen.lock().unwrap().len(), 3);
+        assert_eq!(v.status, Status::Completed);
+        assert_eq!(s.seen.lock().unwrap().len(), 1);
         assert_eq!(
             std::fs::read_to_string(r.0.join("README.md")).unwrap(),
             "outdated"
         );
-        assert!(v.result.unwrap().contains("readme.md"));
+        assert!(v.events.iter().any(|event| event.kind == "task_verification" && event.data["satisfied"] == false));
     }
 }
 #[tokio::test]
-async fn promise_then_real_patch_completes_in_the_same_task() {
+async fn patch_turn_then_final_reply_completes_in_the_same_task() {
     let (v, s, r) = drive(
         "Update README.md",
         vec![
-            text("I'll update it"),
             patch("README.md"),
             text("Updated README.md and verified the written bytes."),
         ],
@@ -205,32 +199,32 @@ async fn promise_then_real_patch_completes_in_the_same_task() {
         std::fs::read_to_string(r.0.join("README.md")).unwrap(),
         "accurate implementation"
     );
-    assert!(
-        s.seen.lock().unwrap()[1].0.last().unwrap()["content"]
-            .as_str()
-            .unwrap()
-            .contains("readme.md")
-    );
+    let seen = s.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    let messages = &seen[1].0;
+    let call_id = &messages[messages.len() - 2]["tool_calls"][0]["id"];
+    assert!(call_id.is_string());
+    assert_eq!(&messages.last().unwrap()["tool_call_id"], call_id);
     assert_eq!(
         v.events.iter().filter(|e| e.kind == "file_changes").count(),
         1
     );
 }
 #[tokio::test]
-async fn combined_request_needs_inspection_and_the_requested_patch() {
-    let (v, _, _) = drive(
+async fn combined_request_audit_distinguishes_edit_and_inspection() {
+    let (v, script, _) = drive(
         "Inspect this repository and update README.md",
         vec![
             patch("README.md"),
             text("Updated README.md"),
-            text("Done"),
-            text("Done"),
         ],
         Decision::AllowOnce,
     )
     .await;
-    assert_eq!(v.status, Status::WaitingForInput);
-    let (v, _, _) = drive(
+    assert_eq!(v.status, Status::Completed);
+    assert!(v.events.iter().any(|event| event.kind == "task_verification" && event.data["satisfied"] == false));
+    assert_eq!(script.seen.lock().unwrap().len(), 2);
+    let (v, script, _) = drive(
         "Inspect this repository and update README.md",
         vec![
             tool("read_file", json!({"path":"src/lib.rs"})),
@@ -241,10 +235,12 @@ async fn combined_request_needs_inspection_and_the_requested_patch() {
     )
     .await;
     assert_eq!(v.status, Status::Completed);
+    assert_eq!(script.seen.lock().unwrap().len(), 3);
+    assert!(v.events.iter().any(|event| event.kind == "task_verification" && event.data["satisfied"] == true));
 }
 #[tokio::test]
 async fn a_different_successful_patch_cannot_satisfy_readme_update() {
-    let (v, _, r) = drive(
+    let (v, script, r) = drive(
         "Update README.md",
         vec![
             tool(
@@ -252,93 +248,33 @@ async fn a_different_successful_patch_cannot_satisfy_readme_update() {
                 json!({"path":"other.md","old_text":"","new_text":"other"}),
             ),
             text("Done"),
-            text("Done"),
-            text("Done"),
         ],
         Decision::AllowOnce,
     )
     .await;
-    assert_eq!(v.status, Status::WaitingForInput);
+    assert_eq!(v.status, Status::Completed);
+    assert!(v.events.iter().any(|event| event.kind == "task_verification" && event.data["satisfied"] == false));
+    assert_eq!(script.seen.lock().unwrap().len(), 2);
     assert_eq!(
         std::fs::read_to_string(r.0.join("README.md")).unwrap(),
         "outdated"
     );
 }
 #[tokio::test]
-async fn empty_after_settled_patch_gets_one_tool_free_finalization_without_replay() {
+async fn empty_reply_stays_incomplete_without_an_extra_model_call() {
     let (v, s, _) = drive(
         "Update README.md",
-        vec![
-            patch("README.md"),
-            text(""),
-            text("Updated README.md; the patch readback was verified."),
-        ],
-        Decision::AllowOnce,
-    )
-    .await;
-    assert_eq!(v.status, Status::Completed);
-    assert_eq!(
-        v.events.iter().filter(|e| e.kind == "file_changes").count(),
-        1
-    );
-    let seen = s.seen.lock().unwrap();
-    assert_eq!(seen[2].1, 0);
-    assert!(
-        seen[2].0.last().unwrap()["content"]
-            .as_str()
-            .unwrap()
-            .contains("Tools are unavailable")
-    );
-}
-#[tokio::test]
-async fn empty_finalizer_stays_incomplete_and_never_retries() {
-    let (v, s, _) = drive(
-        "Update README.md",
-        vec![patch("README.md"), text(""), text("")],
+        vec![patch("README.md"), text("")],
         Decision::AllowOnce,
     )
     .await;
     assert_eq!(v.status, Status::Incomplete);
-    assert_eq!(s.seen.lock().unwrap().len(), 3);
+    assert!(questions(&v).is_empty());
+    assert_eq!(s.seen.lock().unwrap().len(), 2);
     assert_eq!(
         v.events.iter().filter(|e| e.kind == "file_changes").count(),
         1
     );
-}
-#[tokio::test]
-async fn finalizer_cannot_execute_a_tool_even_if_provider_returns_one() {
-    let (v, _, r) = drive(
-        "Update README.md",
-        vec![
-            patch("README.md"),
-            text(""),
-            tool(
-                "apply_patch",
-                json!({"path":"unexpected.txt","old_text":"","new_text":"bad"}),
-            ),
-        ],
-        Decision::AllowOnce,
-    )
-    .await;
-    assert_eq!(v.status, Status::Incomplete);
-    assert!(!r.0.join("unexpected.txt").exists());
-}
-#[tokio::test]
-async fn empty_before_required_edit_continues_with_tools_available() {
-    let (v, s, _) = drive(
-        "Inspect this repository and update README.md",
-        vec![
-            tool("read_file", json!({"path":"src/lib.rs"})),
-            text(""),
-            patch("README.md"),
-            text("README.md updated based on src/lib.rs."),
-        ],
-        Decision::AllowOnce,
-    )
-    .await;
-    assert_eq!(v.status, Status::Completed);
-    assert!(s.seen.lock().unwrap()[2].1 > 0);
-    assert!(!v.events.iter().any(|e| e.kind == "finalization_requested"));
 }
 #[tokio::test]
 async fn denied_patch_is_distinct_and_never_executed() {
@@ -438,19 +374,22 @@ async fn large_utf8_read_ranges_keep_exact_continuation_metadata() {
 }
 
 #[tokio::test]
-async fn settled_read_only_work_can_finalize_without_tools() {
+async fn a_read_does_not_force_the_model_into_finalization() {
     let (v, s, _) = drive(
-        "Read src/lib.rs",
+        "Read src/lib.rs. Do not edit files.",
         vec![
             tool("read_file", json!({"path":"src/lib.rs"})),
-            text(""),
+            tool("read_file", json!({"path":"README.md"})),
             text("src/lib.rs defines value returning 1."),
         ],
         Decision::Deny,
     )
     .await;
     assert_eq!(v.status, Status::Completed);
-    assert_eq!(s.seen.lock().unwrap()[2].1, 0);
+    let seen = s.seen.lock().unwrap();
+    assert_eq!(seen.len(), 3);
+    assert!(seen.iter().all(|(_, schemas)| *schemas > 0));
+    assert_eq!(read_results(&v).len(), 2);
 }
 
 #[cfg(target_os = "macos")]
@@ -666,11 +605,11 @@ async fn missing_exact_file_is_a_clear_blocker_without_summary_retries() {
         Decision::Deny,
     )
     .await;
-    assert_eq!(view.status, Status::WaitingForInput, "{:?}", view.result);
+    assert_eq!(view.status, Status::Completed, "{:?}", view.result);
     assert_eq!(script.seen.lock().unwrap().len(), 2);
     assert!(
-        view.result
-            .as_ref()
+        read_results(&view)[0]["error"]
+            .as_str()
             .unwrap()
             .contains("Could not confirm the exact requested file")
     );
@@ -700,7 +639,7 @@ async fn repeated_unverified_read_attempts_do_not_repeat_automatic_discovery() {
         Decision::Deny,
     )
     .await;
-    assert_eq!(view.status, Status::WaitingForInput, "{:?}", view.result);
+    assert_eq!(view.status, Status::Completed, "{:?}", view.result);
     assert_eq!(
         view.events
             .iter()
@@ -730,7 +669,7 @@ async fn prohibited_reads_never_trigger_discovery_or_claim_success() {
         .await;
         assert_eq!(
             view.status,
-            Status::WaitingForInput,
+            Status::Completed,
             "{path}: {:?}",
             view.result
         );
@@ -852,7 +791,7 @@ async fn automatic_discovery_cannot_follow_a_file_symlink_outside_workspace() {
         Decision::Deny,
     )
     .await;
-    assert_eq!(view.status, Status::WaitingForInput, "{:?}", view.result);
+    assert_eq!(view.status, Status::Completed, "{:?}", view.result);
     assert_eq!(script.seen.lock().unwrap().len(), 2);
     assert!(read_results(&view).iter().all(|v| v["ok"] == false));
     assert!(
@@ -1210,7 +1149,7 @@ async fn ambiguous_intent_can_ask_one_targeted_free_text_question_without_side_e
     );
 }
 #[tokio::test]
-async fn repeated_failures_ask_for_guidance_once_and_keep_completed_work() {
+async fn repeated_failures_stop_and_keep_completed_work() {
     let missing = tool("read_file", json!({"path":"missing.rs"}));
     let (view, script, root) = drive(
         "Update README.md and read missing.rs",
@@ -1218,13 +1157,16 @@ async fn repeated_failures_ask_for_guidance_once_and_keep_completed_work() {
             patch("README.md"),
             missing.clone(),
             missing.clone(),
-            missing,
+            json!({"role":"assistant","tool_calls":[
+                {"id":"third-read","function":{"name":"read_file","arguments":{"path":"missing.rs"}}},
+                {"id":"unexecuted-read","function":{"name":"read_file","arguments":{"path":"README.md"}}}
+            ]}),
         ],
         Decision::AllowOnce,
     )
     .await;
-    assert_eq!(view.status, Status::WaitingForInput, "{:?}", view.result);
-    assert_eq!(questions(&view).len(), 1);
+    assert_eq!(view.status, Status::Incomplete, "{:?}", view.result);
+    assert!(questions(&view).is_empty());
     assert_eq!(script.seen.lock().unwrap().len(), 4);
     assert_eq!(
         std::fs::read_to_string(root.0.join("README.md")).unwrap(),
@@ -1238,10 +1180,7 @@ async fn repeated_failures_ask_for_guidance_once_and_keep_completed_work() {
         1
     );
     assert!(
-        questions(&view)[0]["question"]
-            .as_str()
-            .unwrap()
-            .contains("repeated unsuccessful")
+        view.result.unwrap().contains("repeated unsuccessful")
     );
     assert_eq!(
         view.events
@@ -1250,9 +1189,12 @@ async fn repeated_failures_ask_for_guidance_once_and_keep_completed_work() {
             .count(),
         1
     );
+    assert!(view.events.iter().any(|event|
+        event.kind == "tool_skipped" && event.data["callId"] == "unexecuted-read"
+    ));
 }
 #[tokio::test]
-async fn repeated_empty_listings_are_authoritative_and_stop_with_a_question() {
+async fn repeated_empty_listings_stop_without_a_generic_question() {
     let listing = tool("list_directory", json!({"path":"."}));
     let (view, script, _) = drive_in(
         empty_workspace(),
@@ -1261,8 +1203,8 @@ async fn repeated_empty_listings_are_authoritative_and_stop_with_a_question() {
         Decision::Deny,
     )
     .await;
-    assert_eq!(view.status, Status::WaitingForInput, "{:?}", view.result);
-    assert_eq!(questions(&view).len(), 1);
+    assert_eq!(view.status, Status::Incomplete, "{:?}", view.result);
+    assert!(questions(&view).is_empty());
     assert_eq!(script.seen.lock().unwrap().len(), 4);
     let first = &script.seen.lock().unwrap()[1].0.last().unwrap()["content"]
         .as_str()
@@ -1332,7 +1274,7 @@ async fn awareness_and_scope_are_persistent_after_compaction_without_duplicate_s
 }
 
 #[tokio::test]
-async fn a_plain_model_question_is_routed_once_instead_of_forcing_a_write() {
+async fn a_plain_model_question_is_returned_as_a_reply() {
     let (view, script, root) = drive_in(
         empty_workspace(),
         "Create a file",
@@ -1342,12 +1284,10 @@ async fn a_plain_model_question_is_routed_once_instead_of_forcing_a_write() {
         Decision::Deny,
     )
     .await;
-    assert_eq!(view.status, Status::WaitingForInput, "{:?}", view.result);
+    assert_eq!(view.status, Status::Completed, "{:?}", view.result);
     assert_eq!(script.seen.lock().unwrap().len(), 1);
-    assert_eq!(
-        questions(&view)[0]["question"],
-        "What filename and contents should I use?"
-    );
+    assert!(questions(&view).is_empty());
+    assert!(view.result.unwrap().ends_with("What filename and contents should I use?"));
     assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
     assert!(!view.events.iter().any(|e| e.kind == "task_continued"));
 }
@@ -1387,8 +1327,8 @@ async fn malformed_top_level_tool_json_gets_one_safe_retry_with_current_schemas(
         Decision::Deny,
     )
     .await;
-    assert_eq!(view.status, Status::WaitingForInput);
-    assert_eq!(questions(&view).len(), 1);
+    assert_eq!(view.status, Status::Incomplete);
+    assert!(questions(&view).is_empty());
     assert!(read_results(&view).is_empty());
     assert_eq!(script.seen.lock().unwrap().len(), 2);
 }

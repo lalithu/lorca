@@ -200,18 +200,24 @@ impl LocalAgent {
         }
         let usage = usage.unwrap_or_default();
         updates(ModelUpdate::Usage(usage));
-        let mut parsed = crate::provider::agent::parse_turn(turn.message()?)?;
-        parsed.finish_reason = match finish.as_deref() {
-            Some("length") => FinishReason::Length,
-            Some("stop" | "tool_calls") => FinishReason::Stop,
-            _ => FinishReason::Unknown,
-        };
-        if parsed.finish_reason == FinishReason::Length {
-            parsed.calls.clear();
-            parsed.message = json!({"role":"assistant","content":parsed.content});
-        }
-        Ok(parsed)
+        finish_turn(turn.message()?, finish.as_deref())
     }
+}
+
+fn finish_turn(mut message: Value, finish: Option<&str>) -> Result<Turn, String> {
+    let finish_reason = match finish {
+        Some("length") => {
+            // The server may end generation in the middle of a tool argument.
+            // Discard the entire batch before validating the remaining text.
+            message = json!({"role":"assistant","content":message["content"]});
+            FinishReason::Length
+        }
+        Some("stop" | "tool_calls") => FinishReason::Stop,
+        _ => FinishReason::Unknown,
+    };
+    let mut turn = crate::provider::agent::parse_turn(message)?;
+    turn.finish_reason = finish_reason;
+    Ok(turn)
 }
 
 impl Inference for LocalAgent {
@@ -354,4 +360,23 @@ fn consume_sse_line(
         updates(ModelUpdate::Text(text));
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod finish_tests {
+    use super::*;
+
+    #[test]
+    fn length_stop_discards_even_malformed_tool_arguments() {
+        let message = json!({
+            "role": "assistant", "content": "partial text",
+            "tool_calls": [{"id":"call","function":{"name":"apply_patch","arguments":"{"}}]
+        });
+        assert!(finish_turn(message.clone(), Some("tool_calls")).is_err());
+        let turn = finish_turn(message, Some("length")).unwrap();
+        assert_eq!(turn.finish_reason, FinishReason::Length);
+        assert!(turn.calls.is_empty());
+        assert!(turn.message.get("tool_calls").is_none());
+        assert_eq!(turn.content, "partial text");
+    }
 }

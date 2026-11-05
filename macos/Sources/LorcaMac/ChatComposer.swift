@@ -53,8 +53,8 @@ struct ChatComposer: View {
                     .help("Attach images (up to four)").accessibilityLabel("Attach images")
                     .disabled(!store.ready || store.isImportingImages || store.draftImages.count >= AttachmentStore.maxImages)
                 if store.isImportingImages { ProgressView().controlSize(.mini).accessibilityLabel("Importing images") }
-                Spacer(minLength: 0)
                 AgentComposerControls(store: store)
+                Spacer(minLength: 0)
                 ModelPicker(store: store, compact: compact)
                 if store.isGenerating || store.currentAgentActive {
                     Button { store.stop() } label: {

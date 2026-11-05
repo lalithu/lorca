@@ -36,7 +36,6 @@ impl Agent {
             json!(registry.unavailable()),
             bounded(&w.map(|w|w.references()).unwrap_or_default().join(", "),6000))}),
         ];
-        let prior_history = history.clone();
         messages.extend(history);
         if messages.last().is_none_or(|m| m["role"] != "user") {
             messages.push(json!({"role":"user","content":task}));
@@ -173,7 +172,7 @@ impl Agent {
         let mut unresolved = retained_failures(&resume_evidence, w);
 
         let mut denied = HashSet::new();
-        let mut no_progress = 0;
+        let mut running_commands = HashSet::new();
         let mut unsuccessful_actions = 0;
         let mut progress = HashSet::new();
         let mut observations = HashSet::new();
@@ -190,10 +189,8 @@ impl Agent {
         let mut truncation_retries = 0;
         // A successful read must not renew the malformed-runtime-call allowance.
         let mut interrupted_tool_retries = 0;
-        let mut finalizing = false;
-        let mut finalization_started = false;
         let mut revisions = self.revision_receiver();
-        for iteration in 1..=limits.iterations {
+        for iteration in 1.. {
             if !self.take_iteration() {
                 break;
             }
@@ -213,46 +210,11 @@ impl Agent {
             operational["plan"] = plan.clone();
             // Model-authored notes are separate from execution observations.
             operational["workingNotes"] = working_checkpoint.clone();
-            let verified = resume_evidence
-                .iter()
-                .chain(self.snapshot().unwrap().transcript.iter())
-                .cloned()
-                .collect::<Vec<_>>();
-            let verified = super::inspection::current_observations(verified, w);
-            let outstanding = requirements.missing(&verified);
-            if !finalizing
-                && contract.authority.scope.read_only
-                && resume_evidence.is_empty()
-                && evidence
-                    .iter()
-                    .any(|fact| fact["tool"] == "read_file" && fact["ok"] == true)
-                && evidence.iter().all(|fact| fact["running"] != true)
-                && plan.is_null()
-                && failures.is_empty()
-                && unresolved.is_empty()
-                && denied.is_empty()
-                && outstanding.is_empty()
-                && requirements.bounded_inspection_complete(&verified)
-            {
-                finalizing = true;
-            }
-            if let Some(blocker) = requirements.terminal_read_blocker(&verified) {
-                self.emit("task_verification", json!(requirements.report(&verified)));
-                return Err(format!("Task incomplete: {blocker}"));
-            }
-            if finalizing && !finalization_started {
-                finalization_started = true;
-                self.emit("finalization_requested", json!({"toolsDisabled":true}));
-                messages.push(json!({"role":"user","content":format!(
-                    "Internal Lorca finalization. Tools are unavailable in this step. Distinguish observed file contents from inferred purpose and unimplemented functionality. Documentation does not establish implementation. Give one concise final answer to the active request using the actual tool results already in context. Do not repeat or invent work; report command exit codes accurately. Verified operation records: {}",json!(evidence))}));
-            }
-            operational["outstanding"] = json!(outstanding);
             operational["unresolved"] = json!(unresolved.keys().collect::<Vec<_>>());
             operational["denied"] = json!(denied);
             let schemas = registry.active_schemas();
             operational["activeInstructions"] = json!(self.instruction_history());
             operational["unavailableTools"] = json!(registry.unavailable());
-            let offered = if finalizing { &[][..] } else { &schemas[..] };
             let budget = crate::context::GenerationBudget::new(
                 capacity,
                 expanded_output || inference.effort() == ThinkingEffort::High,
@@ -263,9 +225,9 @@ impl Agent {
                 &self.snapshot().unwrap().usage,
             );
             let (budget, compacted) =
-                context.fit_generation(&mut messages, offered, budget, &task, &operational)?;
+                context.fit_generation(&mut messages, &schemas, budget, &task, &operational)?;
             if compacted {
-                self.emit("context_compacted",json!({"count":context.compactions,"estimatedTokens":context.tokens(&messages,offered),"capacity":capacity,"outputReserve":budget.output_limit,"safetyMargin":budget.safety_margin,"inputBudget":budget.input_limit()}));
+                self.emit("context_compacted",json!({"count":context.compactions,"estimatedTokens":context.tokens(&messages,&schemas),"capacity":capacity,"outputReserve":budget.output_limit,"safetyMargin":budget.safety_margin,"inputBudget":budget.input_limit()}));
                 let mut s = self.state.lock().unwrap();
                 let limit = s.view.as_ref().unwrap().usage.context_limit;
                 s.view.as_mut().unwrap().usage = crate::types::Usage {
@@ -273,7 +235,7 @@ impl Agent {
                     ..Default::default()
                 };
             }
-            let estimated = context.tokens(&messages, offered);
+            let estimated = context.tokens(&messages, &schemas);
             budget.check(estimated)?;
             {
                 let mut s = self.state.lock().unwrap();
@@ -300,8 +262,15 @@ impl Agent {
                 drop(s);
                 self.changed();
             };
-            let before = self.snapshot().unwrap().assistant_text.len();
-            let generated = tokio::select! {biased; _=revisions.changed()=>return Err("Task revised".into()), _=cancel.changed()=>return Err("Cancelled".into()),result=tokio::time::timeout(Duration::from_secs(model_seconds),inference.generate_budgeted(&messages,offered,budget,&updates))=>result.map_err(|_|"Model request timed out")?};
+            let (before, previous_reasoning) = {
+                let state = self.state.lock().unwrap();
+                let view = state.view.as_ref().unwrap();
+                (
+                    view.assistant_text.len(),
+                    view.thinking.last().map(|block| block.id.clone()),
+                )
+            };
+            let generated = tokio::select! {biased; _=revisions.changed()=>return Err("Task revised".into()), _=cancel.changed()=>return Err("Cancelled".into()),result=tokio::time::timeout(Duration::from_secs(model_seconds),inference.generate_budgeted(&messages,&schemas,budget,&updates))=>result.map_err(|_|"Model request timed out")?};
             if self.revision_pending() {
                 return Err("Task revised".into());
             }
@@ -313,7 +282,7 @@ impl Agent {
                         "Tool arguments must be a JSON object"
                             | "Invalid tool JSON arguments"
                             | "tool_calls must be an array"
-                    ) && !finalizing =>
+                    ) =>
                 {
                     self.state.lock().unwrap().view.as_mut().unwrap().generating = false;
                     self.emit(
@@ -321,16 +290,7 @@ impl Agent {
                         json!({"error":error,"executed":false}),
                     );
                     if invalid_turns >= 1 {
-                        return super::recovery::guidance(
-                            self,
-                            registry,
-                            w,
-                            limits,
-                            cancel.clone(),
-                            &contract.authority,
-                            &error,
-                        )
-                        .await;
+                        return Err(format!("Task incomplete: {error} after one correction attempt."));
                     }
                     invalid_turns += 1;
                     messages.push(json!({"role":"user","content":format!("Internal Lorca tool validation feedback. No tool executed: {error}. Return a native tool call whose arguments are a JSON object, using the exact current tool schema. Do not serialize nested arrays or objects as strings. Correct this once; preserve the original task.")}));
@@ -357,7 +317,7 @@ impl Agent {
                 }
                 Err(error) => return Err(error),
             };
-            {
+            let received_reasoning = {
                 let mut s = self.state.lock().unwrap();
                 let v = s.view.as_mut().unwrap();
                 v.generating = false;
@@ -379,7 +339,12 @@ impl Agent {
                 if let Some(prompt) = v.usage.prompt_tokens {
                     context.confirm(estimated, prompt);
                 }
-            }
+                v.thinking.last().is_some_and(|block| {
+                    previous_reasoning.as_deref() != Some(block.id.as_str())
+                        && block.state == "complete"
+                        && (!block.text.trim().is_empty() || block.truncated)
+                })
+            };
             self.changed();
             if matches!(
                 turn.finish_reason,
@@ -426,128 +391,39 @@ impl Agent {
                     "Internal Lorca generation recovery. {cause} No tool calls from that interrupted response executed. Resume the same user request using the verified results already present. Use small, targeted patches or one action per turn; do not rewrite an entire file unnecessarily or replay completed actions. Existing approvals and restrictions still apply. This is an internal generation failure, not missing user instructions.")}));
                 continue;
             }
-            if finalizing && !turn.calls.is_empty() {
-                return Err("Task incomplete: model requested tools during a tool-free turn; no action was executed".into());
-            }
             if turn.calls.is_empty() {
+                // A final reply ends generation. The audit records what the
+                // tools proved independently of what the model said.
                 let current = resume_evidence
                     .iter()
                     .chain(self.snapshot().unwrap().transcript.iter())
                     .cloned()
-                    .collect::<Vec<_>>();
+                    .collect();
                 let current = super::inspection::current_observations(current, w);
                 let mut report = requirements.report(&current);
-                if unresolved.keys().any(|k| {
+                let failed_action = unresolved.keys().any(|key| {
                     !requirements.reports_failure()
-                        || !(k.starts_with("exec_command:") || k.starts_with("write_stdin:"))
-                }) {
+                        || !(key.starts_with("exec_command:") || key.starts_with("write_stdin:"))
+                });
+                if failed_action {
                     report.satisfied = false;
-                    report
-                        .unsatisfied
-                        .push("Tool failures remain unresolved".into());
+                    report.unsatisfied.push("Tool failures remain unresolved".into());
+                }
+                if !running_commands.is_empty() {
+                    report.satisfied = false;
+                    report.unsatisfied.push("Command exit status is unavailable".into());
                 }
                 self.emit("task_verification", json!(report));
-                let mut missing = requirements.missing(&current);
-                if !denied.is_empty() {
-                    return Err(
-                        "Task denied: an action was declined; no retry or bypass was performed"
-                            .into(),
-                    );
+                if failed_action {
+                    return Err("A command or file change failed. See the tool result for details.".into());
                 }
-                if (!missing.is_empty() || !unresolved.is_empty())
-                    && let Some(question) =
-                        super::verification::clarification_question(&turn.content)
-                {
-                    return super::recovery::question(
-                        self,
-                        registry,
-                        w,
-                        limits,
-                        cancel.clone(),
-                        &contract.authority,
-                        question,
-                    )
-                    .await;
+                if !running_commands.is_empty() {
+                    return Err("Task incomplete: The model stopped before collecting the command exit status.".into());
                 }
-                if unresolved.keys().any(|k| {
-                    !requirements.reports_failure()
-                        || !(k.starts_with("exec_command:") || k.starts_with("write_stdin:"))
-                }) {
-                    return Err("A command or file change failed. Task failed; see actual tool results and exit status.".into());
+                if turn.content.trim().is_empty() && !received_reasoning {
+                    return Err("Task incomplete: The model returned no answer or tool calls.".into());
                 }
-                let claims = super::verification::unverified_claim(
-                    &task,
-                    &turn.content,
-                    &prior_history
-                        .iter()
-                        .chain(current.iter())
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                );
-                if let Some(reason) = claims {
-                    if !requirements.action() {
-                        return Err(reason);
-                    }
-                    missing.push(reason);
-                }
-                let empty = turn.content.trim().is_empty();
-                let intent =
-                    requirements.action() && super::verification::intent_only(&turn.content);
-                if missing.is_empty() && !empty && !intent {
-                    return Ok(turn.content);
-                }
-
-                if let Some(blocker) = requirements.read_blocker(&current) {
-                    return super::recovery::guidance(
-                        self,
-                        registry,
-                        w,
-                        limits,
-                        cancel.clone(),
-                        &contract.authority,
-                        &blocker,
-                    )
-                    .await;
-                }
-                if finalizing {
-                    return Err("Task incomplete: tools settled, but the single tool-free finalization did not produce a verified final answer. See preserved tool results.".into());
-                }
-                messages.push(turn.message);
-                if empty && missing.is_empty() && evidence.iter().any(|v| v["ok"] == true) {
-                    finalizing = true;
-                    continue;
-                }
-                if no_progress >= 2 || !requirements.action() || schemas.is_empty() {
-                    let reason = if missing.is_empty() {
-                        "Model did not produce a final answer".into()
-                    } else {
-                        missing.join("; ")
-                    };
-                    return super::recovery::guidance(
-                        self,
-                        registry,
-                        w,
-                        limits,
-                        cancel.clone(),
-                        &contract.authority,
-                        &reason,
-                    )
-                    .await;
-                }
-                no_progress += 1;
-                if missing.is_empty() {
-                    missing.push("Finish the existing objective and give a factual result, rather than announcing another action".into());
-                }
-                let correction = format!(
-                    "Internal Lorca verification feedback, not a new user message. This task is still incomplete. Unverified outcomes: {}. Continue this same task with the existing native tools and approval checks. Reuse verified paths; do not replay settled operations. If blocked, state the specific blocker.",
-                    missing.join("; ")
-                );
-                self.emit(
-                    "task_continued",
-                    json!({"attempt":no_progress,"outstanding":missing}),
-                );
-                messages.push(json!({"role":"user","content":correction}));
-                continue;
+                return Ok(turn.content);
             }
             if turn.calls.len() > 8 {
                 return Err("Model requested too many tools in one turn (maximum 8)".into());
@@ -644,7 +520,7 @@ impl Agent {
                         &result,
                     )
                     && error.starts_with("Unverified file reference:")
-                    && read_recoveries.len() < limits.iterations
+                    && (limits.iterations == 0 || read_recoveries.len() < limits.iterations)
                     && read_recoveries.insert(path)
                 {
                     let original_error = error.clone();
@@ -714,6 +590,15 @@ impl Agent {
                     unchanged_observations = 0;
                 }
                 let ok = value["ok"] == true;
+                if let (Some(id), Some(running)) =
+                    (value["sessionId"].as_str(), value["running"].as_bool())
+                {
+                    if running {
+                        running_commands.insert(id.to_owned());
+                    } else {
+                        running_commands.remove(id);
+                    }
+                }
                 if ok && call.name == "update_plan" {
                     plan = value["plan"].clone();
                     if !value["checkpoint"].is_null() {
@@ -728,7 +613,6 @@ impl Agent {
                         || !value["output"].as_str().unwrap_or("").is_empty())
                     && progress.insert(cache_key.clone())
                 {
-                    no_progress = 0;
                     unsuccessful_actions = 0;
                     truncation_retries = 0;
                     checkpoint_turns = 0;
@@ -837,8 +721,9 @@ impl Agent {
                     );
                 }
                 if unchanged_observations >= 3 {
-                    return super::recovery::guidance(self, registry, w, limits, cancel.clone(), &contract.authority,
-                        "Repeated inspections returned unchanged results without advancing the objective").await;
+                    let reason = "Repeated inspections returned unchanged results.";
+                    self.skip_calls(&calls[call_index + 1..], reason);
+                    return Err(format!("Task incomplete: {reason}"));
                 }
                 if failures.get(&cache_key).map_or(0, |f| f.attempts) >= 3
                     || unsuccessful_actions >= 6
@@ -852,29 +737,15 @@ impl Agent {
                             .as_str()
                             .unwrap_or("Tool failed")
                     );
-                    return super::recovery::guidance(
-                        self,
-                        registry,
-                        w,
-                        limits,
-                        cancel.clone(),
-                        &contract.authority,
-                        &reason,
-                    )
-                    .await;
+                    self.skip_calls(&calls[call_index + 1..], &reason);
+                    return Err(format!("Task incomplete: {reason}"));
                 }
             }
         }
-        super::recovery::guidance(
-            self,
-            registry,
-            w,
-            limits,
-            cancel,
-            &contract.authority,
-            &format!("Iteration limit reached ({})", limits.iterations),
-        )
-        .await
+        Err(format!(
+            "Task incomplete: Iteration limit reached ({}). Verified work is saved. Continue the task to keep working.",
+            limits.iterations
+        ))
     }
 }
 
@@ -1033,7 +904,8 @@ fn retained_failures(history: &[Value], workspace: Option<&Workspace>) -> HashMa
         let key = operation_key(call, workspace);
         if result["ok"] == true {
             unresolved.remove(&key);
-        } else if result["code"] != "invalid_arguments"
+        } else if result["skipped"] != true
+            && result["code"] != "invalid_arguments"
             && !result["error"]
                 .as_str()
                 .unwrap_or("")
@@ -1064,6 +936,8 @@ mod retained_failure_tests {
         records.extend([
             call("invalid"),
             result("invalid", json!({"ok":false,"code":"invalid_arguments"})),
+            call("skipped"),
+            result("skipped", json!({"ok":false,"executed":false,"skipped":true})),
         ]);
         assert!(retained_failures(&records, None).is_empty());
     }

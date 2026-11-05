@@ -18,6 +18,7 @@ struct BackendSession: Codable {
     let models: [String]
     let isConnected: Bool
     let error: String?
+    var allocatedContext: Int? = nil
     let usage: ChatUsage
 }
 struct BackendTurn: Codable {
