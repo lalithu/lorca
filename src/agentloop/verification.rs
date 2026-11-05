@@ -212,7 +212,10 @@ impl Requirements {
             Vec::new()
         };
         let looks_at_path = positive.split_once("look at ").is_some_and(|(_, target)| {
-            target.trim_start().trim_start_matches(['`', '"', '\'']).starts_with('/')
+            target
+                .trim_start()
+                .trim_start_matches(['`', '"', '\''])
+                .starts_with('/')
         });
         Self {
             inspect: !explanatory
@@ -1005,7 +1008,10 @@ mod inspection_target_tests {
         assert!(req.read_paths.is_empty());
         assert!(!req.missing(&[]).is_empty());
         assert!(req.missing(&[read("README.md", 0, 4, "real")]).is_empty());
-        assert_eq!(Requirements::new("Read only README.md").read_paths, ["README.md"]);
+        assert_eq!(
+            Requirements::new("Read only README.md").read_paths,
+            ["README.md"]
+        );
         assert_eq!(Requirements::new("Read `only`").read_paths, ["only"]);
     }
 

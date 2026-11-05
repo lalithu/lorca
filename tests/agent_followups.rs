@@ -69,8 +69,15 @@ async fn chat(State(s): State<Arc<Server>>, Json(r): Json<Value>) -> Json<Value>
     } else if status {
         json!({"role":"assistant","content":"The previous change completed."})
     } else {
+        // Earlier tool results remain context. This fixture must distinguish
+        // completed earlier work from execution of the newly requested edit.
+        let start = ms
+            .iter()
+            .rposition(|m| m["role"] == "user" && m["content"] == latest)
+            .map_or(0, |i| i + 1);
+        let current = &ms[start..];
         let ok = |name: &str| {
-            ms.iter().any(|m| {
+            current.iter().any(|m| {
                 m["role"] == "tool"
                     && m["tool_name"] == name
                     && serde_json::from_str::<Value>(m["content"].as_str().unwrap_or(""))
@@ -80,7 +87,7 @@ async fn chat(State(s): State<Arc<Server>>, Json(r): Json<Value>) -> Json<Value>
         // Actual tool messages use tool_call_id; both names are stable in this fixture.
         let ok = |name: &str| {
             ok(name)
-                || ms.iter().any(|m| {
+                || current.iter().any(|m| {
                     m["role"] == "tool"
                         && m["tool_call_id"] == name
                         && serde_json::from_str::<Value>(m["content"].as_str().unwrap_or(""))

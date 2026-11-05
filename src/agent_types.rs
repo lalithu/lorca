@@ -60,6 +60,17 @@ pub trait Inference: Send + Sync {
     ) -> FutureResult<'a, Turn> {
         self.generate_stream(messages, tools, updates)
     }
+    /// One missing-answer recovery, using the same tools and budget.
+    /// Providers with thinking controls can disable it for this request.
+    fn generate_public_reply<'a>(
+        &'a self,
+        messages: &'a [Value],
+        tools: &'a [Value],
+        budget: crate::context::GenerationBudget,
+        updates: &'a (dyn Fn(ModelUpdate) + Send + Sync),
+    ) -> FutureResult<'a, Turn> {
+        self.generate_budgeted(messages, tools, budget, updates)
+    }
     fn capacity(&self) -> FutureResult<'_, Option<u64>> {
         Box::pin(async { Ok(None) })
     }

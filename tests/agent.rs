@@ -157,7 +157,9 @@ async fn read_only_folder_report_completes_without_verification_retry() {
     assert_eq!(view.status, Status::Completed);
     assert_eq!(mock.seen.lock().unwrap().len(), 3);
     assert!(
-        view.events.iter().all(|event| event.kind != "task_continued")
+        view.events
+            .iter()
+            .all(|event| event.kind != "task_continued")
     );
 }
 
@@ -520,8 +522,17 @@ async fn a_text_claim_does_not_replace_verified_execution() {
     );
     let done = wait(&agent, |v| !v.status.active()).await;
     assert_eq!(done.status, Status::Completed);
-    assert!(!done.events.iter().any(|event| event.kind == "tool_started" || event.kind == "file_changes"));
-    assert!(done.events.iter().any(|event| event.kind == "task_verification" && event.data["evidence"] == json!([])));
+    assert!(
+        !done
+            .events
+            .iter()
+            .any(|event| event.kind == "tool_started" || event.kind == "file_changes")
+    );
+    assert!(
+        done.events
+            .iter()
+            .any(|event| event.kind == "task_verification" && event.data["evidence"] == json!([]))
+    );
 }
 #[tokio::test]
 async fn discovery_resolves_guessed_paths_and_revalidates_references() {

@@ -3,7 +3,7 @@ pub struct ListDirectory;
 impl Tool for ListDirectory {
     fn schema(&self) -> Value {
         let (description, properties, required) = (
-            "List immediate entries including hidden names, bounded to 200. An empty untruncated result means this directory is empty. Paths are relative to the workspace; use . for its root.",
+            "List files and folders in a workspace or repository directory, including hidden names, bounded to 200 immediate entries. An empty untruncated result means this directory is empty. Paths are relative to the workspace; use . for its root.",
             json!({"path":{"type":"string"}}),
             vec!["path"],
         );

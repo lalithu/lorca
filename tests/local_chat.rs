@@ -69,6 +69,16 @@ async fn chat(State(s): State<Arc<Server>>, Json(v): Json<Value>) -> String {
     } else {
         None
     };
+    let missing_reply = !hello
+        && has_read
+        && !messages
+            .iter()
+            .rev()
+            .find(|message| message["role"] == "user")
+            .and_then(|message| message["content"].as_str())
+            .is_some_and(|text| {
+                text.starts_with("No public answer was received.") || text == "Give me output"
+            });
     let mut lines = vec![];
     let reason = if let Some((name, args)) = tool {
         // Exercise fragmented OpenAI tool arguments and stable indexes.
@@ -77,6 +87,9 @@ async fn chat(State(s): State<Arc<Server>>, Json(v): Json<Value>) -> String {
         lines.push(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call","type":"function","function":{"name":name,"arguments":&args[..mid]}}]}}]}));
         lines.push(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":&args[mid..]}}]}}]}));
         "tool_calls"
+    } else if missing_reply {
+        lines.push(json!({"choices":[{"delta":{"reasoning_content":"README.md contains fixture contents."}}]}));
+        "stop"
     } else {
         for text in if hello {
             vec!["Hel", "lo"]
@@ -151,7 +164,7 @@ async fn chat_folder_continuation_and_model_lifecycle_use_the_same_core() {
             Status::Completed,
         ),
     ] {
-        core.command(json!({"op":"agent_start","session":session,"conversationId":conversation,"requestId":lorca::types::id(),"task":task,"workspace":workspace,"contextWindow":4096})).await.unwrap();
+        core.command(json!({"op":"agent_start","session":session,"conversationId":conversation,"requestId":lorca::types::id(),"task":task,"workspace":workspace,"contextWindow":6144})).await.unwrap();
         wait(&core, expected.clone()).await;
         if expected == Status::WaitingForInput {
             assert_eq!(
@@ -166,7 +179,9 @@ async fn chat_folder_continuation_and_model_lifecycle_use_the_same_core() {
         "Reuse the already-loaded allocation without restarting it"
     );
     let task = core.agent().snapshot().unwrap();
-    assert_eq!(task.usage.context_limit, Some(4096));
+    // The expanded starter schemas need room alongside retained tool history.
+    // Keep the requested window below the server allocation to verify both values.
+    assert_eq!(task.usage.context_limit, Some(6144));
     assert_eq!(core.snapshot().sessions[0].allocated_context, Some(8192));
     assert_eq!(task.usage.prompt_duration_ns, Some(125_000_000));
     assert_eq!(task.usage.prompt_tokens_per_second, Some(800.0));
@@ -183,11 +198,42 @@ async fn chat_folder_continuation_and_model_lifecycle_use_the_same_core() {
         );
         assert_eq!(requests[0]["reasoning_budget"], 0);
         assert_eq!(requests[0]["reasoning_format"], "deepseek");
-        assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 2);
+        let initial = requests[0]["tools"].as_array().unwrap();
+        for name in ["tool_search", "request_workspace", "request_user_input"] {
+            assert!(initial.iter().any(|s| s["function"]["name"] == name));
+        }
+        let workspace_tools = requests[2]["tools"].as_array().unwrap();
+        for name in [
+            "list_directory",
+            "read_file",
+            "search_files",
+            "apply_patch",
+            "exec_command",
+            "write_stdin",
+            "request_user_input",
+            "tool_search",
+        ] {
+            assert!(
+                workspace_tools
+                    .iter()
+                    .any(|s| s["function"]["name"] == name)
+            );
+        }
+        assert!(
+            !workspace_tools
+                .iter()
+                .any(|s| s["function"]["name"] == "request_workspace")
+        );
+        assert!(
+            requests[2]["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("active, already selected")
+        );
         assert_eq!(
             requests.len(),
             5,
-            "one hello, one folder request, one discovery, one read, one final answer"
+            "one hello, one folder request, one direct read, one reasoning-only turn, one public answer"
         );
         assert!(requests.iter().all(|v| {
             !v["tools"]
@@ -214,6 +260,60 @@ async fn chat_folder_continuation_and_model_lifecycle_use_the_same_core() {
             .content
             .contains("fixture contents")
     );
+    // Tool history remains usable even if a prior saved answer had no public text.
+    let mut empty_reply = saved.clone();
+    empty_reply.messages.last_mut().unwrap().content.clear();
+    let repository = Repository::new(root.join("data")).unwrap();
+    assert!(
+        repository
+            .wire_messages(&empty_reply)
+            .unwrap()
+            .iter()
+            .any(|message| message["role"] == "tool" && message["tool_name"] == "read_file")
+    );
+
+    core.command(
+        json!({"op":"agent_start","session":session,"conversationId":conversation,
+        "requestId":lorca::types::id(),"task":"Give me output","workspace":work,
+        "contextWindow":6144}),
+    )
+    .await
+    .unwrap();
+    wait(&core, Status::Completed).await;
+    let follow_up = core.agent().snapshot().unwrap();
+    assert_eq!(
+        follow_up.result.as_deref(),
+        Some("README.md contains fixture contents.")
+    );
+    assert!(
+        !follow_up
+            .audit
+            .iter()
+            .any(|event| event.kind == "tool_requested")
+    );
+    {
+        let requests = s.requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            6,
+            "Follow-up answers from context in one call"
+        );
+        let history = requests.last().unwrap()["messages"].as_array().unwrap();
+        let read = history
+            .iter()
+            .find(|message| message["role"] == "tool" && message["name"] == "read_file")
+            .unwrap();
+        let result: Value = serde_json::from_str(read["content"].as_str().unwrap()).unwrap();
+        assert_eq!(result["content"], "fixture contents");
+        assert!(
+            history
+                .iter()
+                .filter_map(|message| message["tool_calls"].as_array())
+                .flatten()
+                .any(|call| call["id"] == read["tool_call_id"])
+        );
+    }
+
     core.command(json!({"op":"prepare","session":session,"model":"second","unloadPrevious":true}))
         .await
         .unwrap();

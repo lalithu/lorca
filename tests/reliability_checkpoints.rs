@@ -157,7 +157,11 @@ async fn a_reply_cannot_manufacture_edit_evidence() {
     )
     .await;
     assert_eq!(v.status, Status::Completed);
-    assert!(v.events.iter().any(|event| event.kind == "task_verification" && event.data["satisfied"] == false));
+    assert!(
+        v.events
+            .iter()
+            .any(|event| event.kind == "task_verification" && event.data["satisfied"] == false)
+    );
     assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
 }
 

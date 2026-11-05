@@ -212,9 +212,6 @@ impl Repository {
         let mut total = 0;
         let mut messages = vec![];
         for message in &chat.messages {
-            if message.content.is_empty() && message.attachments.is_empty() {
-                continue;
-            }
             if let Some(history) = message.extra.get("agentHistory").and_then(Value::as_array) {
                 messages.extend(history.iter().cloned());
                 if message.extra.get("agentStatus").is_some_and(|s| {
@@ -225,6 +222,9 @@ impl Repository {
                 }) {
                     messages.push(json!({"role":"assistant","content":message.content}));
                 }
+                continue;
+            }
+            if message.content.is_empty() && message.attachments.is_empty() {
                 continue;
             }
             let mut wire = json!({"role":message.role,"content":message.content});

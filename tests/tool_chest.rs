@@ -60,19 +60,19 @@ fn registry_metadata_and_drawers_are_real_and_legacy_names_work() {
 #[tokio::test]
 async fn discovery_expands_schemas_without_changing_authority() {
     let r = Registry::default();
-    assert_eq!(names(r.active_schemas()), ["tool_search"]);
+    assert!(!names(r.active_schemas()).contains(&"git_diff".into()));
     let tool = r.get("tool_search").unwrap();
     let l = Limits::default();
     let (_tx, c) = watch::channel(false);
     let p = tool
-        .prepare_optional(None, json!({"query":"apply_patch"}), &l)
+        .prepare_optional(None, json!({"query":"git_diff"}), &l)
         .unwrap();
     let result = tool
         .execute_optional(None, &p, &l, c, &mut |_| {})
         .await
         .unwrap();
-    assert_eq!(result["tools"][0]["name"], "apply_patch");
-    assert!(names(r.active_schemas()).contains(&"apply_patch".into()));
+    assert_eq!(result["tools"][0]["name"], "git_diff");
+    assert!(names(r.active_schemas()).contains(&"git_diff".into()));
     let tmp = Temp::new();
     let w = Workspace::new(&tmp.0).unwrap();
     let p = r
@@ -361,8 +361,8 @@ fn registered_terminal_schema_does_not_coerce_malformed_arguments() {
     let root = Temp::new();
     let w = Workspace::new(&root.0).unwrap();
     let r = Registry::default();
-    assert_eq!(names(r.active_schemas()), ["tool_search"]);
-    let schemas = r.schemas();
+    assert!(names(r.active_schemas()).contains(&"exec_command".into()));
+    let schemas = r.active_schemas();
     let schema = schemas
         .iter()
         .find(|s| s["function"]["name"] == "exec_command")

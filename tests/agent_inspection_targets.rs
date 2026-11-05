@@ -125,7 +125,11 @@ async fn exact_report_request_finishes_once_without_false_filename_or_extra_call
         assert_eq!(calls.len(), 3);
         assert!(!calls[0].0);
         assert!(calls[..2].iter().all(|&(_, count)| count > 0));
-        assert!(calls.iter().all(|&(interpreting, count)| !interpreting && count > 0));
+        assert!(
+            calls
+                .iter()
+                .all(|&(interpreting, count)| !interpreting && count > 0)
+        );
         assert!(script.turns.lock().unwrap().is_empty());
         assert!(
             !view
@@ -167,7 +171,11 @@ async fn explicit_missing_file_is_reported_without_summary_retries() {
     assert_eq!(view.status, Status::Completed, "{:?}", view.result);
     assert_eq!(script.calls.lock().unwrap().len(), 2);
     assert!(!view.events.iter().any(|e| e.kind == "task_continued"));
-    assert!(view.events.iter().any(|event| event.kind == "tool_failed" && event.data["result"]["path"] == "MISSING.md"));
+    assert!(
+        view.events.iter().any(
+            |event| event.kind == "tool_failed" && event.data["result"]["path"] == "MISSING.md"
+        )
+    );
 }
 #[tokio::test]
 async fn partial_collection_is_recorded_without_reopening_the_reply() {
@@ -184,10 +192,22 @@ async fn partial_collection_is_recorded_without_reopening_the_reply() {
     let calls = script.calls.lock().unwrap();
     assert_eq!(calls.len(), 3);
     assert!(calls.iter().all(|&(_, count)| count > 0));
-    let report = view.events.iter().find(|event| event.kind == "task_verification").unwrap();
+    let report = view
+        .events
+        .iter()
+        .find(|event| event.kind == "task_verification")
+        .unwrap();
     assert_eq!(report.data["satisfied"], false);
-    assert!(report.data["unsatisfied"].to_string().contains("index.html"));
-    assert!(report.data["unsatisfied"].to_string().contains("lalith.txt"));
+    assert!(
+        report.data["unsatisfied"]
+            .to_string()
+            .contains("index.html")
+    );
+    assert!(
+        report.data["unsatisfied"]
+            .to_string()
+            .contains("lalith.txt")
+    );
 }
 
 #[tokio::test]
@@ -264,9 +284,7 @@ async fn audit_does_not_count_an_excerpt_as_a_full_read() {
 async fn an_answer_without_a_tool_call_is_not_read_evidence() {
     let (view, script, _) = run(
         "Read README.md and tell me what it says.",
-        vec![
-            json!({"role":"assistant","content":"The document describes a project."}),
-        ],
+        vec![json!({"role":"assistant","content":"The document describes a project."})],
     )
     .await;
     assert_eq!(view.status, Status::Completed);
@@ -279,7 +297,11 @@ async fn an_answer_without_a_tool_call_is_not_read_evidence() {
             .iter()
             .all(|(interpreting, count)| !interpreting && *count > 0)
     );
-    assert!(view.events.iter().any(|event| event.kind == "task_verification" && event.data["satisfied"] == false));
+    assert!(
+        view.events
+            .iter()
+            .any(|event| event.kind == "task_verification" && event.data["satisfied"] == false)
+    );
 }
 
 #[tokio::test]

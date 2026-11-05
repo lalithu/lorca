@@ -91,12 +91,21 @@ impl Inference for CoreInference {
         budget: crate::context::GenerationBudget,
         updates: &'a (dyn Fn(ModelUpdate) + Send + Sync),
     ) -> FutureResult<'a, Turn> {
+        self.generate_at_stage(messages, tools, budget, updates, self.effort)
+    }
+    fn generate_public_reply<'a>(
+        &'a self,
+        messages: &'a [Value],
+        tools: &'a [Value],
+        budget: crate::context::GenerationBudget,
+        updates: &'a (dyn Fn(ModelUpdate) + Send + Sync),
+    ) -> FutureResult<'a, Turn> {
         self.generate_at_stage(
             messages,
             tools,
             budget,
             updates,
-            crate::agent_types::ThinkingStage::Execution,
+            crate::agent_types::ThinkingEffort::Off,
         )
     }
 }
@@ -107,7 +116,7 @@ impl CoreInference {
         tools: &'a [Value],
         budget: crate::context::GenerationBudget,
         updates: &'a (dyn Fn(ModelUpdate) + Send + Sync),
-        stage: crate::agent_types::ThinkingStage,
+        effort: crate::agent_types::ThinkingEffort,
     ) -> FutureResult<'a, Turn> {
         Box::pin(async move {
             self.ready().await?;
@@ -117,10 +126,12 @@ impl CoreInference {
                     request_id,
                     state,
                     text,
-                } => self
-                    .core
-                    .agent()
-                    .reasoning_update(request_id, stage, state, text),
+                } => self.core.agent().reasoning_update(
+                    request_id,
+                    crate::agent_types::ThinkingStage::Execution,
+                    state,
+                    text,
+                ),
                 ModelUpdate::Usage(mut usage) => {
                     if self.context_window.is_some() {
                         usage.context_limit = usage
@@ -132,7 +143,7 @@ impl CoreInference {
                 other => updates(other),
             };
             provider
-                .generate_for_effort(messages, tools, budget, self.effort, &forward)
+                .generate_for_effort(messages, tools, budget, effort, &forward)
                 .await
         })
     }

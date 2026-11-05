@@ -178,7 +178,12 @@ async fn unified_core_native_ollama_tools_permissions_and_model_lease() {
         .iter()
         .map(|v| v["function"]["name"].as_str().unwrap())
         .collect();
-    assert_eq!(offered, vec!["tool_search"]);
+    let schemas = lorca::agent::Registry::default().active_schemas();
+    let expected: Vec<_> = schemas
+        .iter()
+        .map(|s| s["function"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(offered, expected);
     let messages = chats[1]["messages"].as_array().unwrap();
     assert!(messages.iter().any(|m| m["tool_calls"][1]["id"] == "patch"));
     let patch_result = messages
