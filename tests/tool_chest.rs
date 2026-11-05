@@ -60,7 +60,7 @@ fn registry_metadata_and_drawers_are_real_and_legacy_names_work() {
 #[tokio::test]
 async fn discovery_expands_schemas_without_changing_authority() {
     let r = Registry::default();
-    assert_eq!(r.active_schemas().len(), 8);
+    assert_eq!(names(r.active_schemas()), ["tool_search"]);
     let tool = r.get("tool_search").unwrap();
     let l = Limits::default();
     let (_tx, c) = watch::channel(false);
@@ -355,11 +355,12 @@ async fn explicit_network_restriction_cannot_be_expanded_by_approval() {
 }
 
 #[test]
-fn terminal_schema_is_available_upfront_and_does_not_coerce_malformed_arguments() {
+fn registered_terminal_schema_does_not_coerce_malformed_arguments() {
     let root = Temp::new();
     let w = Workspace::new(&root.0).unwrap();
     let r = Registry::default();
-    let schemas = r.active_schemas();
+    assert_eq!(names(r.active_schemas()), ["tool_search"]);
+    let schemas = r.schemas();
     let schema = schemas
         .iter()
         .find(|s| s["function"]["name"] == "exec_command")

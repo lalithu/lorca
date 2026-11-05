@@ -18,30 +18,31 @@ struct ModelPicker: View {
             Button("Unload model…") { confirmingUnload = true }.disabled(!store.canUnloadModel)
         } label: {
             HStack(spacing: 6) {
-                Text(store.selectedModel).lineLimit(1).truncationMode(.middle)
+                Text(ResponseDetails.modelName(store.selectedModel)).lineLimit(1).truncationMode(.middle)
                     .frame(maxWidth: compact ? 150 : 220, alignment: .trailing)
                 Image(systemName: "chevron.down").font(.system(size: compact ? 8 : 9, weight: .medium))
             }
             .font(.system(size: compact ? 11 : 12, weight: .medium))
             .foregroundStyle(.secondary)
-            .padding(.vertical, 5)
+            .padding(.horizontal, 9).padding(.vertical, 5)
+            .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 7))
         }
         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize(horizontal: true, vertical: true)
         .frame(maxWidth: compact ? 180 : 250, alignment: .trailing)
         .disabled(!store.ready || store.isManagingModel || store.isGenerating || store.agent.busy || store.jobs.running || store.isChecking || store.modelSession.isLoading)
         .accessibilityLabel("Model").accessibilityValue(store.selectedModel)
-        .help("Choose an installed Ollama model; stop active work before reloading or unloading")
+        .help("Choose a model already available in the connected local server")
         .confirmationDialog("Unload \(store.modelSession.activeModel ?? store.selectedModel)?", isPresented: $confirmingUnload) {
             Button("Unload model", role: .destructive) { Task { await store.unloadModel() } }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("Ollama shares models with other apps. Unloading can interrupt another app using this model. Your chats are kept; the model loads again when you send a message. Other active lorca sessions prevent unloading.")
+            Text("The local model server may share models with other apps. Unloading can interrupt another client using this model. Your chats are kept; the model loads again when you send a message.")
         }
         .confirmationDialog("Reload \(store.selectedModel)?", isPresented: $confirmingReload) {
             Button("Reload model", role: .destructive) { Task { await store.reloadModel() } }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("Ollama shares models with other apps. Unloading and reloading can interrupt another app using this model. Your chats are kept. Other active lorca sessions prevent unloading.")
+            Text("The local model server may share models with other apps. Reloading can interrupt another client using this model. Your chats are kept.")
         }
     }
 }

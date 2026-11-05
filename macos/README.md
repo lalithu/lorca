@@ -4,7 +4,7 @@ Native SwiftUI/AppKit dashboard and floating Mini, backed by the existing Rust c
 
 ## Build and launch
 
-Requires macOS 14+, Rust/Cargo, Xcode or Swift command-line tools, and a running Ollama server with an installed model. Python 3 is needed for Job Apps.
+Requires macOS 14+, Rust/Cargo, Xcode or Swift command-line tools, and a local model server. The dashboard automatically prefers the Llama app server at `127.0.0.1:9931`, then falls back to Ollama at `127.0.0.1:11434`. Models are installed in those apps; Lorca does not download them. Python 3 is needed for Job Apps.
 
 From the repository root:
 
@@ -15,6 +15,8 @@ lorca main
 ```
 
 For iteration after installing the command, run `lorca rebuild` from any directory. It rebuilds the Rust core, installs the updated CLI, builds the app, and gracefully restarts both UI and backend. The native app icon is 🌊; the Mini pet remains the orca.
+
+For UI changes, use `lorca rebuild ui`: incrementally compiles Swift in debug mode, signs and relaunches the app, and reuses the bundled Rust core and running backend. No Cargo build or CLI installation. Run a full rebuild once first, and after Rust, protocol, or bundled-resource changes. Saved data is preserved; active work is cancelled when the UI closes.
 
 Or run `./macos/run.sh` to build and open the app. Open `macos/Package.swift` in Xcode to edit. Full Xcode is required for `swift test`.
 
@@ -33,7 +35,7 @@ The build script selects full Xcode when installed. On affected command-line-too
 
 - Recents supports create, open, rename, and delete. Responses render headings, lists, quotes, tables, and code.
 - Scroll upward during streaming to pause following; return to the bottom to follow again.
-- Select a workspace in the existing composer to enable tools. There is no separate agent chat mode.
+- The first request carries a short policy and tool discovery; relevant schemas are loaded only when needed; there is no separate interpretation request or agent chat mode. When file access is needed, an inline **Choose folder…** button pauses the task for your choice and remembers the folder for that conversation. Rust continues to enforce workspace scope, approvals, and verification.
 - Expand real activity for calls, results, diffs, and terminal output. Approve exact actions once, deny, or cancel; pending approvals stay accessible.
 - Mini shows basic task status and links to the dashboard for detailed activity and approvals.
 - One conversational run at a time; switching chats does not cancel it. Partial text, structured tools/results, and execution activity persist with the originating chat.
@@ -41,9 +43,9 @@ The build script selects full Xcode when installed. On affected command-line-too
 
 ## Model lifecycle
 
-- Default: `qwen3.5:9b` at `http://127.0.0.1:11434`; choose installed models in the composer or Settings.
+- The dashboard prefers the Llama app server at `http://127.0.0.1:9931` when healthy, otherwise Ollama at `http://127.0.0.1:11434`; choose an installed model in the composer or Settings.
 - Opening the app or selecting a model does not load it. Submitted work prepares it and requests `keep_alive: -1`.
-- A temporary indeterminate loading bar and elapsed time appear under `ctx`. Context and speed use confirmed Ollama measurements; unavailable values show `—`.
+- A temporary indeterminate loading bar and elapsed time appear under `ctx`. Context and speed use server-reported measurements when available; unavailable values show `—`.
 - **Unload model…** frees memory; **Reload model…** helps recover a stalled model. Stop active work first. Shared-model warnings and Rust session leases apply.
 - `⌘Q` offers **Quit & Unload**, **Keep Loaded & Quit**, and **Cancel**, even before a model has loaded. Cleanup has deadlines, preserves unacknowledged drafts, and stops the app-owned Job Apps companion. Other lorca clients keep their shared backend.
 - Explicit Job Apps research/tailoring can also load a model. Pause research before chatting or switching models.

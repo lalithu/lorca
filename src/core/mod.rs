@@ -19,6 +19,7 @@ use tokio::sync::{Mutex as AsyncMutex, watch};
 type Result<T> = std::result::Result<T, String>;
 struct ClientSession {
     host: String,
+    engine: provider::Engine,
     last_seen: Instant,
 }
 struct State {
@@ -149,12 +150,27 @@ impl Core {
             .map(|c| c.host.clone())
             .ok_or("Session expired; reconnect.".into())
     }
+    fn engine(&self, session: &str) -> Result<provider::Engine> {
+        self.state
+            .lock()
+            .unwrap()
+            .clients
+            .get(session)
+            .map(|c| c.engine)
+            .ok_or("Session expired; reconnect.".into())
+    }
     pub async fn command(self: &Arc<Self>, v: Value) -> Result<Value> {
         let op = text(&v, "op")?;
         if op == "connect" {
+            let requested_engine = match v["provider"].as_str().unwrap_or("ollama") {
+                "ollama" => provider::Engine::Ollama,
+                "llama_cpp" => provider::Engine::LlamaCpp,
+                "auto" => provider::detect_local_engine(&self.client).await,
+                _ => return Err("Provider must be ollama, llama_cpp, or auto".into()),
+            };
             let host = v["host"]
                 .as_str()
-                .unwrap_or("http://127.0.0.1:11434")
+                .unwrap_or(requested_engine.default_host())
                 .trim_end_matches('/')
                 .to_string();
             let mut url = reqwest::Url::parse(&host).map_err(|_| "Invalid Ollama address")?;
@@ -184,6 +200,7 @@ impl Core {
                 id.clone(),
                 ClientSession {
                     host,
+                    engine: requested_engine,
                     last_seen: Instant::now(),
                 },
             );
@@ -196,6 +213,11 @@ impl Core {
             s.view.sessions.push(SessionView {
                 id: id.clone(),
                 selected_id: selected,
+                provider: match requested_engine {
+                    provider::Engine::Ollama => "ollama",
+                    provider::Engine::LlamaCpp => "llama.cpp",
+                }
+                .into(),
                 model: v["model"].as_str().unwrap_or("qwen3.5:9b").into(),
                 loading_model: None,
                 active_model: None,

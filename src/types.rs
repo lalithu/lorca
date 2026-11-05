@@ -89,12 +89,18 @@ pub struct Usage {
     pub generated_tokens: Option<u64>,
     #[serde(default)]
     pub generation_duration_ns: Option<u64>,
+    #[serde(default)]
+    pub prompt_duration_ns: Option<u64>,
+    #[serde(default)]
+    pub prompt_tokens_per_second: Option<f64>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionView {
     pub id: String,
     pub selected_id: String,
+    #[serde(default = "default_provider_name")]
+    pub provider: String,
     pub model: String,
     pub loading_model: Option<String>,
     pub active_model: Option<String>,
@@ -103,6 +109,9 @@ pub struct SessionView {
     pub is_connected: bool,
     pub error: Option<String>,
     pub usage: Usage,
+}
+fn default_provider_name() -> String {
+    "ollama".into()
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

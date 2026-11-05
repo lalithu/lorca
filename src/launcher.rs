@@ -47,24 +47,28 @@ fn open_app() -> io::Result<()> {
 }
 
 /// Explicit developer command; ordinary launches remain quiet and never build.
-pub fn rebuild(args: Vec<OsString>) -> io::Result<()> {
+pub fn rebuild(mut args: Vec<OsString>) -> io::Result<()> {
+    let ui_only = args.first().is_some_and(|arg| arg == "ui");
+    if ui_only {
+        args.remove(0);
+    }
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
         println!(
-            "Usage: lorca rebuild\n\nRebuild the Rust core, CLI, and macOS app, update the installed CLI, then restart the app and backend. Conversations, drafts, settings and Job Apps data are preserved.\nUses the repository this CLI was installed from; works from any directory."
+            "Usage: lorca rebuild [ui]\n\nRebuild the Rust core, CLI, and macOS app, update the installed CLI, then restart the app and backend. Conversations, drafts, settings and Job Apps data are preserved.\nUse `lorca rebuild ui` to incrementally build only Swift in debug mode and relaunch the UI, reusing the bundled Rust core and running backend. Run a full rebuild first.\nUses the repository this CLI was installed from; works from any directory."
         );
         return Ok(());
     }
     if !args.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "lorca rebuild takes no options. Use lorca rebuild --help.",
+            "lorca rebuild takes no options except the ui subcommand. Use lorca rebuild --help.",
         ));
     }
-    rebuild_app()
+    rebuild_app(ui_only)
 }
 
 #[cfg(target_os = "macos")]
-fn rebuild_app() -> io::Result<()> {
+fn rebuild_app(ui_only: bool) -> io::Result<()> {
     use std::{path::PathBuf, process::Command};
 
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -75,10 +79,15 @@ fn rebuild_app() -> io::Result<()> {
             "Source repository not found. Reinstall lorca with cargo install --path . --locked --force from your current checkout.",
         ));
     }
-    println!("Rebuilding lorca in {}…", root.display());
+    println!(
+        "Rebuilding lorca{} in {}…",
+        if ui_only { " UI" } else { "" },
+        root.display()
+    );
     let status = Command::new("/bin/bash")
         .arg(script)
-        .env("LORCA_INSTALL_CLI", "1")
+        .env("LORCA_INSTALL_CLI", if ui_only { "0" } else { "1" })
+        .env("LORCA_UI_ONLY", if ui_only { "1" } else { "0" })
         .env("LORCA_BUILD_ONLY", "0")
         .current_dir(&root)
         .status()?;
@@ -87,12 +96,16 @@ fn rebuild_app() -> io::Result<()> {
             "build or restart failed; a fresh restart was not confirmed",
         ));
     }
-    println!("Rebuild complete. Fresh app and backend restart verified.");
+    if ui_only {
+        println!("UI rebuild complete. App relaunched using the existing Rust core.");
+    } else {
+        println!("Rebuild complete. Fresh app and backend restart verified.");
+    }
     Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
-fn rebuild_app() -> io::Result<()> {
+fn rebuild_app(_ui_only: bool) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "lorca rebuild builds the native macOS app and requires macOS",

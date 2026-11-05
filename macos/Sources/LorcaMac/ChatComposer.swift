@@ -21,8 +21,7 @@ struct ChatComposer: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: compact ? 14 : 20) {
-            if !compact { AgentComposerControls(store: store) }
+        VStack(alignment: .leading, spacing: 10) {
             if store.currentAgentActive {
                 HStack(spacing:12) {
                     Button("Status",action:requestStatus).disabled(store.agent.submitting)
@@ -48,13 +47,14 @@ struct ChatComposer: View {
                     send: send, attach: store.attachImages)
                     .disabled(!store.ready)
             }
-            .frame(minHeight: compact ? 34 : 50, alignment: .topLeading)
+            .frame(minHeight: compact ? 30 : 38, alignment: .topLeading)
             HStack(spacing: compact ? 12 : 16) {
                 Button { choosingImages = true } label: { Image(systemName: "plus").font(.system(size: 16)) }
                     .help("Attach images (up to four)").accessibilityLabel("Attach images")
                     .disabled(!store.ready || store.isImportingImages || store.draftImages.count >= AttachmentStore.maxImages)
                 if store.isImportingImages { ProgressView().controlSize(.mini).accessibilityLabel("Importing images") }
                 Spacer(minLength: 0)
+                AgentComposerControls(store: store)
                 ModelPicker(store: store, compact: compact)
                 if store.isGenerating || store.currentAgentActive {
                     Button { store.stop() } label: {

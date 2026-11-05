@@ -1,7 +1,15 @@
 //! Read requirements grounded in user references and task-local tool evidence.
 //! Model target labels describe intent; they cannot manufacture filenames.
-use super::{intent::InspectionCoverage, recovery::path_key};
-use serde::Serialize;
+use super::recovery::path_key;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InspectionCoverage {
+    Relevant,
+    AllImmediate,
+    AllRecursive,
+}
 use serde_json::Value;
 use std::collections::BTreeMap;
 

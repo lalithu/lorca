@@ -82,16 +82,19 @@ async fn chat(
         m["content"]
             .as_str()
             .unwrap_or("")
-            .contains("User decision: Plain text")
+            .contains("Latest user instruction: Plain text")
     });
     // On subsequent turns the answer remains in the user history.
     let answered = answered
+        || messages
+            .iter()
+            .any(|m| m["role"] == "user" && m["content"] == "Plain text")
         || messages.iter().any(|m| {
             matches!(m["role"].as_str(), Some("user" | "system"))
                 && m["content"]
                     .as_str()
                     .unwrap_or("")
-                    .contains("User decision: Plain text")
+                    .contains("Latest user instruction: Plain text")
         });
     if result(messages, "checkpoint")
         && !answered
@@ -243,7 +246,7 @@ async fn restart_continuation(interrupted: bool) {
     let resumed = core.agent().snapshot().unwrap();
     assert_ne!(resumed.id, original.id);
     assert!(resumed.task.contains("do not run commands"));
-    assert!(resumed.task.contains("User decision: Plain text"));
+    assert!(resumed.task.contains("Latest user instruction: Plain text"));
     assert_eq!(
         resumed
             .audit
@@ -261,7 +264,7 @@ async fn restart_continuation(interrupted: bool) {
         resumed.audit.iter().any(|e| e.kind == "approval_required"),
         "an answer must not grant edit permission"
     );
-    assert_eq!(server.requests.lock().unwrap().len(), 8);
+    assert_eq!(server.requests.lock().unwrap().len(), 6);
     http.abort();
 }
 

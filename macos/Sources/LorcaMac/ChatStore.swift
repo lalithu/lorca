@@ -56,6 +56,7 @@ final class ChatStore: ObservableObject {
         didSet { defaults.set(appearance.rawValue, forKey: "appearance"); appearanceChanged?() }
     }
     @Published private(set) var isConnected = false
+    @Published private(set) var providerName = "Ollama"
     @Published private(set) var isChecking = false
     @Published private(set) var isGenerating = false
     @Published private(set) var receivedText = false
@@ -244,6 +245,7 @@ final class ChatStore: ObservableObject {
         modelSession.apply(session)
         models = session.models
         isConnected = session.isConnected
+        providerName = session.provider == "llama.cpp" ? "llama.cpp" : "Ollama"
         applying = true
         selectedModel = session.model
         applying = false
@@ -267,6 +269,26 @@ final class ChatStore: ObservableObject {
             let accepted = await self.agent.submit(task: text, workspace: workspace, conversation: conversation, request: request, model: model, effort: effort, continueTaskID: continueTaskID)
             if accepted && self.continuation?.task == continueTaskID { self.continuation = nil }
             _ = await self.perform(["op": "snapshot"])
+        }
+    }
+    func chooseWorkspaceForTask() {
+        guard !agent.busy, let id = messages.last?.agentTaskId, let task = agent.runs[id],
+              task.conversationId == library.selectedID,
+              task.status == .waitingForInput, task.workspace.isEmpty else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Choose a folder for this conversation"
+        panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
+        let conversation = library.selectedID
+        guard let window = NSApp.keyWindow else { return }
+        panel.beginSheetModal(for: window) { response in
+            guard response == .OK, let url = panel.url,
+                  self.library.selectedID == conversation, self.messages.last?.agentTaskId == task.id,
+                  !self.agent.busy else { return }
+            self.agent.workspaces[conversation] = url
+            if self.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                self.draft = "Use the selected folder to continue the task."
+            }
+            self.send()
         }
     }
     func sendChat() { send() }

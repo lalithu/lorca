@@ -37,6 +37,7 @@ pub struct Registry {
     pub(super) catalog: Catalog,
     pub(super) visible: Visible,
     adaptive: bool,
+    workspace_available: bool,
     unavailable: BTreeMap<String, String>,
 }
 impl Default for Registry {
@@ -51,18 +52,7 @@ impl Default for Registry {
             "view_image".into(),
             "Available when an inference session is attached".into(),
         );
-        for name in [
-            "tool_search",
-            "list_directory",
-            "read_file",
-            "search_files",
-            "apply_patch",
-            "request_user_input",
-            "exec_command",
-            "write_stdin",
-        ] {
-            r.visible.lock().unwrap().insert(name.into());
-        }
+        r.visible.lock().unwrap().insert("tool_search".into());
         r
     }
 }
@@ -81,8 +71,27 @@ impl Registry {
             catalog: Default::default(),
             visible: Default::default(),
             adaptive: false,
+            workspace_available: true,
             unavailable: BTreeMap::new(),
         }
+    }
+    /// Basic chat tools remain available before the user selects a folder.
+    pub fn without_workspace() -> Self {
+        let mut r = Self::empty();
+        r.adaptive = true;
+        r.workspace_available = false;
+        super::web::register(&mut r);
+        super::agent::register(&mut r);
+        r.register(
+            "request_workspace",
+            Category::Agent,
+            Authority::TaskState,
+            Arc::new(super::agent::RequestWorkspace),
+        );
+        for name in ["tool_search", "request_workspace"] {
+            r.visible.lock().unwrap().insert(name.into());
+        }
+        r
     }
     /// Compatibility API for existing independent Tool implementations.
     pub fn add(&mut self, name: &str, tool: Arc<dyn Tool>) {
@@ -171,7 +180,7 @@ impl Registry {
     }
     pub(crate) fn attach_inference(&mut self, inference: Arc<dyn Inference>) {
         // Never expand an intentionally restricted/custom registry.
-        if self.adaptive {
+        if self.adaptive && self.workspace_available {
             super::vision::register(self, inference);
         }
     }

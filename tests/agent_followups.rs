@@ -34,48 +34,36 @@ fn call(name: &str, args: Value) -> Value {
 async fn chat(State(s): State<Arc<Server>>, Json(r): Json<Value>) -> Json<Value> {
     s.requests.lock().unwrap().push(r.clone());
     let ms = r["messages"].as_array().unwrap();
-    let interpretation = r["tools"]
-        .as_array()
-        .is_some_and(|ts| ts.iter().any(|t| t["function"]["name"] == "interpret_task"));
-    let latest = if interpretation {
-        serde_json::from_str::<Value>(ms.last().unwrap()["content"].as_str().unwrap()).unwrap()["latestUserMessage"].as_str().unwrap().to_owned()
-    } else {
-        ms.iter()
-            .rev()
-            .filter(|m| m["role"] == "user")
-            .filter_map(|m| m["content"].as_str())
-            .find(|t| {
-                t.contains("Create CHOSEN")
-                    || t.contains("Now change")
-                    || t.contains("2 + 2")
-                    || t.contains("status of")
-                    || t.contains("Can we talk")
-            })
-            .unwrap_or("")
-            .into()
-    };
+    let latest = ms
+        .iter()
+        .rev()
+        .filter(|m| m["role"] == "user")
+        .filter_map(|m| m["content"].as_str())
+        .find(|t| {
+            [
+                "Create CHOSEN",
+                "Now change",
+                "2 + 2",
+                "status of",
+                "Choose an output",
+                "Use Markdown",
+            ]
+            .iter()
+            .any(|v| t.contains(v))
+        })
+        .unwrap_or("")
+        .to_owned();
     let new = latest.contains("2 + 2");
     let status = latest.contains("status of");
     let follow = latest.contains("Now change");
     let needs_input = latest.contains("Choose an output");
-    let conversational = latest.contains("Can we talk");
-    let message = if conversational {
-        json!({"role":"assistant","content":"Of course. What is on your mind?"})
-    } else if interpretation && needs_input {
+    let message = if needs_input {
         call(
-            "interpret_task",
-            json!({
-                "relation":"new","objective":"Choose an output format",
-                "outcomes":[{"kind":"explain","target":null}],
-                "edit_targets":[],"forbidden_targets":[],"read_only":false,
-                "commands_forbidden":true,"clarification":"Which output format should I use?"
-            }),
+            "request_user_input",
+            json!({"question":"Which output format should I use?"}),
         )
-    } else if interpretation {
-        call(
-            "interpret_task",
-            json!({"relation":if new {"new"} else if status {"status"} else if follow {"continue"} else {"new"},"objective":if new {"Explain 2 + 2"} else if status {"Report the status of the previous change"} else if follow {"Change CHOSEN.md to second"} else {"Create CHOSEN.md containing first"},"outcomes":[{"kind":if new||status {"explain"}else{"edit"},"target":if new||status {Value::Null}else{json!("CHOSEN.md")}}],"edit_targets":if new||status {json!([])} else {json!(["CHOSEN.md"])},"forbidden_targets":[],"read_only":new||status,"commands_forbidden":true,"clarification":null}),
-        )
+    } else if latest.contains("Use Markdown") {
+        json!({"role":"assistant","content":"I'll use Markdown."})
     } else if new {
         json!({"role":"assistant","content":"2 + 2 = 4."})
     } else if status {
@@ -171,7 +159,7 @@ async fn completed_followup_gets_context_but_needs_fresh_evidence_and_status_is_
         "What is the status of the previous change?",
         "New request: explain 2 + 2. Do not edit files or run commands.",
         "Choose an output format.",
-        "Can we talk about something else?",
+        "Use Markdown.",
         "What is the status of the pending request?",
     ] {
         core.command(json!({"op":"agent_start","session":session,"model":"fixture","task":prompt,"workspace":work.0,"conversationId":conversation,"requestId":lorca::types::id()})).await.unwrap();
@@ -183,12 +171,11 @@ async fn completed_followup_gets_context_but_needs_fresh_evidence_and_status_is_
         wait(&core, &session, expected).await;
         let t = core.agent().snapshot().unwrap();
         ids.push(t.id);
-        if prompt.starts_with("Can we talk") {
+        if prompt.starts_with("Use Markdown") {
             assert_eq!(
-                t.result.as_deref(),
-                Some("Of course. What is on your mind?")
+                t.contract.as_ref().unwrap()["objective"]["original_instruction"],
+                "Choose an output format."
             );
-            assert_eq!(t.contract.as_ref().unwrap()["pendingTask"]["id"], ids[4]);
             assert!(!t.audit.iter().any(|a| a.kind == "tool_started"));
         }
         if prompt.starts_with("Now") {
@@ -215,33 +202,18 @@ async fn completed_followup_gets_context_but_needs_fresh_evidence_and_status_is_
         "second"
     );
     let requests = server.requests.lock().unwrap();
-    let interpreted: Vec<Value> = requests
-        .iter()
-        .filter(|r| {
-            r["tools"]
-                .as_array()
-                .is_some_and(|ts| ts.iter().any(|t| t["function"]["name"] == "interpret_task"))
-        })
-        .map(|r| {
-            serde_json::from_str(
-                r["messages"].as_array().unwrap().last().unwrap()["content"]
-                    .as_str()
-                    .unwrap(),
-            )
+    assert!(requests.iter().all(|r| {
+        !r["tools"]
+            .as_array()
+            .is_some_and(|ts| ts.iter().any(|t| t["function"]["name"] == "interpret_task"))
+    }));
+    assert!(requests.iter().any(|r| {
+        r["messages"]
+            .as_array()
             .unwrap()
-        })
-        .collect();
-    assert_eq!(interpreted[1]["previousTask"]["completed"], true);
-    assert_eq!(interpreted[1]["previousTask"]["id"], ids[0]);
-    assert_eq!(interpreted[6]["previousTask"]["id"], ids[4]);
-    assert_eq!(interpreted[6]["previousTask"]["completed"], false);
-    assert!(
-        requests
             .iter()
-            .any(|r| r["messages"].as_array().unwrap().iter().any(|m| {
-                m["role"] == "assistant" && m["content"] == "Of course. What is on your mind?"
-            }))
-    );
+            .any(|m| m["role"] == "assistant" && m["content"] == "I'll use Markdown.")
+    }));
     for m in &core
         .snapshot()
         .conversations

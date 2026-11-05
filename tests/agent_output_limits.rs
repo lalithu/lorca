@@ -73,7 +73,8 @@ async fn chat(State(server): State<Arc<Server>>, Json(request): Json<Value>) -> 
             .as_array()
             .unwrap()
             .iter()
-            .any(|s| s["function"]["name"] == "apply_patch")
+            .any(|s| s["function"]["name"] == "apply_patch"
+                || s["function"]["name"] == "tool_search")
     );
     server.requests.lock().unwrap().push(request.clone());
     let budget = request["options"]["num_predict"].as_u64().unwrap();
@@ -203,6 +204,18 @@ async fn run_with_approval(scenario: Scenario, allow_remaining: bool) -> (Fixtur
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let host = format!("http://{}", listener.local_addr().unwrap());
     let http_task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    // These recovery cases start after native tool discovery; schema availability
+    // is required before retrying a provider's malformed-tool HTTP response.
+    let registry = Registry::default();
+    let search = registry.get("tool_search").unwrap();
+    let prepared = search
+        .prepare_optional(None, json!({"query":"apply_patch"}), &Limits::default())
+        .unwrap();
+    let (_tx, cancel) = tokio::sync::watch::channel(false);
+    search
+        .execute_optional(None, &prepared, &Limits::default(), cancel, &mut |_| {})
+        .await
+        .unwrap();
     let agent = Arc::new(Agent::default());
     let id = agent
         .start(
@@ -218,7 +231,7 @@ async fn run_with_approval(scenario: Scenario, allow_remaining: bool) -> (Fixtur
                 host,
                 model: "test".into(),
             }),
-            Registry::default(),
+            registry,
         )
         .unwrap();
     let fixture = Fixture {
@@ -293,7 +306,8 @@ fn assert_original_request_retained(fixture: &Fixture) {
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|s| s["function"]["name"] == "apply_patch")
+                .any(|s| s["function"]["name"] == "apply_patch"
+                    || s["function"]["name"] == "tool_search")
         );
     }
 }

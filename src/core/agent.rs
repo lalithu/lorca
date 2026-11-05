@@ -5,6 +5,7 @@ pub(super) struct CoreInference {
     pub(super) core: Arc<Core>,
     pub(super) session: String,
     pub(super) model: String,
+    pub(super) engine: provider::Engine,
     pub(super) effort: crate::agent_types::ThinkingEffort,
 }
 /// Keep the existing model preparation future alive until it has cleaned up its
@@ -43,9 +44,6 @@ impl CoreInference {
     }
 }
 impl Inference for CoreInference {
-    fn interprets_tasks(&self) -> bool {
-        true
-    }
     fn effort(&self) -> crate::agent_types::ThinkingEffort {
         self.effort
     }
@@ -65,7 +63,7 @@ impl Inference for CoreInference {
             self.ready().await?;
             Ok(self
                 .core
-                .context_limit(&self.core.host(&self.session)?, &self.model)
+                .context_limit_for(self.engine, &self.core.host(&self.session)?, &self.model)
                 .await)
         })
     }
@@ -77,12 +75,9 @@ impl Inference for CoreInference {
     ) -> FutureResult<'a, Turn> {
         Box::pin(async move {
             self.ready().await?;
-            let provider = provider::agent::OllamaAgent {
-                client: self.core.client.clone(),
-                host: self.core.host(&self.session)?,
-                model: self.model.clone(),
-            };
-            provider.generate_stream(messages, tools, updates).await
+            self.provider()
+                .generate_stream(messages, tools, updates)
+                .await
         })
     }
     fn generate_budgeted<'a>(
@@ -100,21 +95,6 @@ impl Inference for CoreInference {
             crate::agent_types::ThinkingStage::Execution,
         )
     }
-    fn generate_interpretation<'a>(
-        &'a self,
-        messages: &'a [Value],
-        tools: &'a [Value],
-        budget: crate::context::GenerationBudget,
-        updates: &'a (dyn Fn(ModelUpdate) + Send + Sync),
-    ) -> FutureResult<'a, Turn> {
-        self.generate_at_stage(
-            messages,
-            tools,
-            budget,
-            updates,
-            crate::agent_types::ThinkingStage::Interpretation,
-        )
-    }
 }
 impl CoreInference {
     fn generate_at_stage<'a>(
@@ -127,11 +107,7 @@ impl CoreInference {
     ) -> FutureResult<'a, Turn> {
         Box::pin(async move {
             self.ready().await?;
-            let provider = provider::agent::OllamaAgent {
-                client: self.core.client.clone(),
-                host: self.core.host(&self.session)?,
-                model: self.model.clone(),
-            };
+            let provider = self.provider();
             let forward = |update| match update {
                 ModelUpdate::Reasoning {
                     request_id,
@@ -147,6 +123,19 @@ impl CoreInference {
                 .generate_for_effort(messages, tools, budget, self.effort, &forward)
                 .await
         })
+    }
+}
+impl CoreInference {
+    fn provider(&self) -> provider::llama_cpp::LocalAgent {
+        provider::llama_cpp::LocalAgent {
+            client: self.core.client.clone(),
+            host: self
+                .core
+                .host(&self.session)
+                .unwrap_or_else(|_| self.engine.default_host().into()),
+            model: self.model.clone(),
+            engine: self.engine,
+        }
     }
 }
 

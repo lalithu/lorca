@@ -22,9 +22,6 @@ impl Drop for Temp {
 }
 struct Script(Mutex<VecDeque<Turn>>);
 impl Inference for Script {
-    fn interprets_tasks(&self) -> bool {
-        true
-    }
     fn capacity(&self) -> FutureResult<'_, Option<u64>> {
         Box::pin(async { Ok(Some(32768)) })
     }
@@ -58,12 +55,6 @@ fn answer(text: &str) -> Turn {
         message: json!({"role":"assistant","content":text}),
         finish_reason: FinishReason::Stop,
     }
-}
-fn intent(kind: &str, targets: Value) -> Turn {
-    turn(
-        "interpret_task",
-        json!({"relation":"new","objective":"Perform the requested bounded operation and report its actual result","outcomes":[{"kind":kind,"target":targets.as_array().and_then(|a|a.first()).cloned().unwrap_or(Value::Null)}],"edit_targets":targets,"forbidden_targets":[],"read_only":false,"commands_forbidden":false,"clarification":null}),
-    )
 }
 async fn run(task: &str, root: &Temp, turns: Vec<Turn>) -> TaskView {
     let agent = Arc::new(Agent::default());
@@ -110,7 +101,6 @@ async fn scoped_negative_request_allows_only_its_target() {
         "Fix one.rs; do not edit other source files.",
         &root,
         vec![
-            intent("edit", json!(["one.rs"])),
             turn(
                 "apply_patch",
                 json!({"path":"one.rs","old_text":"before","new_text":"after"}),
@@ -130,7 +120,7 @@ async fn scoped_negative_request_allows_only_its_target() {
     );
 }
 #[tokio::test]
-async fn model_interpretation_cannot_erase_read_only_or_expand_targets() {
+async fn native_tool_calls_cannot_erase_read_only_or_expand_targets() {
     for (task, path) in [
         ("Inspect one.rs; do not edit any files.", "one.rs"),
         ("Fix one.rs; do not edit other files.", "two.rs"),
@@ -143,7 +133,6 @@ async fn model_interpretation_cannot_erase_read_only_or_expand_targets() {
             task,
             &root,
             vec![
-                intent("edit", json!(["one.rs"])),
                 turn(
                     "apply_patch",
                     json!({"path":path,"old_text":"before","new_text":"bad"}),
@@ -164,12 +153,7 @@ async fn semantic_edit_without_old_keywords_cannot_complete_without_evidence() {
     let v = run(
         "Make the gradient control change hue across the rainbow",
         &root,
-        vec![
-            intent("edit", json!([])),
-            answer("Done."),
-            answer("Done."),
-            answer("Done."),
-        ],
+        vec![answer("Done."), answer("Done."), answer("Done.")],
     )
     .await;
     assert_ne!(v.status, Status::Completed);
@@ -181,10 +165,9 @@ async fn related_plain_text_questions_enter_a_real_waiting_state() {
     let v = run(
         "Create a file",
         &root,
-        vec![
-            intent("edit", json!([])),
-            answer("Which filename should I use? What contents should it contain?"),
-        ],
+        vec![answer(
+            "Which filename should I use? What contents should it contain?",
+        )],
     )
     .await;
     assert_eq!(v.status, Status::WaitingForInput);
@@ -194,14 +177,10 @@ async fn related_plain_text_questions_enter_a_real_waiting_state() {
 #[tokio::test]
 async fn waiting_for_filename_does_not_make_creation_read_only() {
     let root = Temp::new();
-    let mut mistaken = intent("edit", json!([]));
-    mistaken.calls[0].arguments["read_only"] = json!(true);
     let v = run(
         "I need to create a file. Before editing, use request_user_input to ask me which filename and contents to use. Wait for my answer.",
         &root,
         vec![
-            mistaken,
-            intent("edit", json!([])),
             turn("request_user_input", json!({"question":"Which filename and contents should I use?"})),
         ],
     ).await;
@@ -219,7 +198,6 @@ async fn abstract_repository_inspection_does_not_require_a_file_named_repository
         "Inspect this repository and report back. Do not edit files or run commands.",
         &root,
         vec![
-            intent("inspect", json!(["repository"])),
             turn("list_directory", json!({"path":"."})),
             turn("read_file", json!({"path":"README.md"})),
             answer("The repository contains README.md describing the project."),

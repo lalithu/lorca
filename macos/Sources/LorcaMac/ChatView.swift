@@ -23,7 +23,7 @@ struct ChatView: View {
                                             if !message.attachments.isEmpty {
                                                 AttachmentStrip(attachments: message.attachments, storage: store.imageStore, compact: false)
                                             }
-                                            AgentActivityView(store: store.agent, taskID: task, savedMessage: message, textSize: textSize, onChoose: message.id == store.messages.last?.id ? { store.draft = $0; store.send() } : nil, onContinue: message.id == store.messages.last?.id ? { store.continueAgentTask(task) } : nil)
+                                            AgentActivityView(store: store.agent, taskID: task, savedMessage: message, textSize: textSize, onChoose: message.id == store.messages.last?.id ? { store.draft = $0; store.send() } : nil, onContinue: message.id == store.messages.last?.id ? { store.continueAgentTask(task) } : nil, onChooseWorkspace: message.id == store.messages.last?.id ? { store.chooseWorkspaceForTask() } : nil)
                                         }
                                     } else { messageView(message) }
                                 }
@@ -35,6 +35,19 @@ struct ChatView: View {
                         }
                     }
                     .background(ChatScrollObserver { followsResponse = $0 })
+                }
+                .overlay(alignment: .bottom) {
+                    if !followsResponse && !store.messages.isEmpty {
+                        Button {
+                            followsResponse = true
+                            withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo("conversation-bottom", anchor: .bottom) }
+                        } label: {
+                            Image(systemName: "arrow.down").font(.system(size: 13, weight: .medium))
+                                .frame(width: 32, height: 32).background(.regularMaterial, in: Circle())
+                                .overlay(Circle().strokeBorder(.primary.opacity(0.12)))
+                        }.buttonStyle(.plain).help("Jump to latest and follow response")
+                            .accessibilityLabel("Jump to latest response").padding(.bottom, 8)
+                    }
                 }
                 .onAppear { proxy.scrollTo("conversation-bottom", anchor: .bottom) }
                 .onChange(of: store.library.selectedID) { _, _ in
@@ -63,6 +76,11 @@ struct ChatView: View {
                     Spacer()
                     Button("Pause research") { store.jobs.pause() }.controlSize(.small)
                 }
+            }
+            if compact, let id = store.messages.last?.agentTaskId, let task = store.agent.runs[id],
+               task.conversationId == store.library.selectedID,
+               AgentPresentation.clarification(task, events: task.events)?["needsWorkspace"].boolean == true {
+                Button("Choose folder…") { store.chooseWorkspaceForTask() }.controlSize(.small)
             }
             if compact {
                 AgentMiniStatus(store: store.agent) {
@@ -106,7 +124,15 @@ struct ChatView: View {
 
     @ViewBuilder private func messageView(_ message: ChatMessage) -> some View {
         if message.role == .user {
-            UserMessageBubble(text: message.content) { messageContent(message) }
+            VStack(alignment: .trailing, spacing: 9) {
+                UserMessageBubble(text: message.content) { messageContent(message) }
+                let reply = store.messages.first { $0.role == .assistant && $0.agentTaskId == message.agentTaskId }
+                let usage = message.agentTaskId.flatMap { store.agent.runs[$0]?.usage } ?? reply?.agentUsage
+                InferenceMetrics(usage: usage, input: true)
+                Button { NativeClipboard.copy(message.content) } label: { Image(systemName: "doc.on.doc") }
+                    .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(.secondary)
+                    .help("Copy message").accessibilityLabel("Copy message")
+            }.frame(maxWidth: .infinity, alignment: .trailing)
         } else { messageContent(message).frame(maxWidth: .infinity, alignment: .leading) }
     }
 
@@ -126,7 +152,11 @@ struct ChatView: View {
                     Text("Generating response…").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
             } else {
-                MarkdownText(text: message.content, size: textSize, showsCopyButton: message.role != .user, userMessage: message.role == .user).equatable().textSelection(.enabled)
+                MarkdownText(text: message.content, size: textSize, showsCopyButton: false, userMessage: message.role == .user).equatable().textSelection(.enabled)
+            }
+            if message.role == .assistant {
+                ResponseDetails(usage: message.agentTaskId.flatMap { store.agent.runs[$0]?.usage } ?? message.agentUsage,
+                    model: message.agentModel, text: message.content)
             }
         }
     }

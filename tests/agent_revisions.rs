@@ -3,9 +3,6 @@ use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 struct Model;
 impl Inference for Model {
-    fn interprets_tasks(&self) -> bool {
-        true
-    }
     fn capacity(&self) -> FutureResult<'_, Option<u64>> {
         Box::pin(async { Ok(Some(8192)) })
     }

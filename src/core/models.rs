@@ -3,36 +3,29 @@ use super::*;
 impl Core {
     pub(super) async fn refresh(&self, session: &str) -> Result<Value> {
         let host = self.host(session)?;
-        let outcome = async {
-            let value: Value = self
-                .client
-                .get(format!("{host}/api/tags"))
-                .timeout(Duration::from_secs(5))
-                .send()
-                .await
-                .map_err(
-                    |_| "Ollama isn’t available. Start it with ‘ollama serve’, then reconnect.",
-                )?
-                .error_for_status()
-                .map_err(|e| e.to_string())?
-                .json()
-                .await
-                .map_err(|_| "Invalid model list")?;
-            let mut models = value["models"]
-                .as_array()
-                .ok_or("Invalid model list")?
-                .iter()
-                .filter_map(|m| m["name"].as_str().map(String::from))
-                .collect::<Vec<_>>();
-            models.sort();
-            Ok::<_, String>(models)
-        }
-        .await;
+        let engine = self.engine(session)?;
+        let outcome = provider::model_list(&self.client, engine, &host).await;
         let mut s = self.state.lock().unwrap();
         let i = Self::session_index(&s, session)?;
         match outcome {
-            Ok(models) => {
+            Ok((models, loaded)) => {
                 s.view.sessions[i].models = models;
+                if let Some(loaded) = loaded {
+                    s.view.sessions[i].active_model = Some(loaded.clone());
+                    s.view.sessions[i].models_to_release = vec![loaded.clone()];
+                }
+                let selected_available = s.view.sessions[i]
+                    .models
+                    .iter()
+                    .any(|name| provider::same_model(name, &s.view.sessions[i].model));
+                if !selected_available
+                    && let Some(model) = s.view.sessions[i]
+                        .active_model
+                        .clone()
+                        .or_else(|| s.view.sessions[i].models.first().cloned())
+                {
+                    s.view.sessions[i].model = model;
+                }
                 s.view.sessions[i].is_connected = true;
                 s.view.sessions[i].error = None;
             }
@@ -64,6 +57,7 @@ impl Core {
         }
         let _guard = self.lifecycle.lock().await;
         let host = self.host(session)?;
+        let engine = self.engine(session)?;
         let (load_cancel, mut load_rx) = watch::channel(false);
         let previous = {
             let mut s = self.state.lock().unwrap();
@@ -99,7 +93,7 @@ impl Core {
                     Self::held_by_other(&s, session, old, &host)
                 };
                 if !shared {
-                    provider::manage_model(&self.client, &host, old, false).await?;
+                    provider::manage(&self.client, engine, &host, old, false).await?;
                     released = true;
                     let mut s = self.state.lock().unwrap();
                     let i = Self::session_index(&s, session)?;
@@ -121,7 +115,7 @@ impl Core {
                 })
             };
             if !shared {
-                provider::manage_model(&self.client, &host, model, true).await?;
+                provider::manage(&self.client, engine, &host, model, true).await?;
             }
             Ok::<_, String>(())
         };
@@ -132,7 +126,7 @@ impl Core {
             && released
             && let Some(old) = &previous
         {
-            let _ = provider::manage_model(&self.client, &host, old, true)
+            let _ = provider::manage(&self.client, engine, &host, old, true)
                 .await
                 .map(|()| {
                     let mut s = self.state.lock().unwrap();
@@ -143,7 +137,7 @@ impl Core {
                 });
         }
         let limit = if result.is_ok() {
-            self.context_limit(&host, model).await
+            self.context_limit_for(engine, &host, model).await
         } else {
             None
         };
@@ -193,9 +187,59 @@ impl Core {
             .as_u64()
             .filter(|v| *v > 0)
     }
+    pub(super) async fn context_limit_for(
+        &self,
+        engine: provider::Engine,
+        host: &str,
+        model: &str,
+    ) -> Option<u64> {
+        if engine == provider::Engine::Ollama {
+            return self.context_limit(host, model).await;
+        }
+        let mut url = reqwest::Url::parse(&format!("{host}/props")).ok()?;
+        url.query_pairs_mut().append_pair("model", model);
+        let value: Value = self
+            .client
+            .get(url)
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        if let Some(limit) = value["default_generation_settings"]["n_ctx"]
+            .as_u64()
+            .filter(|n| *n > 0)
+        {
+            return Some(limit);
+        }
+        // Router /props describes the router itself (n_ctx = 0). Read the selected
+        // model's actual allocation, never its larger training context_length.
+        let models: Value = self
+            .client
+            .get(format!("{host}/models"))
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        models["data"].as_array()?.iter().find(|m| {
+            m["id"]
+                .as_str()
+                .is_some_and(|id| provider::same_model(id, model))
+        })?["meta"]["n_ctx"]
+            .as_u64()
+            .filter(|n| *n > 0)
+    }
     pub(super) async fn release(&self, session: &str, model: &str) -> Result<()> {
         let _guard = self.lifecycle.lock().await;
         let host = self.host(session)?;
+        let engine = self.engine(session)?;
         {
             let s = self.state.lock().unwrap();
             if Self::held_by_other(&s, session, model, &host) {
@@ -204,7 +248,7 @@ impl Core {
                 ));
             }
         }
-        provider::manage_model(&self.client, &host, model, false).await?;
+        provider::manage(&self.client, engine, &host, model, false).await?;
         let mut s = self.state.lock().unwrap();
         let i = Self::session_index(&s, session)?;
         s.view.sessions[i]

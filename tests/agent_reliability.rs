@@ -974,11 +974,15 @@ async fn malformed_command_arguments_get_schema_feedback_then_one_approved_real_
         );
     }
     assert_eq!(errors[2]["blockedIdenticalRetry"], true);
-    for schemas in model.schemas.lock().unwrap().iter() {
-        for name in ["exec_command", "write_stdin"] {
-            assert!(schemas.iter().any(|s| s["function"]["name"] == name));
-        }
-    }
+    let schemas = model.schemas.lock().unwrap();
+    assert_eq!(schemas[0].len(), 1);
+    assert_eq!(schemas[0][0]["function"]["name"], "tool_search");
+    assert!(
+        schemas
+            .iter()
+            .skip(1)
+            .any(|ss| ss.iter().any(|s| s["function"]["name"] == "exec_command"))
+    );
     assert!(
         view.events
             .iter()
@@ -1022,7 +1026,11 @@ async fn essential_patch_format_error_keeps_exact_schema_and_preserves_valid_ret
     ],Decision::AllowOnce).await;
     assert_eq!(view.status, Status::Completed, "{:?}", view.result);
     let seen = script.seen.lock().unwrap();
-    assert_eq!(seen[1].1, seen[0].1);
+    assert_eq!(seen[0].1, 1);
+    assert!(
+        seen[1].1 > seen[0].1,
+        "Invalid arguments reveal the exact registered schema"
+    );
     let error = view
         .events
         .iter()
@@ -1055,12 +1063,13 @@ fn questions(view: &TaskView) -> Vec<Value> {
         .collect()
 }
 #[tokio::test]
-async fn clear_empty_readme_creation_uses_initial_patch_schema_and_one_approval() {
+async fn clear_empty_readme_discovers_patch_schema_and_requires_one_approval() {
     let task = "Create README.md; do not populate it or do anything else.";
     let (view, script, root) = drive_in(
         empty_workspace(),
         task,
         vec![
+            tool("tool_search", json!({"query":"apply_patch"})),
             tool(
                 "apply_patch",
                 json!({"path":"README.md","old_text":"","new_text":""}),
@@ -1076,7 +1085,9 @@ async fn clear_empty_readme_creation_uses_initial_patch_schema_and_one_approval(
         0
     );
     let schemas = script.schemas.lock().unwrap();
-    let patch = schemas[0]
+    assert_eq!(schemas[0].len(), 1);
+    assert_eq!(schemas[0][0]["function"]["name"], "tool_search");
+    let patch = schemas[1]
         .iter()
         .find(|s| s["function"]["name"] == "apply_patch")
         .unwrap();
@@ -1098,12 +1109,9 @@ async fn clear_empty_readme_creation_uses_initial_patch_schema_and_one_approval(
             .count(),
         1
     );
-    assert!(
-        !view
-            .events
-            .iter()
-            .any(|e| e.kind == "tool_requested" && e.data["tool"] != "apply_patch")
-    );
+    assert!(!view.events.iter().any(|e| e.kind == "tool_requested"
+        && e.data["tool"] != "apply_patch"
+        && e.data["tool"] != "tool_search"));
     assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 1);
 }
 #[tokio::test]
@@ -1198,7 +1206,7 @@ async fn ambiguous_intent_can_ask_one_targeted_free_text_question_without_side_e
     assert!(
         script.schemas.lock().unwrap()[0]
             .iter()
-            .any(|s| s["function"]["name"] == "request_user_input")
+            .any(|s| s["function"]["name"] == "tool_search")
     );
 }
 #[tokio::test]

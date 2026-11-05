@@ -34,9 +34,6 @@ struct Script {
     calls: Mutex<Vec<(bool, usize)>>,
 }
 impl Inference for Script {
-    fn interprets_tasks(&self) -> bool {
-        true
-    }
     fn capacity(&self) -> FutureResult<'_, Option<u64>> {
         Box::pin(async { Ok(Some(32768)) })
     }
@@ -64,18 +61,6 @@ impl Inference for Script {
 }
 fn tool(name: &str, args: Value) -> Value {
     json!({"role":"assistant","tool_calls":[{"id":name,"function":{"name":name,"arguments":args}}]})
-}
-fn interpretation(target: Value) -> Value {
-    tool(
-        "interpret_task",
-        json!({"relation":"new",
-        // A hallucinated path in a rewritten objective must not become an obligation.
-        "objective":"Read phantom.md and report on repository files",
-        "outcomes":[{"kind":"inspect","target":"files present","inspection":target},
-            {"kind":"explain","target":"repository purpose"}],
-        "edit_targets":[],"forbidden_targets":[],"read_only":true,
-        "commands_forbidden":true,"clarification":null}),
-    )
 }
 fn reads(names: &[&str]) -> Value {
     json!({"role":"assistant","tool_calls":names.iter().enumerate().map(|(i,p)|json!({
@@ -129,22 +114,18 @@ async fn run_with_workspace(
 }
 #[tokio::test]
 async fn exact_report_request_finishes_once_without_false_filename_or_extra_calls() {
-    for target in [
-        Value::Null,
-        json!({"type":"collection","directory":".","coverage":"all_immediate"}),
-        json!({"type":"file","path":"files present"}),
-    ] {
+    {
         let (view,script,fixture)=run(REQUEST,vec![
-            interpretation(target),tool("list_directory",json!({"path":"."})),
+            tool("list_directory",json!({"path":"."})),
             reads(&["README.md","index.html","lalith.txt"]),
             json!({"role":"assistant","content":"Repository report: three files inspected. No changes made."}),
         ]).await;
         assert_eq!(view.status, Status::Completed, "{:?}", view.result);
         let calls = script.calls.lock().unwrap();
-        assert_eq!(calls.len(), 4);
-        assert!(calls[0].0);
-        assert!(calls[1..3].iter().all(|&(_, count)| count > 0));
-        assert_eq!(calls[3], (false, 0));
+        assert_eq!(calls.len(), 3);
+        assert!(!calls[0].0);
+        assert!(calls[..2].iter().all(|&(_, count)| count > 0));
+        assert_eq!(calls[2], (false, 0));
         assert!(
             view.events
                 .iter()
@@ -183,14 +164,13 @@ async fn explicit_missing_file_still_blocks_without_summary_retries() {
     let (view, script, _) = run(
         "Read MISSING.md. Do not edit files.",
         vec![
-            interpretation(json!({"type":"subject"})),
             tool("read_file", json!({"path":"MISSING.md"})),
             json!({"role":"assistant","content":"The requested file was not found."}),
         ],
     )
     .await;
     assert_eq!(view.status, Status::WaitingForInput, "{:?}", view.result);
-    assert_eq!(script.calls.lock().unwrap().len(), 3);
+    assert_eq!(script.calls.lock().unwrap().len(), 2);
     assert!(!view.events.iter().any(|e| e.kind == "task_continued"));
     assert!(view.result.unwrap().contains("MISSING.md"));
 }
@@ -199,7 +179,6 @@ async fn reading_one_of_three_files_cannot_complete_the_collection() {
     let (view, script, _) = run(
         REQUEST,
         vec![
-            interpretation(Value::Null),
             tool("list_directory", json!({"path":"."})),
             reads(&["README.md"]),
             json!({"role":"assistant","content":"All files read."}),
@@ -210,7 +189,7 @@ async fn reading_one_of_three_files_cannot_complete_the_collection() {
     .await;
     assert_eq!(view.status, Status::WaitingForInput, "{:?}", view.result);
     let calls = script.calls.lock().unwrap();
-    assert_eq!(calls.len(), 6);
+    assert_eq!(calls.len(), 5);
     assert!(calls.iter().all(|&(_, count)| count > 0));
     assert!(view.result.as_ref().unwrap().contains("index.html"));
     assert!(view.result.as_ref().unwrap().contains("lalith.txt"));
@@ -221,8 +200,6 @@ async fn finalization_waits_for_the_last_excerpt() {
     let (view, script, _) = run(
         REQUEST,
         vec![
-            json!({"role":"assistant","content":""}),
-            interpretation(Value::Null),
             tool("list_directory", json!({"path":"."})),
             reads(&["index.html", "lalith.txt"]),
             tool("read_file", json!({"path":"README.md","length":4})),
@@ -233,25 +210,23 @@ async fn finalization_waits_for_the_last_excerpt() {
     .await;
     assert_eq!(view.status, Status::Completed, "{:?}", view.result);
     let calls = script.calls.lock().unwrap();
-    assert_eq!(calls.len(), 7);
-    assert!(calls[..6].iter().all(|&(_, count)| count > 0));
-    assert_eq!(calls[6], (false, 0));
-    assert!(view.events.iter().any(|e| {
-        e.kind == "interpretation_rejected"
-            && e.data["attempt"] == 1
-            && e.data["reason"] == "unexpected_tool_calls"
-    }));
+    assert_eq!(calls.len(), 5);
+    assert!(calls[..4].iter().all(|&(_, count)| count > 0));
+    assert_eq!(calls[4], (false, 0));
+    assert!(
+        !view
+            .events
+            .iter()
+            .any(|e| e.kind == "interpretation_rejected")
+    );
 }
 
 #[tokio::test]
-async fn conversation_routes_then_executes_without_tools_with_or_without_workspace() {
+async fn conversation_answers_in_one_request_with_or_without_workspace() {
     for use_workspace in [true, false] {
         let (view, script, _) = run_with_workspace(
             "Can we talk through an idea?",
-            vec![
-                json!({"role":"assistant","content":"Conversation"}),
-                json!({"role":"assistant","content":"Of course. What are you thinking?"}),
-            ],
+            vec![json!({"role":"assistant","content":"Of course. What are you thinking?"})],
             use_workspace,
         )
         .await;
@@ -260,8 +235,10 @@ async fn conversation_routes_then_executes_without_tools_with_or_without_workspa
             view.result.as_deref(),
             Some("Of course. What are you thinking?")
         );
-        assert_eq!(*script.calls.lock().unwrap(), [(true, 1), (false, 0)]);
-        assert!(view.contract.is_none());
+        let calls = script.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(!calls[0].0 && calls[0].1 > 0);
+        assert!(view.contract.is_some());
     }
 }
 
@@ -270,7 +247,6 @@ async fn explicit_excerpt_cannot_be_reported_as_a_completed_full_read() {
     let (view, _, _) = run(
         "Read index.html. Do not edit files.",
         vec![
-            interpretation(Value::Null),
             tool("read_file", json!({"path":"index.html","length":4})),
             json!({"role":"assistant","content":"The file begins with <htm."}),
             json!({"role":"assistant","content":"That was all I read."}),
@@ -302,8 +278,15 @@ async fn prose_does_not_route_an_actionable_read_to_conversation() {
         ],
     )
     .await;
-    assert_eq!(view.status, Status::Incomplete);
-    assert_eq!(*script.calls.lock().unwrap(), [(true, 1), (true, 1)]);
+    assert_ne!(view.status, Status::Completed);
+    assert!(
+        script
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(interpreting, count)| !interpreting && *count > 0)
+    );
     assert!(
         !view
             .events
@@ -314,13 +297,9 @@ async fn prose_does_not_route_an_actionable_read_to_conversation() {
 
 #[tokio::test]
 async fn raw_no_changes_prohibition_blocks_misclassified_mutation_before_approval() {
-    let mut proposal = interpretation(Value::Null);
-    proposal["tool_calls"][0]["function"]["arguments"]["read_only"] = json!(false);
-    proposal["tool_calls"][0]["function"]["arguments"]["commands_forbidden"] = json!(false);
     let (view, _, fixture) = run(
         REQUEST,
         vec![
-            proposal,
             tool(
                 "apply_patch",
                 json!({"path":"README.md","old_text":"Readme","new_text":"changed"}),

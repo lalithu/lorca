@@ -15,14 +15,7 @@ struct Server {
 }
 async fn chat(State(s): State<Arc<Server>>, Json(v): Json<Value>) -> String {
     s.requests.lock().unwrap().push(v.clone());
-    let interpreter = v["tools"]
-        .as_array()
-        .is_some_and(|a| a.iter().any(|s| s["function"]["name"] == "interpret_task"));
-    let message = if interpreter {
-        json!({"role":"assistant","tool_calls":[{"id":"intent","function":{"name":"interpret_task","arguments":{"relation":"new","objective":"Say hello","outcomes":[{"kind":"explain","target":null}],"edit_targets":[],"forbidden_targets":[],"read_only":false,"commands_forbidden":true,"clarification":null}}}]})
-    } else {
-        json!({"role":"assistant","content":"Hello"})
-    };
+    let message = json!({"role":"assistant","content":"Hello"});
     format!(
         "{}\n{}\n{}\n",
         json!({"message":{"role":"assistant","thinking":"LOCAL_REASONING_SENTINEL"},"done":false}),
@@ -84,17 +77,14 @@ async fn core_thinking_is_ephemeral_and_off_is_fail_closed() {
         if effort == "nominal" {
             assert_eq!(
                 task.thinking.iter().map(|b| b.stage).collect::<Vec<_>>(),
-                vec![
-                    lorca::agent_types::ThinkingStage::Interpretation,
-                    lorca::agent_types::ThinkingStage::Execution
-                ]
+                vec![lorca::agent_types::ThinkingStage::Execution]
             );
             assert_eq!(
                 task.thinking
                     .iter()
                     .filter(|b| b.text == "LOCAL_REASONING_SENTINEL")
                     .count(),
-                2
+                1
             );
         } else {
             assert!(task.thinking.iter().all(|b| b.text.is_empty()));
@@ -113,11 +103,11 @@ async fn core_thinking_is_ephemeral_and_off_is_fail_closed() {
     let req = s.requests.lock().unwrap();
     assert_eq!(
         req.len(),
-        4,
-        "Each mode retains one interpretation and one response request"
+        2,
+        "Each message uses one normal generation request"
     );
-    assert!(req[..2].iter().all(|v| v["think"] == true));
-    assert!(req[2..].iter().all(|v| v["think"] == false));
+    assert!(req[..1].iter().all(|v| v["think"] == true));
+    assert!(req[1..].iter().all(|v| v["think"] == false));
     assert!(req.iter().all(|v| v["options"]["num_ctx"] == 65536));
     for conversation in &core.snapshot().conversations {
         assert!(

@@ -93,7 +93,7 @@ impl Agent {
         inference: Arc<dyn Inference>,
         registry: Registry,
         resume_evidence: Vec<Value>,
-        pending_task: Option<super::intent::PendingTask>,
+        pending_task: Option<super::context::PendingTask>,
     ) -> Result<String> {
         let Submission {
             owner,
@@ -191,7 +191,7 @@ impl Agent {
                     break result;
                 };
                 let view = state.view.as_mut().unwrap();
-                previous = Some(super::intent::PendingTask {
+                previous = Some(super::context::PendingTask {
                     id: view.id.clone(),
                     objective: view.task.clone(),
                     contract: view.contract.clone(),

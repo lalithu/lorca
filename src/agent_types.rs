@@ -29,10 +29,6 @@ pub struct Turn {
     pub finish_reason: FinishReason,
 }
 pub trait Inference: Send + Sync {
-    /// Real adapters opt into bounded task interpretation; simple test/custom adapters remain compatible.
-    fn interprets_tasks(&self) -> bool {
-        false
-    }
     fn effort(&self) -> ThinkingEffort {
         ThinkingEffort::Off
     }
@@ -63,16 +59,6 @@ pub trait Inference: Send + Sync {
         updates: &'a (dyn Fn(ModelUpdate) + Send + Sync),
     ) -> FutureResult<'a, Turn> {
         self.generate_stream(messages, tools, updates)
-    }
-    /// Same inference request, tagged explicitly by the interpretation caller for presentation.
-    fn generate_interpretation<'a>(
-        &'a self,
-        messages: &'a [Value],
-        tools: &'a [Value],
-        budget: crate::context::GenerationBudget,
-        updates: &'a (dyn Fn(ModelUpdate) + Send + Sync),
-    ) -> FutureResult<'a, Turn> {
-        self.generate_budgeted(messages, tools, budget, updates)
     }
     fn capacity(&self) -> FutureResult<'_, Option<u64>> {
         Box::pin(async { Ok(None) })

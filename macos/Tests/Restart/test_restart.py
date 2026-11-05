@@ -62,6 +62,51 @@ class RestartTests(unittest.TestCase):
         self.assertEqual(events, ['stop 11', 'stop 12', 'start backend', 'open UI'])
         self.assertEqual(mapped.call_args_list, [call(13, app / 'Contents/MacOS/lorca-core'), call(14, ui)])
 
+    def test_ui_only_reuses_backend_and_never_signals_or_replaces_it(self):
+        app = Path('/private/tmp/restart-test/lorca.app')
+        ui = app / 'Contents/MacOS/lorca'
+        with patch.object(restart, 'cooperative_ui', return_value=True), \
+             patch.object(restart, 'ui_processes', side_effect=[{11: ui}, {14: ui}]), \
+             patch.object(restart, 'backend_pid', return_value=12), \
+             patch.object(restart, 'alive', return_value=False), \
+             patch.object(restart.os, 'kill') as kill, \
+             patch.object(restart.subprocess, 'Popen') as spawn, \
+             patch.object(restart.subprocess, 'run') as launch, \
+             patch.object(restart, 'ready', return_value=12345) as health, \
+             patch.object(restart, 'mapped_to', return_value=True), \
+             patch.object(restart, 'output', return_value='14\n'):
+            restart.restart(app, Path('/private/tmp/restart-test/data'), ui_only=True)
+        kill.assert_called_once_with(11, signal.SIGTERM)
+        spawn.assert_not_called()
+        launch.assert_called_once()
+        health.assert_called_once_with(Path('/private/tmp/restart-test/data'), 12)
+
+    def test_ui_only_starts_bundled_core_if_no_backend_is_running(self):
+        app = Path('/private/tmp/restart-test/lorca.app')
+        ui = app / 'Contents/MacOS/lorca'
+        with patch.object(restart, 'ui_processes', side_effect=[{}, {14: ui}]), \
+             patch.object(restart, 'backend_pid', side_effect=[None, None, 13]), \
+             patch.object(restart.os, 'kill') as kill, \
+             patch.object(restart.subprocess, 'Popen', return_value=Mock(pid=13, poll=Mock(return_value=None))) as spawn, \
+             patch.object(restart.subprocess, 'run'), \
+             patch.object(restart, 'ready', return_value=12345), \
+             patch.object(restart, 'mapped_to', return_value=True), \
+             patch.object(restart, 'output', return_value='14\n'):
+            restart.restart(app, Path('/private/tmp/restart-test/data'), ui_only=True)
+        kill.assert_not_called()
+        self.assertEqual(spawn.call_args.args[0], [str(app / 'Contents/MacOS/lorca-core'), 'serve'])
+
+    def test_ui_only_rejects_unhealthy_backend_without_replacing_it(self):
+        with patch.object(restart, 'ui_processes', return_value={}), \
+             patch.object(restart, 'backend_pid', return_value=12), \
+             patch.object(restart, 'ready', return_value=None), \
+             patch.object(restart.os, 'kill') as kill, \
+             patch.object(restart.subprocess, 'Popen') as spawn:
+            with self.assertRaisesRegex(RuntimeError, 'full lorca rebuild'):
+                restart.restart(Path('/tmp/lorca.app'), Path('/tmp/data'), ui_only=True)
+        kill.assert_not_called()
+        spawn.assert_not_called()
+
     def test_ui_shutdown_timeout_preserves_backend_and_never_force_kills(self):
         with patch.object(restart, 'cooperative_ui', return_value=True), \
              patch.object(restart, 'ui_processes', return_value={11: Path('/tmp/lorca')}), \

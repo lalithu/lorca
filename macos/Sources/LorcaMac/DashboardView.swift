@@ -2,15 +2,13 @@ import SwiftUI
 
 enum SidebarPage: String, CaseIterable, Identifiable {
     case overview = "Overview", chats = "Chats", tasks = "Job Apps"
-    case pipelines = "Pipelines", scheduled = "Scheduled", settings = "Settings"
+    case settings = "Settings"
     var id: String { rawValue }
     var symbol: String {
         switch self {
         case .overview: return "square.grid.2x2"
         case .chats: return "bubble.left.and.bubble.right"
         case .tasks: return "briefcase"
-        case .pipelines: return "square.stack.3d.up"
-        case .scheduled: return "calendar.badge.clock"
         case .settings: return "slider.horizontal.3"
         }
     }
@@ -78,12 +76,12 @@ struct DashboardView: View {
             Divider().padding(.vertical, 17)
             HStack(spacing: 8) {
                 Circle().fill(store.isConnected ? Color.green : Color.orange).frame(width: 6, height: 6)
-                Text("Ollama · Local").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("\(store.providerName) · Local").font(.system(size: 11)).foregroundStyle(.secondary)
                 Spacer()
                 Button { Task { await store.refreshConnection() } } label: {
                     Image(systemName: "arrow.clockwise").font(.system(size: 11))
                 }
-                .buttonStyle(.plain).help("Reconnect to Ollama").disabled(store.isChecking)
+                .buttonStyle(.plain).help("Reconnect to local model server").disabled(store.isChecking)
             }
             .padding(.horizontal, 9)
         }
