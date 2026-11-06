@@ -141,7 +141,7 @@ mod tests {
     #[tokio::test]
     async fn recall_tools_are_read_only_and_bounded_without_workspace() {
         let index = HistoryIndex::default();
-        index.reset(&[json!({"role":"user","content":"alpha key from a previous turn"})]);
+        index.reset(&[json!({"role":"user","content":"alpha key from a previous turn"})]).unwrap();
         let search = HistoryTool::search(index.clone());
         let read = HistoryTool::read(index);
         let limits = Limits::default();
