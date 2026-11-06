@@ -176,6 +176,11 @@ impl Agent {
         let mut overflow_retries = 0;
         let mut expanded_output = false;
         let mut truncation_retries = 0;
+        // Distinct acknowledged public segments form one logical response.
+        // They are preserved in the original journal and can cross many
+        // bounded inference calls without forcing the user to request "continue".
+        let mut output_segments = Vec::<String>::new();
+        let mut duplicate_output_segments = 0_usize;
         // A successful read must not renew the malformed-runtime-call allowance.
         let mut interrupted_tool_retries = 0;
         let mut revisions = self.revision_receiver();
@@ -313,7 +318,7 @@ impl Agent {
                 if v.assistant_text.len() == before {
                     v.assistant_text.push_str(&turn.content);
                 }
-                if !v.assistant_text.is_empty() {
+                if !v.assistant_text.is_empty() && turn.finish_reason != FinishReason::Length {
                     v.assistant_text.push_str("\n\n");
                 }
                 v.transcript
@@ -339,40 +344,55 @@ impl Agent {
                     if interrupted_tool { "tool_generation_interrupted" } else { "generation_truncated" },
                     json!({"iteration":iteration,"budget":budget,
                     "stopReason":if interrupted_tool { "incomplete_tool_arguments" } else { "length" },
-                    "attempt":if interrupted_tool { interrupted_tool_retries + 1 } else { truncation_retries + 1 },
                     "generatedTokens":if interrupted_tool { None } else { self.snapshot().unwrap().usage.generated_tokens },
                     "executed":false}),
                 );
-                if truncation_retries >= 1
-                    || (interrupted_tool && interrupted_tool_retries >= 1)
-                    || iteration == limits.iterations
-                {
-                    if interrupted_tool {
-                        return Err("Task incomplete: Ollama returned incomplete tool-call JSON after bounded generation recovery. No arguments from rejected responses executed; previously verified work is preserved. Remaining work was not completed.".into());
-                    }
-                    return Err(format!(
-                        "Task incomplete: Generation output limit exhausted ({} tokens) after bounded recovery. No tool calls from interrupted turns executed; previously verified work is preserved. Remaining work was not completed.",
-                        budget.output_limit
-                    ));
-                }
-                truncation_retries += 1;
                 if interrupted_tool {
+                    // Native tool arguments must never be continued by stitching
+                    // partial JSON and must never be executed until fully valid.
+                    if interrupted_tool_retries >= 1 {
+                        return Err("Task incomplete: The provider repeatedly returned incomplete tool JSON; no rejected tool arguments executed. Original work is preserved.".into());
+                    }
                     interrupted_tool_retries += 1;
+                    expanded_output = true;
+                    messages.push(json!({"role":"user","content":
+                        "Internal Lorca recovery: an incomplete tool call was discarded and never executed. Reissue one complete native tool call or respond publicly. Preserve the original task and permissions."}));
+                    continue;
                 }
-                expanded_output = true;
-                if !turn.content.trim().is_empty() {
-                    messages.push(json!({"role":"assistant","content":turn.content}));
+
+                if turn.content.is_empty() {
+                    // Hidden reasoning cannot be serialized or spliced. Retry as
+                    // a fresh inference with the same durable operational state.
+                    truncation_retries += 1;
+                    if truncation_retries > 3 {
+                        return Err("Task incomplete: The model repeatedly exhausted its generation budget without producing observable output. Its work is preserved; try a different model or reasoning configuration.".into());
+                    }
+                    expanded_output = true;
+                    messages.push(json!({"role":"user","content":
+                        "Internal Lorca recovery: the previous inference reached its generation cap without public output. Hidden reasoning cannot be resumed byte-for-byte. Continue the original task from the available observations; produce a tool call or a public response."}));
+                    continue;
                 }
-                let cause = if interrupted_tool {
-                    "Ollama rejected incomplete tool-call JSON. The runtime did not confirm a finish reason; the call may have been interrupted.".to_string()
+                truncation_retries = 0;
+                if output_segments.last().is_some_and(|last| last == &turn.content) {
+                    duplicate_output_segments += 1;
                 } else {
-                    format!(
-                        "The previous response hit its generation output limit ({} tokens).",
-                        budget.output_limit
-                    )
-                };
-                messages.push(json!({"role":"user","content":format!(
-                    "Internal Lorca generation recovery. {cause} No tool calls from that interrupted response executed. Resume the same user request using the verified results already present. Use small, targeted patches or one action per turn; do not rewrite an entire file unnecessarily or replay completed actions. Existing approvals and restrictions still apply. This is an internal generation failure, not missing user instructions.")}));
+                    duplicate_output_segments = 0;
+                }
+                if duplicate_output_segments >= 2 {
+                    return Err("Task incomplete: The model repeated the same output segment without advancing. Partial response preserved; resume with a different strategy or model.".into());
+                }
+                registry.record_history(&turn.message)?;
+                output_segments.push(turn.content.clone());
+                expanded_output = true;
+                self.emit("output_segment_committed", json!({
+                    "segment":output_segments.len(),"characters":turn.content.chars().count(),
+                    "continuation":true
+                }));
+                // This is an already-acknowledged text segment; do not attempt to
+                // replay it as a tool call. Context fitting can archive it later.
+                messages.push(json!({"role":"assistant","content":turn.content}));
+                messages.push(json!({"role":"user","content":
+                    "Internal Lorca output continuation. The preceding assistant text is an acknowledged segment of ONE public answer, not a new user request. Continue from its final word without repeating earlier text. You may use tools if necessary, and you decide when the answer is finished. The original task, permissions and archived context remain in force."}));
                 continue;
             }
             if turn.calls.is_empty() {
@@ -411,6 +431,9 @@ impl Agent {
                 if !running_commands.is_empty() {
                     return Err("Task incomplete: The model stopped before collecting the command exit status.".into());
                 }
+                if turn.content.trim().is_empty() && !output_segments.is_empty() {
+                    return Ok(output_segments.concat());
+                }
                 if turn.content.trim().is_empty() {
                     if reply_recovery_used {
                         return Err("Task incomplete: The model returned no public answer or tool calls after one recovery attempt.".into());
@@ -420,6 +443,10 @@ impl Agent {
                     self.emit("public_reply_recovery", json!({"attempt":1}));
                     messages.push(json!({"role":"user","content":"No public answer was received. Continue the current request using the tool results already in this conversation. Provide your answer in the public response, or call the next necessary tool if work remains. Reuse existing results; do not repeat completed actions."}));
                     continue;
+                }
+                if !output_segments.is_empty() {
+                    output_segments.push(turn.content);
+                    return Ok(output_segments.concat());
                 }
                 return Ok(turn.content);
             }
