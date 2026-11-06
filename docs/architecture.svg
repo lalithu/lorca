@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="690" viewBox="0 0 1280 690" role="img" aria-labelledby="title desc">
-  <title id="title">Lorca — Local Agent Architecture</title>
+  <title id="title">Lorca — Local Model &amp; Harness Architecture</title>
   <desc id="desc">The user works through the macOS app or terminal CLI. Lorca's Rust harness runs the agent loop, context management, persistent searchable memory, and tool registry with permissions. The harness exchanges requests and responses with a local model running through Ollama or llama.cpp. Rust executes permitted tools and returns observations to the model. The model decides what to do and when to finish.</desc>
   <defs>
     <style>
@@ -24,7 +24,7 @@
   </defs>
 
   <rect class="bg" width="1280" height="690" rx="20"/>
-  <text x="56" y="70" class="text" font-size="36" font-weight="750">lorca <tspan font-family="Apple Color Emoji, Segoe UI Emoji, Noto Color Emoji, sans-serif" font-size="28">🌸🫍</tspan><tspan dx="12" class="muted" font-size="27" font-weight="450">/ local agent architecture</tspan></text>
+  <text x="56" y="70" class="text" font-size="36" font-weight="750">lorca <tspan font-family="Apple Color Emoji, Segoe UI Emoji, Noto Color Emoji, sans-serif" font-size="28">🌸🫍</tspan><tspan dx="12" class="muted" font-size="27" font-weight="450">/ local model &amp; harness architecture</tspan></text>
 
   <!-- Frontend -->
   <rect x="44" y="233" width="209" height="166" rx="17" class="panel"/>
