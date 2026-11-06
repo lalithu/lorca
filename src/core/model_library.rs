@@ -126,6 +126,7 @@ impl Core {
                             + x["compute"].as_u64().unwrap_or(0)
                         }).sum::<u64>()),
                     "canDelete":!matches!(status,"loaded"|"loading"|"sleeping"),
+                    "contextTiers":crate::model_library::context_tiers(&m["memory"]),
                 }));
             }
             models
