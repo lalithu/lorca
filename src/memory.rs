@@ -9,10 +9,12 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     fs::{self, OpenOptions},
-    io::{Read, Write},
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 pub mod ingest;
 
@@ -128,7 +130,13 @@ impl HistoryIndex {
         if items.is_empty() {
             return Ok(());
         }
-        let mut file = OpenOptions::new().create(true).append(true).open(path)
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(path).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
             .map_err(|e| e.to_string())?;
         for item in items {
             let data = serde_json::to_vec(item).map_err(|e| e.to_string())?;
@@ -139,24 +147,25 @@ impl HistoryIndex {
     }
 
     fn read_journal(path: &Path) -> Result<Vec<Record>, String> {
-        let mut file = match fs::File::open(path) {
+        let file = match fs::File::open(path) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
             Err(e) => return Err(e.to_string()),
         };
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-        if !bytes.is_empty() && !bytes.ends_with(b"\n") {
-            // A torn final append must not poison the readable committed prefix.
-            // Leave the original bytes untouched for investigation; do not
-            // append further records until the corrupt tail is repaired.
-            return Err("History journal has an incomplete final record; originals were left untouched".into());
-        }
+        let mut reader = BufReader::new(file);
         let mut records = Vec::new();
-        for line in bytes.split(|b| *b == b'\n').filter(|line| !line.is_empty()) {
-            let record: Record = serde_json::from_slice(line)
-                .map_err(|_| "History journal has an invalid record; originals were left untouched".to_string())?;
-            records.push(record);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let size = reader.read_until(b'\n', &mut line).map_err(|e| e.to_string())?;
+            if size == 0 { break; }
+            if !line.ends_with(b"\n") {
+                // Never pretend a partially synced event is authoritative.
+                return Err("History journal has an incomplete final record; originals were left untouched".into());
+            }
+            let item: Record = serde_json::from_slice(&line[..line.len() - 1])
+                .map_err(|_| "History journal contains an invalid record; originals were left untouched".to_string())?;
+            records.push(item);
         }
         Ok(records)
     }
