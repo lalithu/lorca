@@ -66,9 +66,19 @@ impl Inference for CoreInference {
                 .core
                 .context_limit_for(self.engine, &self.core.host(&self.session)?, &self.model)
                 .await;
-            Ok(self.context_window.map_or(allocated, |target| {
-                Some(target.min(allocated.unwrap_or(crate::context::DEFAULT_CAPACITY)))
-            }))
+            Ok(match self.context_window {
+                Some(requested) if self.engine == provider::Engine::Ollama => {
+                    // Ollama accepts num_ctx on the next request and may resize
+                    // its loaded allocation. Do not silently clamp the user's
+                    // explicit choice to the *previous* /api/ps allocation.
+                    // The backend must confirm the resulting allocation.
+                    Some(requested)
+                }
+                Some(requested) => Some(requested.min(
+                    allocated.unwrap_or(crate::context::DEFAULT_CAPACITY),
+                )),
+                None => allocated,
+            })
         })
     }
     fn generate_stream<'a>(
