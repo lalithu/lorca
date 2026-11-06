@@ -825,10 +825,12 @@ async fn automatic_discovery_cannot_follow_a_file_symlink_outside_workspace() {
     );
 }
 
+#[cfg(target_os = "macos")]
 struct TerminalScript {
     script: Arc<Script>,
     schemas: Mutex<Vec<Vec<Value>>>,
 }
+#[cfg(target_os = "macos")]
 impl Inference for TerminalScript {
     fn generate<'a>(&'a self, m: &'a [Value], t: &'a [Value]) -> FutureResult<'a, Turn> {
         Box::pin(async move {
