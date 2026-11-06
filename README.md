@@ -59,6 +59,7 @@ tests/             Deterministic Rust regression coverage
 
 ## Documentation
 
+- [v0.5.0 release notes and validation](docs/releases/v0.5.0.md)
 - [Architecture and four pillars](docs/architecture.md)
 - [Runtime behavior, tools and API contract](AGENT.md)
 - [macOS setup and controls](macos/README.md)

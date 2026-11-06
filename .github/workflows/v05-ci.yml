@@ -1,0 +1,37 @@
+name: Lorca v0.5 Rust and macOS checks
+
+on:
+  push:
+    branches: [feat/v0.5-context-memory-foundation]
+  pull_request:
+    branches: [main]
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Tests
+        run: cargo test --locked --all-targets --no-fail-fast
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Check committed formatting
+        run: git diff --exit-code
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift unit tests
+        run: swift test --package-path macos
+  jobapps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python regression tests
+        run: python3 -B -m unittest discover -s jobapps/tests

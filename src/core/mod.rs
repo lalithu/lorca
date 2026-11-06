@@ -243,6 +243,10 @@ impl Core {
         match op {
             "snapshot" | "heartbeat" => Ok(json!(self.snapshot())),
             "refresh" => self.refresh(session).await,
+            "hardwareAdvice" => {
+                self.hardware_advice(session, v["online"].as_bool().unwrap_or(false))
+                    .await
+            }
             "prepare" => {
                 self.prepare(
                     session,

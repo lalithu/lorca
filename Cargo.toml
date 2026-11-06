@@ -1,6 +1,6 @@
 [package]
 name = "lorca"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 
 [dependencies]
@@ -19,3 +19,4 @@ fs2 = "0.4"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 cap-std = "4"
 libc = "0.2"
+rusqlite = { version = "0.41", features = ["bundled"] }

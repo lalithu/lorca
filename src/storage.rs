@@ -138,11 +138,25 @@ impl Repository {
         atomic(&self.root.join("selected.json"), &serde_json::to_vec(id)?)
     }
     pub fn delete(&self, id: &str) -> io::Result<()> {
-        fs::remove_file(
-            self.root
-                .join("conversations")
-                .join(format!("{}.json", valid_id(id)?)),
-        )
+        let id = valid_id(id)?;
+        fs::remove_file(self.root.join("conversations").join(format!("{id}.json")))?;
+        // A deleted conversation must not leave its independently indexed
+        // original tool output behind in the memory sidecar.
+        for suffix in [
+            "jsonl",
+            "sqlite3",
+            "sqlite3-journal",
+            "sqlite3-wal",
+            "sqlite3-shm",
+        ] {
+            let journal = self.root.join("memory").join(format!("{id}.{suffix}"));
+            match fs::remove_file(journal) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
     }
     pub fn cleanup(&self, candidates: &[Attachment]) -> io::Result<()> {
         let (chats, _, warning) = self.load()?;

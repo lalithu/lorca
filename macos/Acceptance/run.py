@@ -12,6 +12,7 @@ import time
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--model", default="qwen3.5:9b-q4_K_M")
 parser.add_argument("--effort", choices=["off", "nominal", "high"], default="nominal")
+parser.add_argument("--v05", action="store_true", help="Also exercise original chat export and the read-only advisor")
 parser.add_argument("--selection", action="store_true", help="Native mouse-selection, Cmd+C and appearance fixtures")
 parser.add_argument("--ui", action="store_true", help="Chunk 2 live thinking and native component visual acceptance")
 parser.add_argument("--long", action="store_true", help="Inspect an isolated copy of Lorca's Rust code")
@@ -43,6 +44,8 @@ runner = root / "native-acceptance"
 entries = [pathlib.Path(__file__).with_name("SelectionAcceptance.swift")] if args.selection else [pathlib.Path(__file__).with_name("AgentAcceptance.swift"), pathlib.Path(__file__).with_name("Chunk2Acceptance.swift")]
 subprocess.run(["xcrun", "swiftc", "-parse-as-library", "-sdk", sdk, "-target", "arm64-apple-macos14.0", "-module-cache-path", str(repo / "macos/.build/out/ModuleCache.noindex"), *map(str, sources), *map(str, entries), "-o", str(runner)], check=True, cwd=repo)
 env = dict(os.environ, LORCA_DATA_DIR=str(root / "data"), LORCA_ACCEPTANCE_ROOT=str(root), LORCA_ACCEPTANCE_MODEL=args.model, LORCA_ACCEPTANCE_EFFORT=args.effort, LORCA_SOURCE_ROOT=str(repo), PATH=str(pathlib.Path.home() / ".cargo/bin") + ":" + os.environ["PATH"])
+if args.v05:
+    env["LORCA_ACCEPTANCE_V05"] = "1"
 if args.ui:
     env["LORCA_ACCEPTANCE_UI"] = "1"
 if args.long:

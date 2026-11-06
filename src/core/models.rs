@@ -1,6 +1,101 @@
 use super::*;
 
 impl Core {
+    /// Read-only model and hardware advice. This never downloads, swaps or
+    /// resizes a loaded model. Inference-specific memory measurements from
+    /// llama.cpp take precedence over Lorca's rough disk-weight estimate.
+    pub(super) async fn hardware_advice(&self, session: &str, online: bool) -> Result<Value> {
+        let hardware = crate::hardware::HardwareSnapshot::detect(&self.repository.root);
+        let engine = self.engine(session)?;
+        let host = self.host(session)?;
+        let endpoint = if engine == provider::Engine::Ollama {
+            "/api/tags"
+        } else {
+            "/models"
+        };
+        let list: Value = self
+            .client
+            .get(format!("{host}{endpoint}"))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?
+            .error_for_status()
+            .map_err(|e| e.to_string())?
+            .json()
+            .await
+            .map_err(|e| e.to_string())?;
+        let installed = if engine == provider::Engine::Ollama {
+            crate::hardware::installed_ollama(&hardware, &list)
+        } else {
+            crate::hardware::installed_llama_cpp(&list)
+        };
+        let selected = {
+            let state = self.state.lock().unwrap();
+            let i = Self::session_index(&state, session)?;
+            state.view.sessions[i].model.clone()
+        };
+        // Router /props?model= can autoload a model. The advisor must only
+        // inspect existing catalog/allocation metadata, never trigger that.
+        let allocated = if engine == provider::Engine::Ollama {
+            self.context_limit(&host, &selected).await
+        } else {
+            installed
+                .as_array()
+                .and_then(|models| {
+                    models.iter().find(|m| {
+                        m["model"]
+                            .as_str()
+                            .is_some_and(|name| provider::same_model(name, &selected))
+                    })
+                })
+                .and_then(|m| m["context"].as_u64())
+        };
+        let mut discovery = Vec::new();
+        let mut discovery_warning: Option<String> = None;
+        if online {
+            let url = "https://huggingface.co/api/models?filter=gguf&sort=downloads&direction=-1&limit=12";
+            match self
+                .client
+                .get(url)
+                .timeout(Duration::from_secs(8))
+                .send()
+                .await
+            {
+                Ok(response) if response.status().is_success() => {
+                    match response.json::<Value>().await {
+                        Ok(value) => {
+                            for item in value.as_array().into_iter().flatten() {
+                                if let Some(id) = item["id"].as_str() {
+                                    discovery.push(json!({
+                                        "id":id,"downloads":item["downloads"],
+                                        "url":format!("https://huggingface.co/{id}"),
+                                        "hardwareFit":"unverified: inspect the exact GGUF file size, context and tool capabilities before download"
+                                    }));
+                                }
+                            }
+                        }
+                        Err(e) => discovery_warning = Some(e.to_string()),
+                    }
+                }
+                Ok(response) => {
+                    discovery_warning = Some(format!("Hub catalog HTTP {}", response.status()))
+                }
+                Err(e) => discovery_warning = Some(e.to_string()),
+            }
+        }
+        Ok(json!({
+            "hardware":hardware,
+            "runtime":if engine == provider::Engine::Ollama {"ollama"} else {"llama.cpp"},
+            "installedModels":installed,
+            "currentModel":selected,
+            "allocatedContext":allocated,
+            "hubCandidates":discovery,
+            "hubWarning":discovery_warning,
+            "note":"These are conservative resource hints, not model-quality rankings or verified context allocations. Manual model selection and current context overrides are preserved. No download or reload was performed."
+        }))
+    }
+
     pub(super) async fn refresh(&self, session: &str) -> Result<Value> {
         let host = self.host(session)?;
         let engine = self.engine(session)?;

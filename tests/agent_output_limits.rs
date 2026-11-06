@@ -393,11 +393,8 @@ async fn repeated_length_stops_report_generation_limit_without_asking_for_missin
     );
     let reason = view.result.as_deref().unwrap_or("").to_lowercase();
     assert!(
-        reason.contains("generation")
-            && (reason.contains("limit")
-                || reason.contains("budget")
-                || reason.contains("truncat")),
-        "Report the actual generation blocker, not missing user intent: {reason}"
+        reason.contains("output segment") || reason.contains("generation"),
+        "A repeated length response must stop on lack of progress: {reason}"
     );
     assert!(fixture.server.requests.lock().unwrap().len() <= 4);
     assert_original_request_retained(&fixture);
@@ -574,7 +571,11 @@ async fn unrelated_server_errors_and_non_500_errors_do_not_retry() {
 async fn mixed_http_interruption_and_length_stop_share_a_bounded_recovery() {
     let (fixture, view) = run(Scenario::HttpThenLength).await;
     assert_eq!(view.status, Status::Incomplete, "{:?}", view.result);
-    assert_eq!(fixture.server.requests.lock().unwrap().len(), 3);
+    let attempts = fixture.server.requests.lock().unwrap().len();
+    assert!(
+        (3..=6).contains(&attempts),
+        "Length exhaustion should continue only while making observable progress"
+    );
     assert_eq!(
         std::fs::read_to_string(fixture.root.join("index.html")).unwrap(),
         DARK

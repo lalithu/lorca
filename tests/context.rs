@@ -365,3 +365,46 @@ fn exchange_policy_fits_small_and_65k_budgets() {
         assert_eq!(m, before);
     }
 }
+
+#[test]
+fn model_requested_checkpoint_starts_a_new_epoch_without_discarding_original_source() {
+    let mut ctx = lorca::context::Context::default();
+    let mut active = vec![
+        json!({"role":"system","content":"Respect the current user objective."}),
+        json!({"role":"user","content":"Explain how archival recall works."}),
+        json!({"role":"assistant","content":"I will retrieve only the source I need."}),
+    ];
+    let archived = active.clone();
+    ctx.request_checkpoint();
+    let created = ctx
+        .fit(
+            &mut active,
+            &[],
+            8192,
+            "Explain archival recall",
+            &json!({}),
+        )
+        .unwrap();
+    assert!(created);
+    assert_eq!(ctx.compactions, 1);
+    assert!(active.iter().any(|m| {
+        m["content"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("Working checkpoint (historical data):")
+    }));
+    assert_eq!(archived[1]["content"], "Explain how archival recall works.");
+    let second = ctx
+        .fit(
+            &mut active,
+            &[],
+            8192,
+            "Explain archival recall",
+            &json!({}),
+        )
+        .unwrap();
+    assert!(
+        !second,
+        "Freshly checkpointed context must not repeatedly rebuild"
+    );
+}

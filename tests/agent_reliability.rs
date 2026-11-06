@@ -149,7 +149,8 @@ async fn inspection_audit_distinguishes_a_listing_from_a_read() {
     assert!(
         v.events
             .iter()
-            .any(|event| event.kind == "task_verification" && event.data["satisfied"] == false)
+            .any(|event| event.kind == "task_execution_status"
+                && event.data["semanticValidationPerformed"] == false)
     );
     assert_eq!(script.seen.lock().unwrap().len(), 2);
     let (v, script, _) = drive(
@@ -166,7 +167,8 @@ async fn inspection_audit_distinguishes_a_listing_from_a_read() {
     assert!(
         v.events
             .iter()
-            .any(|event| event.kind == "task_verification" && event.data["satisfied"] == true)
+            .any(|event| event.kind == "task_execution_status"
+                && event.data["semanticValidationPerformed"] == false)
     );
 }
 #[tokio::test]
@@ -186,7 +188,8 @@ async fn tool_free_replies_stop_and_do_not_change_files() {
         assert!(
             v.events
                 .iter()
-                .any(|event| event.kind == "task_verification" && event.data["satisfied"] == false)
+                .any(|event| event.kind == "task_execution_status"
+                    && event.data["semanticValidationPerformed"] == false)
         );
     }
 }
@@ -229,7 +232,8 @@ async fn combined_request_audit_distinguishes_edit_and_inspection() {
     assert!(
         v.events
             .iter()
-            .any(|event| event.kind == "task_verification" && event.data["satisfied"] == false)
+            .any(|event| event.kind == "task_execution_status"
+                && event.data["semanticValidationPerformed"] == false)
     );
     assert_eq!(script.seen.lock().unwrap().len(), 2);
     let (v, script, _) = drive(
@@ -247,7 +251,8 @@ async fn combined_request_audit_distinguishes_edit_and_inspection() {
     assert!(
         v.events
             .iter()
-            .any(|event| event.kind == "task_verification" && event.data["satisfied"] == true)
+            .any(|event| event.kind == "task_execution_status"
+                && event.data["semanticValidationPerformed"] == false)
     );
 }
 #[tokio::test]
@@ -268,7 +273,8 @@ async fn a_different_successful_patch_cannot_satisfy_readme_update() {
     assert!(
         v.events
             .iter()
-            .any(|event| event.kind == "task_verification" && event.data["satisfied"] == false)
+            .any(|event| event.kind == "task_execution_status"
+                && event.data["semanticValidationPerformed"] == false)
     );
     assert_eq!(script.seen.lock().unwrap().len(), 2);
     assert_eq!(
@@ -308,7 +314,7 @@ async fn denied_patch_is_distinct_and_never_executed() {
     );
 }
 #[tokio::test]
-async fn failed_patch_never_turns_a_promise_into_completion() {
+async fn failed_patch_remains_factual_even_when_model_finishes() {
     let (v, _, _) = drive(
         "Update README.md",
         vec![
@@ -321,7 +327,15 @@ async fn failed_patch_never_turns_a_promise_into_completion() {
         Decision::AllowOnce,
     )
     .await;
-    assert_eq!(v.status, Status::Failed);
+    assert_eq!(v.status, Status::Completed);
+    assert!(v.events.iter().any(|e| {
+        e.kind == "task_execution_status"
+            && !e.data["unresolvedOperations"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+    }));
+    assert!(!v.audit.iter().any(|e| e.kind == "file_changes"));
     assert!(v.events.iter().any(|e| e.kind == "tool_failed"));
 }
 #[tokio::test]
@@ -466,7 +480,8 @@ async fn task_restriction_blocks_a_model_patch_before_approval_or_side_effect() 
         Decision::AllowOnce,
     )
     .await;
-    assert_ne!(view.status, Status::Completed);
+    assert_eq!(view.status, Status::Completed);
+    assert!(view.events.iter().any(|e| e.kind == "tool_failed"));
     assert_eq!(
         std::fs::read_to_string(root.0.join("README.md")).unwrap(),
         "outdated"
@@ -573,11 +588,9 @@ async fn successful_nested_read_is_retained_after_other_tools_and_has_no_complet
             .iter()
             .any(|e| e.kind == "tool_recovery" || e.kind == "task_continued")
     );
-    assert!(
-        view.events
-            .iter()
-            .any(|e| e.kind == "task_verification" && e.data["satisfied"] == true)
-    );
+    assert!(view.events.iter().any(
+        |e| e.kind == "task_execution_status" && e.data["semanticValidationPerformed"] == false
+    ));
 }
 #[tokio::test]
 async fn requested_read_evidence_survives_model_context_compaction() {
@@ -812,10 +825,12 @@ async fn automatic_discovery_cannot_follow_a_file_symlink_outside_workspace() {
     );
 }
 
+#[cfg(target_os = "macos")]
 struct TerminalScript {
     script: Arc<Script>,
     schemas: Mutex<Vec<Vec<Value>>>,
 }
+#[cfg(target_os = "macos")]
 impl Inference for TerminalScript {
     fn generate<'a>(&'a self, m: &'a [Value], t: &'a [Value]) -> FutureResult<'a, Turn> {
         Box::pin(async move {
@@ -1507,8 +1522,8 @@ fn working_plan(next: &str) -> Value {
     )
 }
 #[tokio::test]
-async fn working_notes_never_prove_an_edit_and_planning_cannot_loop() {
-    let (view, script, _root) = drive(
+async fn working_notes_are_advisory_and_only_identical_planning_loops_stop() {
+    let (view, script, _) = drive(
         "Update README.md",
         vec![
             tool("tool_search", json!({"query":"update_plan"})),
@@ -1519,8 +1534,26 @@ async fn working_notes_never_prove_an_edit_and_planning_cannot_loop() {
         Decision::AllowOnce,
     )
     .await;
+    assert_eq!(view.status, Status::Completed);
+    assert_eq!(script.seen.lock().unwrap().len(), 4);
+    assert!(!view.audit.iter().any(|e| e.kind == "file_changes"));
+    let (view, script, _) = drive(
+        "Update README.md",
+        vec![
+            working_plan("Edit README.md"),
+            working_plan("Edit README.md"),
+            working_plan("Edit README.md"),
+            text("Not reached"),
+        ],
+        Decision::AllowOnce,
+    )
+    .await;
     assert_eq!(view.status, Status::Incomplete);
-    assert!(view.result.unwrap().contains("Working checkpoints"));
+    assert!(
+        view.result
+            .unwrap()
+            .contains("identical working checkpoint")
+    );
     assert_eq!(script.seen.lock().unwrap().len(), 3);
     assert!(!view.audit.iter().any(|e| e.kind == "file_changes"));
 }

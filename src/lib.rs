@@ -6,6 +6,8 @@ pub use agentloop as agent;
 pub mod client;
 pub mod context;
 pub mod core;
+pub mod hardware;
+pub mod memory;
 pub mod provider;
 pub mod storage;
 pub mod transport;

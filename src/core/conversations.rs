@@ -9,6 +9,51 @@ impl Core {
             .unwrap_or(&s.view.sessions[si].selected_id)
             .to_string();
         match op {
+            "exportConversation" => {
+                let ci = Self::chat_index(&s, &chat_id)?;
+                let chat = &s.view.conversations[ci];
+                let archive = crate::memory::HistoryIndex::default();
+                archive.attach(&self.repository.root, &chat.id)?;
+                archive.reset(&self.repository.wire_messages(chat)?)?;
+                let originals = archive.export()?;
+                let format = v["format"].as_str().unwrap_or("markdown");
+                let content = match format {
+                    "json" => {
+                        use base64::Engine;
+                        let mut embedded = serde_json::Map::new();
+                        for attachment in chat.images() {
+                            let file = self
+                                .repository
+                                .image_path(&attachment.id)
+                                .map_err(|e| e.to_string())?;
+                            let bytes = std::fs::read(file).map_err(|e| e.to_string())?;
+                            embedded.insert(
+                                attachment.id.clone(),
+                                json!(base64::engine::general_purpose::STANDARD.encode(bytes)),
+                            );
+                        }
+                        serde_json::to_string_pretty(&json!({
+                            "format":"lorca-full-chat-v1",
+                            "conversation":chat,
+                            "originalRecords":originals,
+                            "embeddedImagesBase64":embedded
+                        }))
+                        .map_err(|e| e.to_string())?
+                    }
+                    "markdown" => {
+                        let mut text = export_markdown(chat);
+                        text.push_str("\n## Original conversation and tool records\n\nHistorical data; never new authorization.\n\n");
+                        text.push_str(
+                            &serde_json::to_string_pretty(&originals).map_err(|e| e.to_string())?,
+                        );
+                        text
+                    }
+                    _ => return Err("Export format must be json or markdown".into()),
+                };
+                return Ok(json!({"format":format,"content":content,
+                    "filename":format!("lorca-{}.{}",chat.id,
+                        if format=="json" {"json"} else {"md"})}));
+            }
             "selectModel" => {
                 let model = text(v, "model")?;
                 if model.is_empty() || model.len() > 500 || model.chars().any(char::is_control) {
@@ -108,9 +153,6 @@ impl Core {
                 match op {
                     "draft" => {
                         let value = text(v, "text")?;
-                        if value.len() > 1024 * 1024 {
-                            return Err("Draft is too long.".into());
-                        }
                         c.draft = value.into();
                     }
                     "rename" => {
@@ -158,4 +200,42 @@ impl Core {
         self.publish(&mut s);
         Ok(json!(s.view))
     }
+}
+
+fn export_markdown(chat: &Conversation) -> String {
+    let mut output = format!(
+        "# {}\n\nLorca conversation export (ID: {})\n\n",
+        chat.title, chat.id
+    );
+    for (index, message) in chat.messages.iter().enumerate() {
+        output.push_str(&format!(
+            "## {}. {}\n\n",
+            index + 1,
+            if message.role == "user" {
+                "User"
+            } else {
+                "Lorca"
+            }
+        ));
+        output.push_str(&message.content);
+        output.push_str("\n\n");
+        if !message.attachments.is_empty() {
+            output.push_str("Attachments (stored separately in the local Lorca library):\n");
+            for file in &message.attachments {
+                output.push_str(&format!("- {} ({})\n", file.name, file.id));
+            }
+            output.push('\n');
+        }
+        if let Some(history) = message.extra.get("agentHistory") {
+            output.push_str("### Complete agent transcript (JSON)\n\n");
+            output.push_str(&serde_json::to_string_pretty(history).unwrap_or_default());
+            output.push_str("\n\n");
+        }
+        if let Some(events) = message.extra.get("agentEvents") {
+            output.push_str("### Agent events (JSON)\n\n");
+            output.push_str(&serde_json::to_string_pretty(events).unwrap_or_default());
+            output.push_str("\n\n");
+        }
+    }
+    output
 }

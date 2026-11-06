@@ -57,3 +57,15 @@ from the process finishing. `layout-report.json` measures wrapped reasoning at
 narrow/wide widths. Blue bubbles and green ON/neutral OFF/Next task labels are
 captured in both appearances. These fixtures do not run a model or touch production
 conversations. The runner restores original pasteboard representations afterward.
+
+v0.5 export/advisor acceptance (isolated real backend and model):
+
+```sh
+python3 macos/Acceptance/run.py --v05 --skip-build --model m2max-fast:latest --effort off \
+  --sdk /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
+```
+
+This short read-only workflow also requests both whole-chat exports through the
+native backend transport, checks original tool records, and opens/captures the
+read-only model advisor. It does not automate the system Save dialog or online
+Hub browsing. Existing `--selection` covers actual mouse dragging and Cmd+C.

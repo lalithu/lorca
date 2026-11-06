@@ -212,29 +212,6 @@ impl Workspace {
         serde_json::Value::Null
     }
 
-    pub(crate) fn matches_observation(&self, tool: &str, result: &serde_json::Value) -> bool {
-        if result["workspace"]
-            .as_str()
-            .is_none_or(|root| self.root != Path::new(root))
-            || result["version"].is_null()
-        {
-            return false;
-        }
-        let Some(path) = result["path"]
-            .as_str()
-            .and_then(|path| Self::path(path).ok())
-        else {
-            return false;
-        };
-        self.dir.symlink_metadata(path).is_ok_and(|metadata| {
-            (if tool == "read_file" {
-                metadata.is_file()
-            } else {
-                metadata.is_dir()
-            }) && Self::version(&metadata) == result["version"]
-        })
-    }
-
     pub fn excerpt(&self, path: &str, offset: usize, length: usize) -> Result<serde_json::Value> {
         let mut file = self
             .dir

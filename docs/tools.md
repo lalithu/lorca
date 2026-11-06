@@ -8,13 +8,13 @@
 | Terminal | `exec_command`, `write_stdin`; shared sandbox/process implementation in `command.rs`, task-local sessions in `sessions.rs` |
 | Vision | `view_image` |
 | Web | `fetch_url`, `web_search`; shared bounded public-HTTPS transport in `http.rs` |
-| Agent | `tool_search`, `update_plan`, `request_user_input`, `request_permissions` |
+| Agent | `tool_search`, `update_plan`, `request_user_input`, `request_permissions`, `search_history`, `get_history_record`, `compact_context` |
 
 ## Discovery and authority
 
 Before a folder is selected, the normal registry exposes `tool_search`, `request_workspace`, and `request_user_input`. With an active workspace it exposes `tool_search`, `request_user_input`, `list_directory`, `read_file`, `search_files`, `apply_patch`, `exec_command`, and `write_stdin`. Configured `web_search` is also initially visible in either state; unavailable integrations are never exposed. Other tools remain discoverable, up to five schemas per search, without a classifier or routing request. Discovered schemas stay visible within a task and are restored from linked tool history on follow-ups, using only tools still registered for the current workspace. Invalid calls return the exact schema and a correction hint. Discovery never grants permission; workspace restrictions, approvals and bounded execution still apply. Custom registries, including Job Apps, keep their own tool selection.
 
-All calls still go through `agentloop/authority.rs`: task restrictions, preparation, single-use human approval when required, cancellation, execution, and real result evidence. Files retain capability-based workspace boundaries, discovered references and atomic patch verification. Plans do not count as completion evidence. Questions pause as an incomplete task in the existing chat; the next user message provides the answer. Permission requests likewise pause and never grant access, change a workspace, or relax the command policy.
+All calls still go through `agentloop/authority.rs`: task restrictions, preparation, single-use human approval when required, cancellation, execution, and real result evidence. Files retain capability-based workspace boundaries, discovered references and atomic patch verification. Plans do not count as completion evidence. Explicit question tools pause in a waiting state; the next user message provides the answer. Permission requests likewise pause and never grant access, change a workspace, or relax the command policy.
 
 ## Terminal
 
@@ -36,36 +36,39 @@ General chat `web_search` is registered **only** when `LORCA_WEB_SEARCH_URL` is 
 
 1. Create its named module in the appropriate drawer and implement `Tool` with a strict schema, preparation/argument checks and a bounded execution result. Reuse `Workspace` and shared transport/process helpers.
 2. Register it in that drawer's `register` function with its category and required authority. Preparation must request approval for effects that need consent; a metadata label is not a grant.
-3. Add tests for argument failures, scope restrictions, cancellation and real effects. Add verification evidence handling only if the tool introduces a new kind of verifiable outcome; ordinary tools do not need agent-loop dispatch changes.
+3. Add tests for argument failures, scope restrictions, cancellation and real effects. Add factual observation handling only if needed; ordinary tools do not need agent-loop dispatch changes.
 
 The original `Tool` methods and `Registry::add` API remain compatible with existing custom handlers. Non-workspace tools override the optional-workspace methods, allowing discovery and user questions without inventing a filesystem workspace.
 
-## Agent guidance and completion
+## Memory and completion
 
-One concise system policy identifies the model as the agent inside Lorca. Rust keeps the immutable objective, authority, original transcript and verified execution evidence; the model chooses capabilities and interprets observations. The policy and unavailable-tool facts survive compaction without being promoted from untrusted history. The provider sends the small discovery schema in the first chat request and relevant native function schemas after discovery (Ollama or llama.cpp’s OpenAI-compatible chat endpoint); there is no preliminary interpretation request. Rust remains the authority for scope, approval, execution, and verification.
+The Agent drawer also registers `search_history`, `get_history_record`, and
+`compact_context`. Recall tools share conversation-scoped SQLite originals and
+FTS5. They are read-only, do not grant workspace authority and are discoverable
+through the same exact-schema mechanism. Job Apps remains an independent custom
+registry without chat memory or input virtualization.
 
-Malformed structured argument objects receive strict schema feedback; invalid top-level tool JSON gets one model correction before a real guidance question. No malformed call executes. Unchanged failed calls remain blocked, retaining the original error. Short standalone model clarification questions route through the existing registered `request_user_input` handler instead of provoking repeated completion prompts. Repeated failures, unchanged observations or exhausted continuation budgets pause for free-text guidance. Custom registries are never expanded to add a missing question tool.
+`get_history_record` takes a record ID and either `chunkIndex` or `offset`/`length`,
+not both. Offsets count Unicode scalars; `field` defaults to `content`. `metadata`
+pages original structured calls and attachment data. `nextOffset`, `totalChars`
+and `totalChunks` allow exhaustive source traversal. Recalled excerpts are not
+recursively archived and never prove a fresh action.
 
-Exact unverified read paths use the existing registered listing/search and read handlers internally, through the same authority gateway. A path is recovered once per task; the task iteration budget also bounds the number of different recovered paths. Filesystem capability checks, symlink protections and approval on custom discovery handlers remain enforced. A missing/prohibited path cannot become a successful read through narrative or discovery alone.
+`update_plan` maintains advisory notes; `compact_context` requests a deterministic
+checkpoint, without another inference engine. Model-authored notes are never
+execution evidence. A complete, tool-free public answer is the normal stopping
+decision. `request_user_input` pauses explicitly; a public clarification question
+is also a valid reply. Permission requests never grant authority by themselves.
 
-Atomic patch readback supplies verified path and byte counts. Explicit single-target empty-file constraints are checked before approval and again by completion verification (zero bytes). This is a focused deterministic check, not a general natural-language outcome solver; other requested quantities, locations and semantics remain model decisions constrained by schemas, workspace permissions, real results and the original objective.
+Malformed top-level arguments receive one exact-schema correction opportunity.
+Specific interrupted native-tool HTTP failures get one bounded retry with
+small-patch guidance. Length-stopped call batches never execute; native argument
+JSON is not stitched together. Repeated identical failures remain blocked.
 
-Opt-in real-model smoke checks: `LORCA_LIVE_MODEL=qwen3.5:9b-q4_K_M cargo test --test agent_live -- --ignored --nocapture --test-threads=1`. These use disposable workspaces, approve only the exact empty README, and unload the test model if it was initially unloaded. The normal test suite uses scripted models and real tool execution, plus mock HTTP Ollama protocol tests; it does not silently run live inference.
+Public text continuation is separate from native tool arguments. Partial text
+segments stay available, are joined without invented whitespace and use
+conservative echo suppression. Missing final public text receives one recovery;
+repeated non-progress stops explicitly. Hidden reasoning is not resumable storage.
 
-## Generation budgets and output exhaustion
-
-`context/budget.rs` computes one per-call budget from the actual allocated context window: initial output is one eighth of the window, capped at 8,192 tokens; recovery can double it up to 16,384. A separate safety margin and the output allowance are reserved together during context fitting. The exact same budget reaches the Ollama adapter (including the native core and the restricted research wrapper); it does not select another model or enlarge the allocated context. Existing non-agent context callers retain their legacy reserve behavior.
-
-Ollama `done_reason` is retained as a typed stop/length/unknown outcome. Length-stopped turns discard every pending call before argument parsing or approval. Older responses without a reason remain supported; if their generated count reaches the requested cap, the adapter conservatively reports exhaustion. Actual reported input must also fit the reserved budget before any tool proposal is accepted.
-
-The agent audits `generation_truncated` and permits one consecutive recovery, retaining verified work and the active request. Recovery can use a larger allowance and smaller targeted patches. If the larger allowance cannot fit essential input, failed compaction bookkeeping is rolled back and recovery uses the original smaller-step budget with that input intact; configured timeouts and the task iteration limit remain enforced. Repeated exhaustion reports a specific generation-limit blocker without invoking the generic user-question or ordinary no-action continuation path. Real progress permits a later recovery without creating an unlimited retry loop. Malformed calls, connection interruptions, cancellation and timeouts retain their existing separate failure handling. A truncated image-description result is not reported as a complete successful inspection.
-
-The confirmed allocated window remains the resource ceiling; this does not resize the model or add a hardware auto-tuner. Job Apps retains its independent registry and behavior.
-
-## Working checkpoints and collaboration
-
-`update_plan` accepts optional `checkpoint` notes: `approach`, `decisions`, `uncertainties`, and `nextAction`. Each complete validated update replaces the current notes. Compaction carries them separately from verified operation state. Notes, completed plan steps, and user choices never prove execution or authorize a tool.
-
-`request_user_input` accepts a question, optional recommendation, and up to four options. A real question ends inference in `waiting_for_input`; answering in the same chat/workspace links the saved objective and actual transcript records. The UI's Continue task action explicitly resumes an interrupted request. Ordinary requests after a completed or interrupted task start a new objective. Linked records survive restart; no old approval token or running process is revived.
-
-Chats offers persisted Off / Nominal / High effort, fixed per submission. Native thinking controls come from Ollama's advertised values, not model names or template guesses. Unknown support retains the runtime default. Planning-only turns are bounded (one/two/three between useful actions); ordinary answers do not require a planning cycle. The output/time budget uses confirmed context capacity and sane observed throughput, with a conservative initial estimate and finite time ceilings. A length stop or the specifically recognized malformed-tool HTTP 500 triggers the existing bounded, smaller-patch recovery; no incomplete arguments execute. A checkpoint cannot be recovered from private or half-generated reasoning.
+See [architecture](architecture.md) and [validation](v0.5-validation.md) for
+resource policies, migration and tested limitations.

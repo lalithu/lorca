@@ -1,5 +1,7 @@
 import Combine
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 
 enum ThinkingEffort: String, CaseIterable, Identifiable {
     case off, nominal, high
@@ -348,4 +350,27 @@ final class ChatStore: ObservableObject {
         stopReply(); enqueue(["op": "open", "conversationId": id.uuidString])
     }
     func deleteConversation(_ id: UUID) { stopReply(); enqueue(["op": "delete", "conversationId": id.uuidString]) }
+    func exportConversation(_ id: UUID, format: String) async {
+        do {
+            let data = try await backend.command([
+                "op": "exportConversation",
+                "conversationId": id.uuidString,
+                "format": format
+            ])
+            guard let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let content = payload["content"] as? String,
+                  let suggested = payload["filename"] as? String else {
+                throw BackendError(message: "The chat export response was incomplete.")
+            }
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = suggested
+            panel.canCreateDirectories = true
+            panel.allowedContentTypes = [UTType(filenameExtension: format == "json" ? "json" : "md") ?? .plainText]
+            if panel.runModal() == .OK, let url = panel.url {
+                try content.write(to: url, atomically: true, encoding: .utf8)
+            }
+        } catch {
+            self.error = "Couldn't export conversation. \(friendlyError(error))"
+        }
+    }
 }

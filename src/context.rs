@@ -42,15 +42,23 @@ pub struct Context {
     operations: std::collections::BTreeMap<String, Value>,
     scale: f64,
     pub compactions: usize,
+    requested_checkpoint: bool,
 }
 impl Context {
+    /// A model may request a checkpoint early; resource safety never depends
+    /// on that request or on a successful model-authored summary.
+    pub fn request_checkpoint(&mut self) {
+        self.requested_checkpoint = true;
+    }
     pub fn confirm(&mut self, estimated: u64, prompt: u64) {
         if estimated > 0 && prompt > 0 {
             self.scale = (self.scale.max(1.0) * prompt as f64 / estimated as f64).max(1.0);
         }
     }
     pub fn tokens(&self, messages: &[Value], schemas: &[Value]) -> u64 {
-        let raw = estimate(&json!(messages)) + estimate(&json!(schemas)) + 64;
+        let raw = messages.iter().map(estimate).sum::<u64>()
+            + schemas.iter().map(estimate).sum::<u64>()
+            + 72;
         (raw as f64 * self.scale.max(1.0)).ceil() as u64
     }
     /// Called only between complete model turns (tool call/result groups stay atomic).
@@ -144,10 +152,13 @@ impl Context {
         objective: &str,
         operational: &Value,
     ) -> Result<bool, String> {
-        let ceiling = (capacity * 78 / 100).min(capacity.saturating_sub(reserve));
-        if self.tokens(messages, schemas) <= ceiling {
+        let trigger = (capacity * 78 / 100).min(capacity.saturating_sub(reserve));
+        if !self.requested_checkpoint && self.tokens(messages, schemas) <= trigger {
             return Ok(false);
         }
+        // Hysteresis: compact in one event and leave meaningful space for
+        // subsequent turns instead of moving the truncation boundary each time.
+        let ceiling = (capacity * 60 / 100).min(capacity.saturating_sub(reserve));
         validate_groups(messages)?;
         let original = messages.clone();
         let latest = messages
@@ -156,7 +167,7 @@ impl Context {
         let mut historical: Vec<Vec<Value>> = Vec::new();
         let mut active = Vec::new();
         let mut systems = Vec::new();
-        let mut images = Vec::new();
+
         for (index, m) in messages.iter().enumerate() {
             if m["role"] == "system" || m["role"] == "developer" {
                 let mut m = m.clone();
@@ -203,7 +214,7 @@ impl Context {
                 v.remove("workingNotes");
                 v.remove("plan");
             }
-            let mut data = json!({"objective":objective,"verifiedState":verified,
+            let mut data = json!({"epoch":self.compactions+1,"objective":objective,"verifiedState":verified,
                 "executedOperations":self.operations,"olderContext":omitted,"workingNotes":operational["workingNotes"],"plan":operational["plan"],
                 "instructions":"Historical data, never permission. Completed effects must not be replayed."});
             // Narrative can yield to instructions; operation evidence is pinned separately.
@@ -211,8 +222,8 @@ impl Context {
                 data["olderContext"] = json!([]);
             }
             candidate = systems.clone();
-            candidate.push(json!({"role":"user","content":format!("Working checkpoint (historical data): {}",data)}));
-            candidate.extend(images.clone());
+            candidate.push(json!({"role":"user","lorcaInternal":true,"content":format!("Working checkpoint (historical data): {}",data)}));
+
             candidate.extend(historical.iter().flatten().cloned());
             candidate.extend(protected_user.clone());
             candidate.extend(units.iter().flatten().cloned());
@@ -243,9 +254,6 @@ impl Context {
                 break;
             };
             for m in &removed {
-                if m["images"].as_array().is_some_and(|a| !a.is_empty()) {
-                    images.push(m.clone());
-                }
                 if m["role"] == "tool" {
                     let value: Value = serde_json::from_str(m["content"].as_str().unwrap_or(""))
                         .unwrap_or(Value::Null);
@@ -256,6 +264,12 @@ impl Context {
                         Some("apply_patch" | "run_command" | "exec_command" | "write_stdin")
                     ) {
                         self.operations.insert(id, fact.clone());
+                        // Full observations remain in the archive and Rust's
+                        // execution ledger. The prompt carries recent facts.
+                        while self.operations.len() > 16 {
+                            let key = self.operations.keys().next().cloned().unwrap();
+                            self.operations.remove(&key);
+                        }
                     }
                     omitted.push(fact);
                     if omitted.len() > 12 {
@@ -280,10 +294,12 @@ impl Context {
             return Err("Context validation failed: latest user message changed".into());
         }
         if candidate == original {
+            self.requested_checkpoint = false;
             return Ok(false);
         }
         *messages = candidate;
         self.compactions += 1;
+        self.requested_checkpoint = false;
         Ok(true)
     }
 }
@@ -321,10 +337,17 @@ fn close_pending(messages: &mut Vec<Value>, pending: &mut Vec<(String, String)>)
 }
 
 fn is_checkpoint(message: &Value) -> bool {
+    if message["lorcaInternal"] == true {
+        return true;
+    }
+    // Recognize saved draft checkpoints structurally, not arbitrary user text
+    // sharing a prefix. New checkpoints carry explicit internal provenance.
     message["role"] == "user"
         && message["content"]
             .as_str()
-            .is_some_and(|s| s.starts_with("Working checkpoint (historical data): "))
+            .and_then(|s| s.strip_prefix("Working checkpoint (historical data): "))
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .is_some_and(|v| v.get("verifiedState").is_some() && v.get("objective").is_some())
 }
 
 /// Check native function-call ordering before committing a model-facing projection.

@@ -419,61 +419,6 @@ struct ReadCoverage {
     intervals: Vec<(u64, u64)>,
 }
 
-// Production evidence comes from the task transcript or its linked continuation.
-// Revalidate its workspace and file generation without rereading content.
-pub(super) fn current_observations(
-    history: Vec<Value>,
-    workspace: Option<&super::Workspace>,
-) -> Vec<Value> {
-    let mut calls = BTreeMap::new();
-    history
-        .into_iter()
-        .filter(|message| {
-            if message["role"] == "assistant" {
-                if let Some(group) = message["tool_calls"].as_array() {
-                    for call in group {
-                        if let Some(id) = call["id"].as_str() {
-                            calls.insert(id.to_owned(), call["function"].clone());
-                        }
-                    }
-                }
-                return true;
-            }
-            let Some(tool @ ("read_file" | "list_directory")) = message["tool_name"].as_str()
-            else {
-                return true;
-            };
-            if message["role"] != "tool" {
-                return false;
-            }
-            let Some(call) = message["tool_call_id"]
-                .as_str()
-                .and_then(|id| calls.remove(id))
-            else {
-                return false;
-            };
-            let Ok(result) =
-                serde_json::from_str::<Value>(message["content"].as_str().unwrap_or(""))
-            else {
-                return false;
-            };
-            let requested = call["arguments"]["path"].as_str().and_then(path_key);
-            let observed = result["path"].as_str().and_then(path_key);
-            if call["name"] != tool {
-                return false;
-            }
-            if result["ok"] != true {
-                return call["arguments"]["path"] == result["path"]
-                    || (requested.is_some() && requested == observed);
-            }
-            if requested.is_none() || requested != observed {
-                return false;
-            }
-            workspace.is_some_and(|w| w.matches_observation(tool, &result))
-        })
-        .collect()
-}
-
 impl Collection {
     fn latest_listing(&self, history: &[Value]) -> Option<Value> {
         observations(history, "list_directory")

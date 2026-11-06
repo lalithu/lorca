@@ -1,53 +1,106 @@
-# Runtime architecture
+# Lorca v0.5 architecture
 
-SwiftUI Dashboard and Mini share the authenticated Rust core with the terminal client.
-`agentloop/` contains the existing single loop; `tools/` contains the native registry,
-argument validation, workspace capabilities and sandboxed command implementation.
-Shared protocol/tool types live in `src/agent_types.rs`, avoiding a tools-to-runtime dependency.
-The public `lorca::agent` path remains a compatibility alias for `agentloop`.
+**Agent = model + harness.** SwiftUI Dashboard/Mini and the terminal use the
+same authenticated Rust core. `agentloop/` owns one active task, `tools/` the
+native tool registry and handlers. Job Apps keeps its independent registry.
 
-## Four pillars
+![Architecture](v0.5-architecture.svg)
 
-- **Objective:** original instruction, requested outcome, restrictions and existing deterministic completion requirements. Ambiguous intent retains the original text; there is no parsing inference call.
-- **Context:** conversation/workspace references plus the existing bounded working-context engine in `src/context.rs`. The full contract is included in operational checkpoints; execution evidence remains outside compacted messages.
-- **Authority:** task-local instruction restrictions are checked before preparation and approval. The existing workspace boundary, strict argument schemas, Cargo allowlist and immutable Allow Once gateway remain authoritative. Model/tool text cannot modify the contract.
-- **Verification:** real task transcript records drive a structured report of unmet requirements and supporting tool IDs, paths, verification flags and exit codes. Required commands must exit zero after relevant edits; an executed failing command does not verify success.
+## One execution loop
 
-## Flow
+1. Preserve original user input and prior observations in the conversation archive.
+2. Build a bounded prompt: current objective/source manifests, current workspace,
+   recent complete exchanges, operational facts and advisory working notes.
+3. Ask the selected model using the actual allocated window where reported.
+4. For native calls: validate arguments and workspace capabilities, enforce current
+   user restrictions, obtain exact single-use approval where required, execute,
+   archive the full observation, return its bounded projection with the same call ID.
+5. Continue tool use, or continue a length-stopped public answer. A complete,
+   tool-free public reply is the model's semantic stopping decision.
 
-Submit → initialize contract → assemble bounded context → stream Ollama response → validate tool and task authority → request exact-action approval where necessary → execute → record evidence → verify → continue or finish.
+Rust does not infer whether the prose or requested feature is semantically correct.
+`task_execution_status` reports unresolved operations and running commands. A
+model cannot manufacture execution evidence by saying “done.” Missing command
+exit status, denial, cancellation, no-progress loops and backend errors remain
+explicit runtime states. A public clarification question is a valid reply;
+`request_user_input` additionally creates an explicit waiting state.
 
-The existing duplicate-action cache, denial stop, repeated-failure limits, cancellation,
-model/command deadlines and iteration limits remain in place. Existing transcript and
-audit persistence also retains the additive task_contract/task_verification events;
-no new database or restart replay is introduced. Providers, storage and transport
-remain separate. SwiftUI does not enforce execution permissions.
+## Four pillars remain
 
-## Limits
+- **Objective:** original instruction and user corrections retained independently
+  of their model-facing manifests.
+- **Context:** finite projection with numbered checkpoint epochs, exact source IDs,
+  current operational observations and model-authored advisory notes.
+- **Authority:** trusted task restrictions, workspace capabilities, action digests,
+  approvals and denials. Historical text never creates fresh authorization.
+- **Verification:** actual file readback, command exit/status and factual observations.
+  No generic semantic completion gate or forced “what next?” question.
 
-Natural-language restriction recognition is deliberately conservative and limited to
-explicit common prohibitions against editing or command execution. A named edit ban
-currently blocks all patches for that task. Other restrictions remain recorded but
-are not a general language policy engine. Unknown intent never bypasses tool checks
-or approvals. Scope changes require a new user task; no model-driven scope updates.
-Verification establishes tool outcomes, not arbitrary semantic correctness of prose
-or code. Existing unresolved-error and unsupported-claim gates also prevent false
-completion. Unfinished work is not automatically resumed after restart.
+Some legacy requirement/inspection helpers remain for scope constraints, audit APIs
+and compatibility tests. They do not drive final-answer retries.
 
-See [AGENT.md](../AGENT.md) for runtime limits and the local API contract.
+## Durable originals, bounded recall
 
-## Context budgeting
+`src/memory.rs` is the conversation-local SQLite facade (one connection shared by
+that registry, a small SQLite page cache, no full archive Vec). Transactional
+inserts update an external-content FTS5 index atomically. `synchronous=FULL` and
+DELETE journaling keep recovery local; corruption and disk-full errors propagate.
+There is no second model, vector database, embedding service or memory daemon.
 
-The model-facing checkpoint is a projection, not the full task-contract event.
-The objective appears once; per-file read facts are coalesced and duplicate operation
-facts/cache identities are omitted. The complete contract, capability references,
-execution/denial caches and verification transcript remain authoritative in Rust.
-Previous generated checkpoints are never recursively summarized into newer ones.
-Initial discovery text is removed from the system prefix after compaction; a compact
-verified-file index remains available and additional paths can be rediscovered.
-Narrative summaries shrink according to remaining budget before essential state
-can be rejected. Tool call/result groups and original image inputs remain intact.
-Ollama's effective allocation is read from /api/ps, not model maximum metadata.
-At 8192 capacity, 2048 output tokens leave 6144 input tokens including schemas and
-system instructions. The UI reports last confirmed usage, not the next prompt's
-estimated size. Both provider and context manager share the output-reserve function.
+Stable `hN` IDs refer to append-ordered records. Content, native call metadata and
+attachment references are preserved; private reasoning and recalled excerpts are
+excluded. `search_history` returns bounded literal-term FTS matches;
+`get_history_record` pages Unicode scalar offsets or 2,048-character chunk indices.
+The optional `field=metadata` pages original structured calls and attachments.
+Search is token/phrase based, not semantic similarity or arbitrary substring search.
+
+The draft JSONL archive is imported once in a transaction. Complete records before
+an incomplete final line remain usable; that tail and the legacy file are retained.
+Malformed complete records fail migration without a partial import. Existing
+conversation JSON remains compatible. Occurrence reconciliation preserves repeated
+identical messages; `hN` IDs are scoped to a single conversation. Archive paths are
+UUID-scoped, files are mode 0600, and symlink destinations are rejected.
+
+Explicit chat deletion removes the archive and sidecars. Existing independent
+backups and user-created exports are not deleted. Explicit JSON/Markdown export
+includes original records; JSON also embeds existing attachment files.
+
+## Context, input and output
+
+Context checkpoints start near 78% and target 60% of the allocation, further bounded
+by the shared generation reserve. The prefix stays unchanged between checkpoints;
+provider-reported prompt usage calibrates conservative token estimates. Complete
+call/result groups remain atomic. A deterministic checkpoint is always available;
+`update_plan` notes are advisory and `compact_context` can request an early epoch.
+Recent facts are bounded in the prompt; full evidence and execution/denial caches
+remain outside it. Older images may leave the prompt; their originals stay archived.
+
+Oversized user text is archived before replacement by an ID/size/head/tail manifest.
+The direct-input threshold shrinks for small context windows. Full original text
+still determines authority, including restrictions buried inside a large correction.
+Whole-source inspection uses sequential chunks and next offsets; the model owns
+coverage and must not equate a snippet with exhaustive inspection.
+
+`memory/continuation.rs` joins public length-stopped segments without invented
+spacing. It suppresses exact echoes and conservative, bounded suffix overlaps,
+including during streaming. Two consecutive non-advancing continuations stop with
+partial work preserved. An empty final response gets one public-answer recovery;
+it cannot silently turn a truncated partial answer into completion. Native argument
+JSON is never stitched across requests or executed after a length stop. Specific
+malformed-tool HTTP failures have a separate bounded recovery; unrelated server
+errors do not retry as truncation.
+
+A stopped backend does not automatically resume side effects. Saved conversation,
+partial text, original records and explicit continuation remain available.
+
+## Hardware and interfaces
+
+The optional model advisor is read-only: reclaimable-memory/storage estimates,
+installed Ollama metadata, actual reported context, and llama.cpp memory snapshots
+where supplied. Online Hugging Face listing is opt-in. It does not rank model
+quality, guarantee KV/vision fit, resize context, download or reload models.
+Auto-detection prefers a healthy llama.cpp server with a nonempty catalog, otherwise
+Ollama. The CLI still uses Ollama. No Job Apps workflow or unrelated UI is changed.
+
+See [validation and limitations](v0.5-validation.md), [tools](tools.md), and
+[AGENT.md](../AGENT.md) for commands and operational boundaries.

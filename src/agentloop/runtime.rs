@@ -106,8 +106,8 @@ impl Agent {
             history,
         } = request;
         limits.validate()?;
-        if task.trim().is_empty() || task.len() > 8000 {
-            return Err("Task must contain 1–8000 bytes".into());
+        if task.trim().is_empty() {
+            return Err("Task must contain an instruction or attached input".into());
         }
         let workspace = if workspace.as_os_str().is_empty() {
             None
@@ -344,8 +344,8 @@ impl Agent {
     }
     /// Queue only user-authored corrections. Actions already started settle before reuse.
     pub fn revise(&self, owner: &str, task_id: &str, text: &str) -> Result<()> {
-        if text.trim().is_empty() || text.len() > 8000 {
-            return Err("Correction must contain 1–8000 bytes".into());
+        if text.trim().is_empty() {
+            return Err("Correction must contain an instruction".into());
         }
         let mut s = self.state.lock().unwrap();
         let v = s.view.as_ref().ok_or("No task")?;

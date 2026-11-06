@@ -266,10 +266,17 @@ async fn stale_patch_and_invalid_multi_match_leave_files_intact() {
     agent
         .decide("test", &id, &a.id, Decision::AllowOnce)
         .unwrap();
-    assert_eq!(
-        wait(&agent, |v| !v.status.active()).await.status,
-        Status::Failed
-    );
+    let view = wait(&agent, |v| !v.status.active()).await;
+    assert_eq!(view.status, Status::Completed);
+    assert!(view.events.iter().any(|e| e.kind == "tool_failed"));
+    assert!(view.events.iter().any(|e| {
+        e.kind == "task_execution_status"
+            && !e.data["unresolvedOperations"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+    }));
+    assert!(!view.audit.iter().any(|e| e.kind == "file_changes"));
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "human edit");
     let workspace = Workspace::new(&root.0).unwrap();
     let registry = Registry::default();
@@ -531,7 +538,9 @@ async fn a_text_claim_does_not_replace_verified_execution() {
     assert!(
         done.events
             .iter()
-            .any(|event| event.kind == "task_verification" && event.data["evidence"] == json!([]))
+            .any(|event| event.kind == "task_execution_status"
+                && event.data["unresolvedOperations"] == json!([])
+                && event.data["semanticValidationPerformed"] == false)
     );
 }
 #[tokio::test]

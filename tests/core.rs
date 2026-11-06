@@ -674,3 +674,104 @@ async fn closing_has_a_shared_unload_deadline_without_killing_other_clients() {
     let _ = loading.await;
     server.abort();
 }
+
+#[tokio::test]
+async fn entire_chat_export_includes_archived_originals_and_delete_removes_archive() {
+    let root = Temp::new();
+    let repo = Repository::new(root.0.clone()).unwrap();
+    let mut chat = Conversation {
+        title: "Export original source".into(),
+        ..Default::default()
+    };
+    chat.messages
+        .push(Message::new("user", "Visible user message".into()));
+    let attachment = repo
+        .import_image(&STANDARD.encode(jpeg()), "resume-view.jpg")
+        .unwrap();
+    chat.messages[0].attachments.push(attachment.clone());
+    repo.save(&chat).unwrap();
+    let archive = lorca::memory::HistoryIndex::default();
+    archive.attach(&root.0, &chat.id).unwrap();
+    let original = "🫍 full original tool output ".repeat(1000);
+    archive.record(&json!({"role":"tool","tool_name":"read_file","tool_call_id":"unique-read","content":original})).unwrap();
+    let core = Core::new(repo).unwrap();
+    let connection = core
+        .command(json!({"op":"connect","host":"http://127.0.0.1:1","model":"unused"}))
+        .await
+        .unwrap();
+    let session = connection["session"].as_str().unwrap();
+    for format in ["json", "markdown"] {
+        let result=core.command(json!({"op":"exportConversation","session":session,"conversationId":chat.id,"format":format})).await.unwrap();
+        let text = result["content"].as_str().unwrap();
+        assert!(text.contains(&original));
+        assert!(text.contains("Visible user message"));
+        if format == "json" {
+            let data: Value = serde_json::from_str(text).unwrap();
+            assert_eq!(
+                data["embeddedImagesBase64"][&attachment.id],
+                STANDARD.encode(jpeg())
+            );
+            assert!(
+                data["originalRecords"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r["callId"] == "unique-read")
+            );
+        }
+    }
+    core.command(json!({"op":"delete","session":session,"conversationId":chat.id}))
+        .await
+        .unwrap();
+    assert!(
+        !root
+            .0
+            .join("memory")
+            .join(format!("{}.sqlite3", chat.id))
+            .exists()
+    );
+    assert!(
+        archive.read("h0", 0, 10).is_err(),
+        "An open handle must not recall a deleted conversation"
+    );
+}
+
+#[tokio::test]
+async fn advisor_reads_router_metadata_without_props_autoload_or_model_mutation() {
+    let paths = Arc::new(Mutex::new(Vec::new()));
+    let calls = paths.clone();
+    let app=Router::new().fallback(axum::routing::any(move |request:axum::extract::Request| {
+        let calls=calls.clone();async move {
+            calls.lock().unwrap().push((request.method().to_string(),request.uri().path().to_string()));
+            Json(json!({"data":[{"id":"fixture","memory":{"status":"measured","effective":{"n_ctx":8192,"devices":[]}}}]}))
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let host = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let root = Temp::new();
+    let core = Core::new(Repository::new(root.0.clone()).unwrap()).unwrap();
+    let session = core
+        .command(json!({"op":"connect","provider":"llama_cpp","host":host,"model":"fixture"}))
+        .await
+        .unwrap()["session"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let report = core
+        .command(json!({"op":"hardwareAdvice","session":session,"online":false}))
+        .await
+        .unwrap();
+    assert_eq!(report["allocatedContext"], 8192);
+    assert_eq!(
+        report["installedModels"][0]["confidence"],
+        "backend measured"
+    );
+    assert_eq!(
+        *paths.lock().unwrap(),
+        vec![("GET".to_owned(), "/models".to_owned())]
+    );
+    server.abort();
+}
