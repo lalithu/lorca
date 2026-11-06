@@ -531,7 +531,9 @@ async fn a_text_claim_does_not_replace_verified_execution() {
     assert!(
         done.events
             .iter()
-            .any(|event| event.kind == "task_verification" && event.data["evidence"] == json!([]))
+            .any(|event| event.kind == "task_execution_status"
+                && event.data["unresolvedOperations"] == json!([])
+                && event.data["semanticValidationPerformed"] == false)
     );
 }
 #[tokio::test]
