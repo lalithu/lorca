@@ -39,6 +39,7 @@ pub struct Registry {
     adaptive: bool,
     workspace_available: bool,
     unavailable: BTreeMap<String, String>,
+    pub(super) history: crate::memory::HistoryIndex,
 }
 impl Default for Registry {
     fn default() -> Self {
