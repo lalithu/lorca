@@ -87,6 +87,7 @@ struct ModelTransfer: Identifiable {
     @Published private(set) var candidates: [HubModel] = []
     @Published private(set) var transfers: [ModelTransfer] = []
     @Published private(set) var provider = ""
+    @Published var runtime = "active"
     @Published var searching = false
     @Published var working = false
     @Published var issue: String?
@@ -103,10 +104,10 @@ struct ModelTransfer: Identifiable {
         return try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
     }
     func refresh() async {
-        guard !working else { return }
         do {
-            let v = try await response("modelLibrary")
+            let v = try await response("modelLibrary", extra: ["runtime":runtime])
             provider = v["provider"] as? String ?? ""
+            if runtime == "active" { runtime = provider == "llama.cpp" ? "llama_cpp" : "ollama" }
             installed = (v["installed"] as? [[String: Any]] ?? []).map(LibraryModel.init)
             transfers = (v["downloads"] as? [[String: Any]] ?? []).map(ModelTransfer.init)
             issue = nil
@@ -150,14 +151,14 @@ struct ModelTransfer: Identifiable {
         working = true
         defer { working = false }
         do {
-            _ = try await response("modelInstall", extra: ["model": runtimeID])
+            _ = try await response("modelInstall", extra: ["model": runtimeID,"runtime":runtime])
             issue = nil
             await refresh()
         } catch { issue = "Installation couldn't start: \(error.localizedDescription)" }
     }
     func cancel(_ model: String) async {
         do {
-            _ = try await response("modelCancelDownload", extra: ["model": model])
+            _ = try await response("modelCancelDownload", extra: ["model": model,"runtime":runtime])
             await refresh()
         } catch { issue = "Can't cancel download: \(error.localizedDescription)" }
     }
@@ -166,13 +167,17 @@ struct ModelTransfer: Identifiable {
         working = true
         defer { working = false }
         do {
-            _ = try await response("modelDelete", extra: ["model": model])
+            _ = try await response("modelDelete", extra: ["model": model,"runtime":runtime])
             await refresh()
         } catch { issue = "Can't delete model: \(error.localizedDescription)" }
     }
     func refreshTransfers() async {
-        guard let v = try? await response("modelDownloads") else { return }
+        guard let v = try? await response("modelDownloads",extra: ["runtime":runtime]) else { return }
+        let previous = Set(transfers.filter { $0.status == "complete" }.map(\.id))
         transfers = (v["downloads"] as? [[String: Any]] ?? []).map(ModelTransfer.init)
+        if transfers.contains(where: { $0.status == "complete" && !previous.contains($0.id) }) {
+            await refresh()
+        }
     }
 }
 
@@ -199,6 +204,17 @@ struct ModelLibraryView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 header
+                Picker("Runtime",selection:$library.runtime) {
+                    Text("Ollama").tag("ollama")
+                    Text("llama.cpp").tag("llama_cpp")
+                }
+                .pickerStyle(.segmented).labelsHidden().frame(maxWidth: 280)
+                .onChange(of: library.runtime) { _, _ in
+                    library.selected = nil
+                    selectedInstalled = nil
+                    Task { await library.refresh() }
+                }
+                transfers
                 Picker("Library view", selection: $tab) {
                     ForEach(LibraryTab.allCases, id: \.self) { item in
                         Text(item.rawValue).tag(item)
@@ -260,6 +276,39 @@ struct ModelLibraryView: View {
             Button { Task { await library.refresh(); await library.searchHub() } } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }.buttonStyle(.bordered).controlSize(.small)
+        }
+    }
+    private var transfers: some View {
+        VStack(spacing: 8) {
+            ForEach(library.transfers.filter { $0.status != "complete" && $0.status != "cancelled" }) { transfer in
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Image(systemName: "arrow.down.circle").foregroundStyle(.secondary)
+                        Text(transfer.id).fontWeight(.medium).lineLimit(1)
+                        Spacer()
+                        Text(transfer.status.capitalized).foregroundStyle(.secondary)
+                        if transfer.status == "downloading" || transfer.status == "starting" {
+                            Button(library.provider == "llama.cpp" ? "Pause" : "Stop request") {
+                                Task { await library.cancel(transfer.id) }
+                            }.buttonStyle(.bordered).controlSize(.small)
+                        }
+                    }
+                    if transfer.total > 0 {
+                        ProgressView(value: transfer.fraction)
+                        HStack {
+                            Text("\(modelSize(transfer.completed)) / \(modelSize(transfer.total))")
+                            Spacer()
+                            if transfer.bytesPerSecond > 0 {
+                                Text("\(modelSize(UInt64(transfer.bytesPerSecond)))/s")
+                            }
+                        }.font(.caption).foregroundStyle(.secondary)
+                    } else if transfer.status == "downloading" {
+                        ProgressView()
+                    }
+                    if let error=transfer.error { Text(error).font(.caption).foregroundStyle(.orange) }
+                }
+                .padding(12).background(.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
+            }
         }
     }
     private var recommended: some View {
@@ -405,7 +454,7 @@ struct ModelLibraryView: View {
             }
             Text("Change your next-task working window in Chat. Ollama may reallocate per request; llama.cpp requires a compatible loaded context. This panel never claims a change succeeded before the runtime reports it.")
                 .font(.caption).foregroundStyle(.secondary)
-            if model.id == store.selectedModel {
+            if model.id == store.selectedModel && store.providerName == library.provider {
                 ContextChoices(store: store, allocated: model.allocatedContext, compact: false)
             }
             HStack(spacing: 12) {
@@ -413,15 +462,15 @@ struct ModelLibraryView: View {
                     store.selectedModel = model.id
                     Task { _ = await store.modelSession.prepare(model.id) }
                 } label: { Label("Use in chat", systemImage: "bubble.left") }
-                    .disabled(!store.ready || store.isManagingModel)
+                    .disabled(!store.ready || store.isManagingModel || store.providerName != library.provider)
                 if model.status != "loaded" {
                     Button("Load") {
                         store.selectedModel = model.id
                         Task { _ = await store.modelSession.prepare(model.id) }
-                    }.disabled(!store.canReloadModel)
+                    }.disabled(!store.canReloadModel || store.providerName != library.provider)
                 } else {
                     Button("Unload") { Task { await store.unloadModel(model: model.id) } }
-                        .disabled(!store.canReloadModel)
+                        .disabled(!store.canReloadModel || store.providerName != library.provider)
                 }
                 Spacer()
                 Button(role: .destructive) { pendingDelete = model } label: {
