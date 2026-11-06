@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod llama_cpp;
 use crate::types::Usage;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
@@ -7,6 +8,186 @@ use tokio::sync::mpsc::UnboundedSender as Sender;
 pub enum Update {
     Text(String),
     Done(Usage),
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Engine {
+    #[default]
+    Ollama,
+    LlamaCpp,
+}
+
+impl Engine {
+    pub fn default_host(self) -> &'static str {
+        match self {
+            Self::Ollama => "http://127.0.0.1:11434",
+            Self::LlamaCpp => "http://127.0.0.1:9931",
+        }
+    }
+}
+
+pub async fn detect_local_engine(client: &reqwest::Client) -> Engine {
+    let healthy = client
+        .get("http://127.0.0.1:9931/health")
+        .timeout(Duration::from_millis(500))
+        .send()
+        .await
+        .is_ok_and(|r| r.status().is_success());
+    if healthy
+        && model_list(client, Engine::LlamaCpp, Engine::LlamaCpp.default_host())
+            .await
+            .is_ok()
+    {
+        Engine::LlamaCpp
+    } else {
+        Engine::Ollama
+    }
+}
+
+pub async fn manage(
+    client: &reqwest::Client,
+    engine: Engine,
+    base_url: &str,
+    name: &str,
+    load: bool,
+) -> Result<(), String> {
+    match engine {
+        Engine::Ollama => manage_model(client, base_url, name, load).await,
+        Engine::LlamaCpp => {
+            if load {
+                // Reuse a model already loaded by the Llama app; an explicit load
+                // can restart its allocation and discard the warm prompt cache.
+                let status: Value = client
+                    .get(format!("{base_url}/models"))
+                    .timeout(Duration::from_secs(3))
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .error_for_status()
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if status["data"].as_array().is_some_and(|models| {
+                    models.iter().any(|m| {
+                        m["id"].as_str().is_some_and(|id| same_model(id, name))
+                            && m["status"]["value"] == "loaded"
+                    })
+                }) {
+                    return Ok(());
+                }
+            }
+            let action = if load { "load" } else { "unload" };
+            let response = client
+                .post(format!("{base_url}/models/{action}"))
+                .json(&json!({"model":name}))
+                .timeout(Duration::from_secs(if load { 120 } else { 10 }))
+                .send()
+                .await
+                .map_err(|e| format!("Couldn’t {action} {name} through llama.cpp: {e}"))?;
+            let status = response.status();
+            let body: Value = response
+                .json()
+                .await
+                .map_err(|_| format!("Invalid llama.cpp {action} response"))?;
+            if !status.is_success() || body["success"] != true {
+                return Err(format!(
+                    "llama.cpp {action} failed: {}",
+                    body["error"]
+                        .as_str()
+                        .unwrap_or("server did not confirm the operation")
+                ));
+            }
+            if !load {
+                let models: Value = client
+                    .get(format!("{base_url}/models"))
+                    .timeout(Duration::from_secs(3))
+                    .send()
+                    .await
+                    .map_err(|_| "llama.cpp did not confirm unloading".to_string())?
+                    .error_for_status()
+                    .map_err(|_| "llama.cpp did not confirm unloading".to_string())?
+                    .json()
+                    .await
+                    .map_err(|_| "Invalid llama.cpp model status".to_string())?;
+                let entries = models["data"]
+                    .as_array()
+                    .ok_or("Invalid llama.cpp model status")?;
+                if entries.iter().any(|m| m["id"].as_str().is_none()) {
+                    return Err("Invalid llama.cpp model status".into());
+                }
+                if entries.iter().any(|m| {
+                    same_model(m["id"].as_str().unwrap_or(""), name)
+                        && m["status"]["value"] == "loaded"
+                }) {
+                    return Err("llama.cpp still reports the model loaded".into());
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+pub async fn model_list(
+    client: &reqwest::Client,
+    engine: Engine,
+    base_url: &str,
+) -> Result<(Vec<String>, Option<String>), String> {
+    match engine {
+        Engine::Ollama => {
+            let value: Value = client
+                .get(format!("{base_url}/api/tags"))
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await
+                .map_err(|_| {
+                    "Ollama isn’t available. Start it with ‘ollama serve’, then reconnect."
+                        .to_string()
+                })?
+                .error_for_status()
+                .map_err(|e| e.to_string())?
+                .json()
+                .await
+                .map_err(|_| "Invalid Ollama model list".to_string())?;
+            let mut models = value["models"]
+                .as_array()
+                .ok_or("Invalid Ollama model list")?
+                .iter()
+                .filter_map(|m| m["name"].as_str().map(String::from))
+                .collect::<Vec<_>>();
+            models.sort();
+            Ok((models, None))
+        }
+        Engine::LlamaCpp => {
+            let value: Value = client
+                .get(format!("{base_url}/models"))
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await
+                .map_err(|_| "llama.cpp isn’t available. Open the Llama app and keep its local server running.".to_string())?
+                .error_for_status()
+                .map_err(|e| e.to_string())?
+                .json()
+                .await
+                .map_err(|_| "Invalid llama.cpp model list".to_string())?;
+            let entries = value["data"]
+                .as_array()
+                .ok_or("Invalid llama.cpp model list")?;
+            let mut models = Vec::new();
+            let mut loaded = None;
+            for entry in entries {
+                let Some(id) = entry["id"].as_str().filter(|id| !id.is_empty()) else {
+                    continue;
+                };
+                models.push(id.to_owned());
+                if entry["status"]["value"] == "loaded" && loaded.is_none() {
+                    loaded = Some(id.to_owned());
+                }
+            }
+            models.sort();
+            Ok((models, loaded))
+        }
+    }
 }
 impl Usage {
     pub(crate) fn from_response(value: &Value) -> Self {
@@ -21,6 +202,11 @@ impl Usage {
             prompt_tokens: value["prompt_eval_count"].as_u64(),
             generated_tokens: generated,
             generation_duration_ns: duration,
+            prompt_duration_ns: value["prompt_eval_duration"].as_u64().filter(|n| *n > 0),
+            prompt_tokens_per_second: value["prompt_eval_count"]
+                .as_u64()
+                .zip(value["prompt_eval_duration"].as_u64().filter(|n| *n > 0))
+                .map(|(n, ns)| n as f64 * 1e9 / ns as f64),
             tokens_per_second: generated
                 .zip(duration)
                 .map(|(t, n)| t as f64 * 1e9 / n as f64),

@@ -145,6 +145,10 @@ impl Requirements {
             "program",
             "script",
             "crate",
+            "control",
+            "component",
+            "button",
+            "layout",
         ]);
         let edit = edit_requested
             && (!paths.is_empty()
@@ -207,11 +211,20 @@ impl Requirements {
         } else {
             Vec::new()
         };
+        let looks_at_path = positive.split_once("look at ").is_some_and(|(_, target)| {
+            target
+                .trim_start()
+                .trim_start_matches(['`', '"', '\''])
+                .starts_with('/')
+        });
         Self {
             inspect: !explanatory
                 && (has(&["inspect", "review", "read", "examine"])
                     || positive.contains("look at "))
-                && (workspace_action || !read_paths.is_empty() || lower.contains("directory")),
+                && (workspace_action
+                    || !read_paths.is_empty()
+                    || lower.contains("directory")
+                    || looks_at_path),
             directory_only: lower.contains("directory")
                 && !lower.contains("repo")
                 && !lower.contains("project"),
@@ -227,22 +240,6 @@ impl Requirements {
             report_only: !edit_requested,
             commands,
         }
-    }
-    pub(super) fn interpreted(task: &str, intent: &super::intent::Interpretation) -> Self {
-        use super::intent::OutcomeKind::*;
-        let mut value = Self::new(task);
-        value.inspect |= intent.outcomes.iter().any(|o| o.kind == Inspect);
-
-        if !value.report_only {
-            value.edit |= intent
-                .outcomes
-                .iter()
-                .any(|o| matches!(o.kind, Edit | RepairVerify));
-        }
-        // Model outcomes describe the work. Concrete requirements are grounded
-        // exclusively in the user's instruction.
-        value.report_only = !value.edit;
-        value
     }
     pub(super) fn revise_inspection(&mut self, instructions: &[String]) {
         self.read_paths.clear();
@@ -294,28 +291,7 @@ impl Requirements {
         self.read_paths.dedup();
     }
 
-    pub(super) fn terminal_read_blocker(&self, current: &[Value]) -> Option<String> {
-        let complete = super::inspection::covered_reads(current, self.read_range);
-        let complete_files = super::inspection::complete_reads(current);
-        super::inspection::observations(current, "read_file")
-            .iter()
-            .find_map(|result| {
-                let path = result["path"].as_str()?;
-                let error = result["error"].as_str()?;
-                (result["ok"] != true
-                    && (error == "File is not UTF-8 text" || error == "Expected a regular file")
-                    && (self.read_paths.iter().any(|requested| {
-                        !read_satisfies(requested, &complete)
-                            && read_satisfies(requested, &[path.into()])
-                    }) || self.read_collections.iter().any(|collection| {
-                        collection.coverage != super::intent::InspectionCoverage::Relevant
-                            && !complete_files.iter().any(|actual| actual == path)
-                            && collection.lists_member(current, path)
-                    })))
-                .then(|| format!("Could not read {path}: {error}"))
-            })
-    }
-
+    #[cfg(test)]
     pub(crate) fn requires_edit(&self) -> bool {
         self.edit
     }
@@ -331,23 +307,6 @@ impl Requirements {
             || !self.commands.is_empty()
             || !self.read_paths.is_empty()
             || !self.read_collections.is_empty()
-    }
-    // "Relevant files" is open-ended. Only explicit coverage can close the
-    // tool phase before the model offers a final answer.
-    pub(super) fn bounded_inspection_complete(&self, current: &[Value]) -> bool {
-        if self.edit
-            || !self.commands.is_empty()
-            || (self.read_paths.is_empty() && self.read_collections.is_empty())
-            || self.read_collections.iter().any(|collection| {
-                collection.coverage == super::intent::InspectionCoverage::Relevant
-            })
-        {
-            return false;
-        }
-        let complete = super::inspection::covered_reads(current, self.read_range);
-        self.read_paths
-            .iter()
-            .all(|path| read_satisfies(path, &complete))
     }
     pub(super) fn validate_patch(&self, payload: &Value) -> Result<(), String> {
         let path = normalized_path(payload["path"].as_str().unwrap_or(""));
@@ -469,77 +428,11 @@ impl Requirements {
         }
         missing
     }
-    /// A failed requested read is a concrete blocker, not a reason to keep
-    /// asking the model to restate its completion summary.
-    pub(super) fn read_blocker(&self, current: &[Value]) -> Option<String> {
-        let results: Vec<Value> = current
-            .iter()
-            .filter(|m| m["role"] == "tool" && m["tool_name"] == "read_file")
-            .filter_map(|m| serde_json::from_str(m["content"].as_str()?).ok())
-            .collect();
-        let successful = super::inspection::covered_reads(current, self.read_range);
-        for requested in &self.read_paths {
-            if read_satisfies(requested, &successful) {
-                continue;
-            }
-            if let Some(error) = results
-                .iter()
-                .rev()
-                .filter(|v| v["ok"] != true)
-                .find_map(|v| {
-                    let path = v["path"].as_str()?.to_owned();
-                    (path == *requested || read_satisfies(requested, &[path]))
-                        .then(|| v["error"].as_str())
-                        .flatten()
-                })
-            {
-                return Some(format!("Could not read {requested}: {error}"));
-            }
-        }
-        if self.inspect
-            && self.read_paths.is_empty()
-            && successful.is_empty()
-            && let Some(failure) = results.iter().rev().find(|v| v["ok"] != true)
-            && let Some(error) = failure["error"].as_str()
-        {
-            return Some(format!("Could not inspect the requested file: {error}"));
-        }
-        None
-    }
 }
 
 // Explicit paths stay exact. A bare filename may identify one unique
 // successfully read workspace path; a same-name file elsewhere cannot satisfy
 // a directory-qualified request. Duplicate observations are not ambiguity.
-// Route a short standalone clarification through the existing question tool.
-// This recognizes presentation, not task intent; it never authorizes an action.
-pub(super) fn clarification_question(text: &str) -> Option<&str> {
-    let text = text.trim();
-    if text.len() > 2000 || !text.contains('?') {
-        return None;
-    }
-    let question = text.rsplit_once(". ").map_or(text, |(_, tail)| tail).trim();
-    let prefixes = [
-        "what ",
-        "which ",
-        "where ",
-        "how ",
-        "could you ",
-        "can you ",
-        "would you ",
-        "should ",
-    ];
-    let recognized = |s: &str| {
-        prefixes
-            .iter()
-            .any(|p| s.trim().to_lowercase().starts_with(p))
-    };
-    if text.matches('?').count() == 1 && recognized(question) {
-        return Some(question);
-    }
-    (recognized(text) || text.lines().any(recognized)).then_some(text)
-}
-
 fn requested_range(task: &str) -> Option<(u64, u64)> {
     let words: Vec<_> = task.split_whitespace().collect();
     for words in words.windows(2) {
@@ -610,31 +503,6 @@ pub(super) fn requested_paths(clause: &str) -> Vec<String> {
             .then(|| path.to_owned())
         })
         .collect()
-}
-
-pub(super) fn intent_only(text: &str) -> bool {
-    let lower = text.trim().to_lowercase();
-    let tail = lower
-        .lines()
-        .rev()
-        .find(|s| !s.trim().is_empty())
-        .unwrap_or("")
-        .trim();
-    [
-        "i'll ",
-        "i’ll ",
-        "i will ",
-        "let me ",
-        "now i'll ",
-        "now i’ll ",
-        "creating ",
-        "updating ",
-        "running ",
-    ]
-    .iter()
-    .any(|s| tail.starts_with(s))
-        && !tail.contains('?')
-        && !tail.contains("complete")
 }
 
 pub fn unverified_claim(task: &str, text: &str, history: &[Value]) -> Option<String> {
@@ -891,6 +759,13 @@ impl InspectionCheck {
 }
 
 impl Requirements {
+    pub(super) fn edit_targets(&self) -> Vec<String> {
+        if self.edit {
+            self.paths.clone()
+        } else {
+            vec![]
+        }
+    }
     pub(super) fn inspection_contract(&self, instructions: &[String]) -> Vec<Value> {
         let declared: Vec<_> = instructions
             .iter()
@@ -1094,15 +969,8 @@ mod inspection_target_tests {
     use super::*;
     use serde_json::json;
 
-    fn interpreted(task: &str, target: Value) -> Requirements {
-        let intent = serde_json::from_value(json!({
-            "relation":"new", "objective":"Read hallucinated.md and inspect files present",
-            "outcomes":[{"kind":"inspect","target":"files present","inspection":target}],
-            "edit_targets":[],"forbidden_targets":[],"read_only":true,
-            "commands_forbidden":true,"clarification":null
-        }))
-        .unwrap();
-        Requirements::interpreted(task, &intent)
+    fn grounded(task: &str, _untrusted_label: Value) -> Requirements {
+        Requirements::new(task)
     }
     fn observation(tool: &str, value: Value) -> Value {
         json!({"role":"tool","tool_name":tool,"content":value.to_string()})
@@ -1129,19 +997,24 @@ mod inspection_target_tests {
             "repository contents",
             "phantom.md",
         ] {
-            let intent = serde_json::from_value(json!({
-                "relation":"new","objective":"Read hallucinated.md",
-                "outcomes":[{"kind":"inspect","target":description,
-                    "inspection":{"type":"file","path":description}}],
-                "edit_targets":[],"forbidden_targets":[],"read_only":true,
-                "commands_forbidden":true,"clarification":null
-            }))
-            .unwrap();
-            let req = Requirements::interpreted("Inspect this repository", &intent);
+            let req = Requirements::new("Inspect this repository");
             assert!(req.read_paths.is_empty(), "{description}");
             assert!(req.missing(&[read("README.md", 0, 4, "real")]).is_empty());
         }
     }
+    #[test]
+    fn read_only_is_a_constraint_even_in_an_absolute_folder_request() {
+        let req = Requirements::new("Take a look at /tmp/playground. Read only. Report back.");
+        assert!(req.read_paths.is_empty());
+        assert!(!req.missing(&[]).is_empty());
+        assert!(req.missing(&[read("README.md", 0, 4, "real")]).is_empty());
+        assert_eq!(
+            Requirements::new("Read only README.md").read_paths,
+            ["README.md"]
+        );
+        assert_eq!(Requirements::new("Read `only`").read_paths, ["only"]);
+    }
+
     #[test]
     fn explicit_references_survive_subject_labels_and_preserve_spelling() {
         for (task, path) in [
@@ -1153,7 +1026,7 @@ mod inspection_target_tests {
             ("Read ./src/Exact.rs", "src/Exact.rs"),
             ("Read mod.rs in src/agent/", "src/agent/mod.rs"),
         ] {
-            let req = interpreted(task, json!({"type":"subject"}));
+            let req = grounded(task, json!({"type":"subject"}));
             assert_eq!(req.read_paths, [path], "{task}");
             assert!(!req.missing(&[]).is_empty());
             assert!(
@@ -1161,7 +1034,7 @@ mod inspection_target_tests {
                 "{task}"
             );
         }
-        let req = interpreted("Read MISSING.md", Value::Null);
+        let req = grounded("Read MISSING.md", Value::Null);
         assert!(
             req.missing(&[read("missing.md", 0, 4, "real")])
                 .iter()
@@ -1174,17 +1047,10 @@ mod inspection_target_tests {
             )])
             .is_empty()
         );
-        assert!(
-            req.read_blocker(&[observation(
-                "read_file",
-                json!({"ok":false,"path":"MISSING.md","error":"not found"})
-            )])
-            .is_some()
-        );
     }
     #[test]
     fn full_collection_needs_a_complete_listing_and_all_complete_reads() {
-        let req = interpreted("Read the files and report back", Value::Null);
+        let req = grounded("Read the files and report back", Value::Null);
         assert!(req.read_paths.is_empty());
         assert!(!req.missing(&[]).is_empty());
         let mut evidence = vec![listing(".", &["a.txt", "b.txt", "c.txt"], false)];
@@ -1205,7 +1071,7 @@ mod inspection_target_tests {
     }
     #[test]
     fn collection_scope_is_exact_and_empty_collections_are_valid() {
-        let req = interpreted("Read all files in src/", Value::Null);
+        let req = grounded("Read all files in src/", Value::Null);
         let mut evidence = vec![
             listing("src", &["src/A.txt"], false),
             read("other/A.txt", 0, 4, "real"),
@@ -1213,14 +1079,14 @@ mod inspection_target_tests {
         assert!(!req.missing(&evidence).is_empty());
         evidence.push(read("src/A.txt", 0, 4, "real"));
         assert!(req.missing(&evidence).is_empty());
-        let req = interpreted("Read the files", Value::Null);
+        let req = grounded("Read the files", Value::Null);
         assert!(req.missing(&[listing(".", &[], false)]).is_empty());
         assert!(!req.missing(&[listing(".", &[], true)]).is_empty());
         assert!(!req.missing(&[listing("elsewhere", &[], false)]).is_empty());
     }
     #[test]
     fn relevant_inspection_does_not_require_every_repository_file() {
-        let req = interpreted("Read relevant source files", Value::Null);
+        let req = grounded("Read relevant source files", Value::Null);
         assert!(
             req.missing(&[
                 listing(".", &["a.rs", "b.rs"], false),
@@ -1231,7 +1097,7 @@ mod inspection_target_tests {
     }
     #[test]
     fn unreadable_collection_members_and_changed_lengths_do_not_certify_coverage() {
-        let req = interpreted("Read the files", Value::Null);
+        let req = grounded("Read the files", Value::Null);
         let symlink = observation(
             "list_directory",
             json!({"ok":true,"path":".","truncated":false,
@@ -1249,12 +1115,12 @@ mod inspection_target_tests {
     }
     #[test]
     fn continuation_rebuilds_inspection_from_user_references_without_legacy_labels() {
-        let mut req = interpreted("Continue and report back. Do not edit files.", Value::Null);
+        let mut req = grounded("Continue and report back. Do not edit files.", Value::Null);
         req.revise_inspection(&[String::from("Read README.md. Do not edit files.")]);
         assert_eq!(req.read_paths, ["README.md"]);
         assert!(!req.requires_edit());
         assert!(req.missing(&[read("README.md", 0, 4, "real")]).is_empty());
-        let mut req = interpreted("Continue", Value::Null);
+        let mut req = grounded("Continue", Value::Null);
         req.revise_inspection(&[String::from(
             "Inspect this repository, read the files, report back.",
         )]);

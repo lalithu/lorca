@@ -57,7 +57,12 @@ async fn chat(State(s): State<Arc<Server>>, Json(v): Json<Value>) -> Json<Value>
                 }
             }}]})
         }
-    } else if v.get("tools").is_none() {
+    } else if v.get("tools").is_none()
+        || v["tools"].as_array().is_some_and(|ts| {
+            ts.iter()
+                .any(|t| t["function"]["name"] == "request_workspace")
+        })
+    {
         json!({"role":"assistant","content":"Hello. I remember our conversation."})
     } else if v["messages"]
         .as_array()
@@ -173,19 +178,12 @@ async fn unified_core_native_ollama_tools_permissions_and_model_lease() {
         .iter()
         .map(|v| v["function"]["name"].as_str().unwrap())
         .collect();
-    assert_eq!(
-        offered,
-        vec![
-            "apply_patch",
-            "exec_command",
-            "list_directory",
-            "read_file",
-            "request_user_input",
-            "search_files",
-            "tool_search",
-            "write_stdin"
-        ]
-    );
+    let schemas = lorca::agent::Registry::default().active_schemas();
+    let expected: Vec<_> = schemas
+        .iter()
+        .map(|s| s["function"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(offered, expected);
     let messages = chats[1]["messages"].as_array().unwrap();
     assert!(messages.iter().any(|m| m["tool_calls"][1]["id"] == "patch"));
     let patch_result = messages
@@ -412,15 +410,8 @@ async fn unified_greetings_followups_and_images_preserve_history_without_workspa
             .iter()
             .filter(|r| r["messages"].is_array())
             .collect::<Vec<_>>();
-        assert_eq!(models.len(), 8);
-        assert!(
-            models
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .all(|pair| routes_turn(pair[0]) && !routes_turn(pair[1]))
-        );
-        let models = models.into_iter().step_by(2).collect::<Vec<_>>();
+        assert_eq!(models.len(), 4);
+        assert!(models.iter().all(|r| !routes_turn(r)));
         assert!(
             models[2]["messages"]
                 .as_array()

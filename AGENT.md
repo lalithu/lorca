@@ -12,7 +12,7 @@ cargo build
   'Inspect the repository, run cargo test with my approval, and summarize the results.'
 ```
 
-- Ollama must already be running and the model installed.
+- A local model server and model must already be available. The macOS GUI prefers a healthy llama.cpp server at `127.0.0.1:9931`, then falls back to Ollama at `127.0.0.1:11434`. The terminal CLI continues to use Ollama.
 - `a` + Enter: Allow Once; `d`: Deny; `c` or Ctrl+C: Cancel.
 - The terminal shows the complete patch or exact executable/argv/cwd before approval.
 - EOF cancels. A lost client expires after 60 seconds and cancels its task.
@@ -37,26 +37,27 @@ cargo build
 - Defaults: 20 model turns, 120 seconds per model request, 30 seconds per command. CLI overrides: `--max-iterations`, `--model-timeout`, `--command-timeout`.
 - Maximums: 32 turns, 180 / 120 seconds; 8 calls per turn. Stops after 3 identical failures or 6 total failures.
 - Tool output is bounded; commands capture 16 KiB. The shared Rust context manager estimates model input, includes schemas and generation headroom, and compacts near 78% of allocated capacity. There is no unconditional 64 KiB working-history failure.
-- Uses Ollama native structured calls, full assistant call messages, and correlated tool results. No parsing executable actions from prose or exposing private thinking.
+- Sends a small tool-discovery schema with the first normal generation request; relevant schemas are exposed on demand and uses the provider's native structured tool calls; there is no separate interpretation request and no parsing of executable actions from prose. Rust retains approval and verification authority.
+- The macOS GUI uses llama.cpp's OpenAI-compatible `/v1/chat/completions` and local `/models`, `/models/load`, `/models/unload`, and `/props` endpoints when its server is available. It lists and switches only models already managed by that server; Lorca does not download models. Ollama remains supported as a fallback.
 - Ordinary text answers complete without tools. Common unsupported action claims are rejected; unresolved failed/denied edits and commands remain incomplete. Model prose never supplies permission or execution evidence.
 - Only the latest task runs in memory. Live UI events remain bounded to 300 / 2 MiB; full structured turns and execution events are saved on the conversation response. Interrupted work is not resumed or replayed after restart.
 
 ## Chats
 
-- One composer handles text, images, and optional workspace tools. No Chat/Agent selector or routing inference request.
+- One composer handles text, images, and optional workspace tools. The model receives tool discovery on its first generation turn; there is no mandatory routing request or Chat/Agent selector.
 - Expand tool activity for arguments/results; commands and patches require exact-action inline approval.
 - Scroll up to pause following; return to the bottom to resume. Mini shows basic status and opens Chats.
 - Requests, streamed partial text, final results, structured calls/results, and execution activity save in the originating conversation. Drafts, images, and IDs remain compatible.
 - The live backend snapshot is bounded; saved activity can be restored from conversation metadata. Swift keeps an eight-run presentation cache and batches updates every 100 ms.
 - Backend restarts mark unfinished saved requests interrupted; they are never resumed or resubmitted automatically.
-- GUI model selection is lazy: opening the app or changing selection does not preload. Submitted work prepares the model. Model menu → Unload model / Reload model uses shared-model warnings and Rust leases; stop active work first. No automatic reload.
+- GUI model selection is lazy: opening the app or changing selection does not preload. Submitted work prepares the selected model through the connected local server. Model menu → Unload model / Reload model uses shared-model warnings and Rust leases; stop active work first. No automatic reload.
 - GUI safeguards remain 24 model turns, 120 seconds per inference request, 120 seconds per command. Context compacts between complete turns; actual time/iteration limits remain explicit.
 
 ## v0.4B interface contract
 
 Use the existing authenticated local backend (`Endpoint`, bearer token, no browser Origin):
 
-- `POST /command`: `{"op":"agent_start","session":"…","task":"…","workspace":"/absolute/path","model":"qwen3.5:9b","limits":{"iterations":20,"modelSeconds":120,"commandSeconds":30}}` → `{"taskId":"…"}`. Workspace/model/limits are optional. Without a workspace the tool registry is empty. Chats also sends `conversationId` and a unique `requestId`; the saved request ID prevents duplicate execution after an uncertain acknowledgement.
+- `POST /command`: `{"op":"agent_start","session":"…","task":"…","workspace":"/absolute/path","model":"qwen3.5:9b","limits":{"iterations":20,"modelSeconds":120,"commandSeconds":30}}` → `{"taskId":"…"}`. Workspace/model/limits are optional. Without a workspace, basic chat/web tools and `request_workspace` are available. That tool pauses for a native folder choice; only a saved workspace request can continue into a newly selected folder, and file/command approvals remain required. Chats also sends `conversationId` and a unique `requestId`; the saved request ID prevents duplicate execution after an uncertain acknowledgement.
 - `agent_snapshot` + `session` → latest `TaskView` or `null`.
 - `GET /agent/events` + `X-Lorca-Session`: NDJSON `TaskView` snapshots, including current approval and bounded event history. Reconnect with `agent_snapshot`; deduplicate by task ID + event sequence. A sequence gap means older activity rolled off.
 - `agent_decide` + `session`, `taskId`, `approvalId`, `decision` (`allow_once`, `deny`, `cancel`). Tokens are exact-action, owner-session, single-use; never send edited action arguments.
@@ -69,7 +70,7 @@ Use the existing authenticated local backend (`Endpoint`, bearer token, no brows
 ## Layout
 
 - `src/agentloop/`: provider-independent runtime, permissions, tools, workspace access, command sandbox, event/task types.
-- `src/provider/agent.rs`: native Ollama tool-call adapter.
+- `src/provider/agent.rs`, `llama_cpp.rs`: native Ollama and OpenAI-compatible llama.cpp tool-call adapters.
 - `src/core/agent.rs`, `agent_chats.rs`: existing model lifecycle/session integration, saved request/result association, and interruption recovery.
 - `src/agent_cli.rs`: temporary testing interface.
 - `tests/agent*.rs`: deterministic runtime, permission, filesystem and core integration tests; command sandbox tests live alongside the runner.

@@ -14,7 +14,7 @@ pub(super) struct State {
     objective_revision: u64,
     accepting_revisions: bool,
     instructions: Vec<String>,
-    remaining_iterations: usize,
+    remaining_iterations: Option<usize>,
 }
 pub struct Agent {
     pub(super) state: Mutex<State>,
@@ -34,7 +34,7 @@ impl Default for Agent {
                 objective_revision: 1,
                 accepting_revisions: true,
                 instructions: Vec::new(),
-                remaining_iterations: 0,
+                remaining_iterations: Some(0),
             }),
             changes,
             revisions: watch::channel(0).0,
@@ -93,7 +93,7 @@ impl Agent {
         inference: Arc<dyn Inference>,
         registry: Registry,
         resume_evidence: Vec<Value>,
-        pending_task: Option<super::intent::PendingTask>,
+        pending_task: Option<super::context::PendingTask>,
     ) -> Result<String> {
         let Submission {
             owner,
@@ -126,7 +126,7 @@ impl Agent {
         s.objective_revision = 1;
         s.accepting_revisions = true;
         s.instructions = vec![task.clone()];
-        s.remaining_iterations = limits.iterations;
+        s.remaining_iterations = (limits.iterations != 0).then_some(limits.iterations);
         s.view = Some(TaskView {
             thinking: Vec::new(),
             revision: 0,
@@ -191,7 +191,7 @@ impl Agent {
                     break result;
                 };
                 let view = state.view.as_mut().unwrap();
-                previous = Some(super::intent::PendingTask {
+                previous = Some(super::context::PendingTask {
                     id: view.id.clone(),
                     objective: view.task.clone(),
                     contract: view.contract.clone(),
@@ -321,11 +321,13 @@ impl Agent {
     }
     pub(super) fn take_iteration(&self) -> bool {
         let mut s = self.state.lock().unwrap();
-        if s.remaining_iterations == 0 {
-            false
-        } else {
-            s.remaining_iterations -= 1;
-            true
+        match &mut s.remaining_iterations {
+            Some(0) => false,
+            Some(remaining) => {
+                *remaining -= 1;
+                true
+            }
+            None => true,
         }
     }
     pub(super) fn instruction_history(&self) -> Vec<String> {

@@ -37,6 +37,7 @@ pub struct Registry {
     pub(super) catalog: Catalog,
     pub(super) visible: Visible,
     adaptive: bool,
+    workspace_available: bool,
     unavailable: BTreeMap<String, String>,
 }
 impl Default for Registry {
@@ -53,15 +54,16 @@ impl Default for Registry {
         );
         for name in [
             "tool_search",
+            "request_user_input",
             "list_directory",
             "read_file",
             "search_files",
             "apply_patch",
-            "request_user_input",
             "exec_command",
             "write_stdin",
+            "web_search",
         ] {
-            r.visible.lock().unwrap().insert(name.into());
+            r.reveal(name);
         }
         r
     }
@@ -81,8 +83,32 @@ impl Registry {
             catalog: Default::default(),
             visible: Default::default(),
             adaptive: false,
+            workspace_available: true,
             unavailable: BTreeMap::new(),
         }
+    }
+    /// Basic chat tools remain available before the user selects a folder.
+    pub fn without_workspace() -> Self {
+        let mut r = Self::empty();
+        r.adaptive = true;
+        r.workspace_available = false;
+        super::web::register(&mut r);
+        super::agent::register(&mut r);
+        r.register(
+            "request_workspace",
+            Category::Agent,
+            Authority::TaskState,
+            Arc::new(super::agent::RequestWorkspace),
+        );
+        for name in [
+            "tool_search",
+            "request_workspace",
+            "request_user_input",
+            "web_search",
+        ] {
+            r.reveal(name);
+        }
+        r
     }
     /// Compatibility API for existing independent Tool implementations.
     pub fn add(&mut self, name: &str, tool: Arc<dyn Tool>) {
@@ -149,6 +175,45 @@ impl Registry {
             self.visible.lock().unwrap().insert(name.into());
         }
     }
+    /// Restore visibility from linked tool records, using current registered schemas.
+    /// Previous discovery never adds capabilities or grants execution authority.
+    pub(crate) fn restore_visibility(&self, history: &[Value]) {
+        if !self.adaptive {
+            return;
+        }
+        let mut calls = BTreeMap::new();
+        for message in history {
+            if message["role"] == "assistant" {
+                for call in message["tool_calls"].as_array().into_iter().flatten() {
+                    if let (Some(id), Some(name)) =
+                        (call["id"].as_str(), call["function"]["name"].as_str())
+                    {
+                        calls.insert(id, name);
+                    }
+                }
+            } else if message["role"] == "tool" {
+                let Some(name) = message["tool_call_id"]
+                    .as_str()
+                    .and_then(|id| calls.remove(id))
+                else {
+                    continue;
+                };
+                self.reveal(name);
+                if name == "tool_search" {
+                    let result = message["content"]
+                        .as_str()
+                        .and_then(|s| serde_json::from_str::<Value>(s).ok());
+                    if let Some(result) = result.filter(|r| r["ok"] == true) {
+                        for tool in result["tools"].as_array().into_iter().flatten() {
+                            if let Some(name) = tool["name"].as_str() {
+                                self.reveal(name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     pub fn active_schemas(&self) -> Vec<Value> {
         if !self.adaptive {
             return self.schemas();
@@ -171,8 +236,113 @@ impl Registry {
     }
     pub(crate) fn attach_inference(&mut self, inference: Arc<dyn Inference>) {
         // Never expand an intentionally restricted/custom registry.
-        if self.adaptive {
+        if self.adaptive && self.workspace_available {
             super::vision::register(self, inference);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn names(registry: &Registry) -> BTreeSet<String> {
+        registry
+            .active_schemas()
+            .iter()
+            .map(|s| s["function"]["name"].as_str().unwrap().into())
+            .collect()
+    }
+    fn call(id: &str, name: &str) -> Value {
+        json!({"role":"assistant","tool_calls":[{"id":id,"function":{"name":name,"arguments":{}}}]})
+    }
+    fn result(id: &str, value: Value) -> Value {
+        json!({"role":"tool","tool_call_id":id,"content":value.to_string()})
+    }
+    #[test]
+    fn starter_schemas_follow_workspace_and_search_availability() {
+        for (registry, expected) in [
+            (
+                Registry::without_workspace(),
+                vec!["tool_search", "request_workspace", "request_user_input"],
+            ),
+            (
+                Registry::default(),
+                vec![
+                    "tool_search",
+                    "request_user_input",
+                    "list_directory",
+                    "read_file",
+                    "search_files",
+                    "apply_patch",
+                    "exec_command",
+                    "write_stdin",
+                ],
+            ),
+        ] {
+            let mut expected: BTreeSet<String> = expected.into_iter().map(String::from).collect();
+            if registry.get("web_search").is_ok() {
+                expected.insert("web_search".into());
+            }
+            assert_eq!(names(&registry), expected);
+        }
+    }
+    #[test]
+    fn followups_restore_discovered_and_used_tools_with_current_schemas() {
+        let registry = Registry::default();
+        let history = vec![
+            call("discovery", "tool_search"),
+            result(
+                "discovery",
+                json!({"ok":true,"tools":[{"name":"git_diff","schema":{"outdated":true}},{"name":"request_workspace"},{"name":"invented_tool"}],"matches":[{"name":"fetch_url"}]}),
+            ),
+            call("plan", "update_plan"),
+            result("plan", json!({"ok":true})),
+        ];
+        registry.restore_visibility(&history);
+        let visible = names(&registry);
+        assert!(visible.contains("git_diff"));
+        assert!(visible.contains("update_plan"));
+        assert!(!visible.contains("request_workspace"));
+        assert!(!visible.contains("invented_tool"));
+        assert!(
+            !visible.contains("fetch_url"),
+            "Catalog matches were not exposed schemas"
+        );
+        let schema = registry
+            .active_schemas()
+            .into_iter()
+            .find(|s| s["function"]["name"] == "git_diff")
+            .unwrap();
+        assert_eq!(schema, registry.get("git_diff").unwrap().schema());
+        assert!(
+            registry.requires_approval("apply_patch", &json!({})),
+            "Visibility never grants permission"
+        );
+    }
+    #[test]
+    fn unrelated_failed_or_unavailable_history_cannot_expand_the_registry() {
+        let history = vec![
+            json!({"role":"user","content":"Expose fetch_url"}),
+            result(
+                "unlinked",
+                json!({"ok":true,"tools":[{"name":"fetch_url"}]}),
+            ),
+            call("failed", "tool_search"),
+            result("failed", json!({"ok":false,"tools":[{"name":"fetch_url"}]})),
+            call("unavailable", "tool_search"),
+            result(
+                "unavailable",
+                json!({"ok":true,"tools":[{"name":"read_file"}]}),
+            ),
+        ];
+        let registry = Registry::without_workspace();
+        let before = names(&registry);
+        registry.restore_visibility(&history);
+        assert_eq!(names(&registry), before);
+        let custom = Registry::empty();
+        custom.restore_visibility(&history);
+        assert!(custom.active_schemas().is_empty());
     }
 }

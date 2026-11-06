@@ -21,6 +21,7 @@ struct ChatMessage: Identifiable, Equatable, Codable, Sendable {
     var agentWorkspace: String?
     var agentEvents: [AgentEvent]?
     var agentUsage: ChatUsage?
+    var agentModel: String?
 
     init(role: Role, content: String, attachments: [ChatAttachment] = []) {
         id = UUID()
@@ -29,7 +30,7 @@ struct ChatMessage: Identifiable, Equatable, Codable, Sendable {
         self.attachments = attachments
     }
 
-    private enum CodingKeys: CodingKey { case id, role, content, attachments, agentTaskId, agentRequestId, agentKind, agentStatus, agentWorkspace, agentEvents, agentUsage }
+    private enum CodingKeys: CodingKey { case id, role, content, attachments, agentTaskId, agentRequestId, agentKind, agentStatus, agentWorkspace, agentEvents, agentUsage, agentModel }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(UUID.self, forKey: .id)
@@ -43,6 +44,7 @@ struct ChatMessage: Identifiable, Equatable, Codable, Sendable {
         agentWorkspace = try values.decodeIfPresent(String.self, forKey: .agentWorkspace)
         agentEvents = try values.decodeIfPresent([AgentEvent].self, forKey: .agentEvents)
         agentUsage = try values.decodeIfPresent(ChatUsage.self, forKey: .agentUsage)
+        agentModel = try values.decodeIfPresent(String.self, forKey: .agentModel)
     }
 }
 

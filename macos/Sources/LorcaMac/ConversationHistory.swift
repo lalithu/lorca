@@ -5,6 +5,7 @@ struct ConversationHistory: View {
     @State private var renameID: UUID?
     @State private var title = ""
     @State private var deleting: Conversation?
+    @State private var hoveredID: UUID?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -26,6 +27,16 @@ struct ConversationHistory: View {
                     .buttonStyle(.plain).help(conversation.title)
                     .accessibilityLabel("Open chat: \(conversation.title)")
                     .accessibilityIdentifier("conversation-\(conversation.id)")
+                    Button { store.deleteConversation(conversation.id) } label: {
+                        Image(systemName: "xmark").font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.red).frame(width: 18, height: 18).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain).help("Delete chat")
+                    .opacity(hoveredID == conversation.id ? 1 : 0)
+                    .allowsHitTesting(hoveredID == conversation.id)
+                    .accessibilityHidden(hoveredID != conversation.id)
+                    .accessibilityLabel("Delete chat: \(conversation.title)")
+                    .accessibilityIdentifier("delete-conversation-\(conversation.id)")
                     Menu { actions(conversation) } label: { Image(systemName: "ellipsis").font(.system(size: 11)) }
                         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                         .accessibilityLabel("Chat actions: \(conversation.title)")
@@ -33,6 +44,10 @@ struct ConversationHistory: View {
                 .padding(.horizontal, 8).padding(.vertical, 7)
                 .background(store.library.selectedID == conversation.id ? Color.primary.opacity(0.075) : .clear,
                     in: RoundedRectangle(cornerRadius: 7))
+                .onHover { hovering in
+                    if hovering { hoveredID = conversation.id }
+                    else if hoveredID == conversation.id { hoveredID = nil }
+                }
                 .contextMenu { actions(conversation) }
             }
         }

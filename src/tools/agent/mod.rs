@@ -1,6 +1,7 @@
 use super::*;
 mod request_permissions;
 mod request_user_input;
+pub(crate) use request_user_input::RequestWorkspace;
 mod tool_search;
 mod update_plan;
 pub(crate) use update_plan::WorkingCheckpoint;

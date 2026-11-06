@@ -80,7 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if showFailures && !failures.isEmpty {
                 let failure = NSAlert()
                 failure.messageText = "Model unloading wasn’t confirmed"
-                failure.informativeText = "Ollama may still have these models loaded: \(failures.joined(separator: ", "))."
+                failure.informativeText = "The local model server may still have these models loaded: \(failures.joined(separator: ", "))."
                 failure.addButton(withTitle: "Quit")
                 failure.runModal()
             }
@@ -92,7 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = title
-        alert.informativeText = "Ollama shares models between apps. Unloading also affects any other client using \(models.joined(separator: ", "))."
+        alert.informativeText = "The local model server shares models between apps. Unloading also affects any other client using \(models.joined(separator: ", "))."
         return alert
     }
 

@@ -122,6 +122,48 @@ async fn multiple_calls_return_real_results_and_ordered_stable_events() {
     assert_eq!(view.events.last().unwrap().kind, "task_completed");
 }
 #[tokio::test]
+async fn read_only_folder_report_completes_without_verification_retry() {
+    let root = Temp::new();
+    let files = ["README.md", "index.html", "lalith.txt"];
+    for file in files {
+        std::fs::write(root.0.join(file), file).unwrap();
+    }
+    let mock = Mock::new(vec![
+        calls(vec![("list_directory", json!({"path":"."}))]),
+        calls(
+            files
+                .into_iter()
+                .map(|path| ("read_file", json!({"path":path})))
+                .collect(),
+        ),
+        json!({"role":"assistant","content":"The folder contains a README, an HTML page, and a text file."}),
+    ]);
+    let agent = Arc::new(Agent::default());
+    agent
+        .start(
+            "test",
+            &format!(
+                "Take a look at {}. Read only. Report back what you learned.",
+                root.0.display()
+            ),
+            &root.0,
+            Limits::default(),
+            mock.clone(),
+            Registry::default(),
+        )
+        .unwrap();
+
+    let view = wait(&agent, |v| !v.status.active()).await;
+    assert_eq!(view.status, Status::Completed);
+    assert_eq!(mock.seen.lock().unwrap().len(), 3);
+    assert!(
+        view.events
+            .iter()
+            .all(|event| event.kind != "task_continued")
+    );
+}
+
+#[tokio::test]
 async fn approval_is_exact_single_use_and_patch_is_verified() {
     let root = Temp::new();
     std::fs::write(root.0.join("a.rs"), "old\n").unwrap();
@@ -291,7 +333,7 @@ async fn repeated_failures_limit_and_single_active_task_are_enforced() {
             .is_err()
     );
     let view = wait(&agent, |v| !v.status.active()).await;
-    assert_eq!(view.status, Status::WaitingForInput);
+    assert_eq!(view.status, Status::Incomplete);
     assert!(view.result.unwrap().contains("repeated unsuccessful"));
     assert_eq!(mock.seen.lock().unwrap().len(), 3);
     let mock = Mock::new(vec![calls(vec![("list_directory", json!({"path":"."}))])]);
@@ -479,8 +521,18 @@ async fn a_text_claim_does_not_replace_verified_execution() {
         ]),
     );
     let done = wait(&agent, |v| !v.status.active()).await;
-    assert_eq!(done.status, Status::Failed);
-    assert!(done.result.unwrap().contains("Unverified"));
+    assert_eq!(done.status, Status::Completed);
+    assert!(
+        !done
+            .events
+            .iter()
+            .any(|event| event.kind == "tool_started" || event.kind == "file_changes")
+    );
+    assert!(
+        done.events
+            .iter()
+            .any(|event| event.kind == "task_verification" && event.data["evidence"] == json!([]))
+    );
 }
 #[tokio::test]
 async fn discovery_resolves_guessed_paths_and_revalidates_references() {
@@ -844,4 +896,35 @@ async fn failed_command_can_run_again_after_a_verified_fix() {
         std::fs::read_to_string(root.0.join("a.rs")).unwrap(),
         "fixed"
     );
+}
+
+#[tokio::test]
+async fn uncapped_task_keeps_working_past_thirty_two_turns() {
+    let root = Temp::new();
+    let mut turns = Vec::new();
+    for index in 0..35 {
+        let name = format!("entry-{index}");
+        std::fs::create_dir(root.0.join(&name)).unwrap();
+        std::fs::write(root.0.join(&name).join(format!("{name}.txt")), "").unwrap();
+        turns.push(calls(vec![("list_directory", json!({"path":name}))]));
+    }
+    turns.push(finish());
+    let model = Mock::new(turns);
+    let agent = Arc::new(Agent::default());
+    agent
+        .start(
+            "test",
+            "Gather workspace observations",
+            &root.0,
+            Limits {
+                iterations: 0,
+                ..Default::default()
+            },
+            model.clone(),
+            Registry::default(),
+        )
+        .unwrap();
+    let view = wait(&agent, |v| !v.status.active()).await;
+    assert_eq!(view.status, Status::Completed, "{:?}", view.result);
+    assert_eq!(model.seen.lock().unwrap().len(), 36);
 }

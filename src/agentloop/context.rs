@@ -1,8 +1,33 @@
 //! Task context references; the existing bounded context engine owns compaction.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PendingTask {
+    pub id: String,
+    pub objective: String,
+    pub contract: Option<serde_json::Value>,
+    #[serde(default)]
+    pub completed: bool,
+}
+
+impl PendingTask {
+    pub fn from_contract(
+        id: String,
+        objective: String,
+        contract: Option<serde_json::Value>,
+        completed: bool,
+    ) -> Self {
+        Self {
+            id,
+            objective,
+            contract,
+            completed,
+        }
+    }
+}
+
 pub(super) struct RunHistory {
     pub messages: Vec<serde_json::Value>,
     pub evidence: Vec<serde_json::Value>,
-    pub pending_task: Option<super::intent::PendingTask>,
+    pub pending_task: Option<PendingTask>,
 }
 use serde::Serialize;
 #[derive(Debug, Serialize)]
@@ -42,7 +67,7 @@ pub(super) fn operational(
     // The original instruction is pinned separately by Context::fit. Outcome
     // and restrictions are verbatim copies/substrings, not independent policy.
     json!({"context":contract.context,"requiresActionApproval":contract.authority.requires_action_approval,
-        "scope":contract.authority.scope,"requirements":contract.objective.completion,"operations":operations})
+        "scope":contract.authority.scope,"operations":operations})
 }
 
 #[cfg(test)]

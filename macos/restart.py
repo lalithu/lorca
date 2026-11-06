@@ -109,7 +109,7 @@ def ready(root, pid):
     return None
 
 
-def restart(app, root):
+def restart(app, root, ui_only=False):
     app = app.resolve()
     core = app / 'Contents/MacOS/lorca-core'
     ui = app / 'Contents/MacOS/lorca'
@@ -122,23 +122,31 @@ def restart(app, root):
     for pid in old_ui:
         os.kill(pid, signal.SIGTERM)
     wait_for(lambda: all(not alive(pid) for pid in old_ui), 45, 'Lorca to save and close')
-    if old_backend is not None and alive(old_backend):
+    if not ui_only and old_backend is not None and alive(old_backend):
         if backend_pid(root) != old_backend:
             raise RuntimeError('Backend ownership changed during restart; refusing to stop a different process')
         os.kill(old_backend, signal.SIGTERM)
         wait_for(lambda: not alive(old_backend), 25, 'the previous backend to stop')
-    if backend_pid(root) is not None:
-        raise RuntimeError('A backend still owns the lock; the rebuilt app was not launched')
     environment = dict(os.environ, LORCA_DATA_DIR=str(root))
-    backend = subprocess.Popen([str(core), 'serve'], env=environment, stdin=subprocess.DEVNULL,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-    def new_backend_ready():
-        if backend.poll() is not None:
-            raise RuntimeError(f'Rebuilt backend exited with code {backend.returncode}')
-        return ready(root, backend.pid)
-    port = wait_for(new_backend_ready, 10, 'the rebuilt backend health check')
-    if backend_pid(root) != backend.pid or not mapped_to(backend.pid, core):
-        raise RuntimeError('Backend executable does not match this rebuilt bundle')
+    existing = backend_pid(root)
+    if ui_only and existing is not None:
+        pid = existing
+        port = ready(root, pid)
+        if port is None:
+            raise RuntimeError('Existing backend is not ready; run a full lorca rebuild')
+    else:
+        if existing is not None:
+            raise RuntimeError('A backend still owns the lock; the rebuilt app was not launched')
+        backend = subprocess.Popen([str(core), 'serve'], env=environment, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        pid = backend.pid
+        def new_backend_ready():
+            if backend.poll() is not None:
+                raise RuntimeError(f'Rebuilt backend exited with code {backend.returncode}')
+            return ready(root, pid)
+        port = wait_for(new_backend_ready, 10, 'the rebuilt backend health check')
+        if backend_pid(root) != pid or not mapped_to(pid, core):
+            raise RuntimeError('Backend executable does not match this rebuilt bundle')
     subprocess.run(['/usr/bin/open', '-n', '--env', 'LORCA_DATA_DIR=' + str(root), str(app)], env=environment, check=True)
     def connected_ui():
         for pid, path in ui_processes().items():
@@ -149,12 +157,17 @@ def restart(app, root):
                 return pid
         return None
     new_ui = wait_for(connected_ui, 20, 'the rebuilt UI to connect to the fresh backend')
-    print(f'Fresh restart verified: UI PID {new_ui}; backend PID {backend.pid}. Data preserved.', flush=True)
+    print(f'Fresh {"UI " if ui_only else ""}restart verified: UI PID {new_ui}; backend PID {pid}. Data preserved.', flush=True)
 
 
 if __name__ == '__main__':
     try:
         data = Path(os.environ.get('LORCA_DATA_DIR', str(Path.home() / 'Library/Application Support/lorca')))
-        restart(Path(sys.argv[1]), data.resolve())
+        import argparse
+        parser = argparse.ArgumentParser(description=__doc__)
+        parser.add_argument('app', type=Path)
+        parser.add_argument('--ui-only', action='store_true')
+        args = parser.parse_args()
+        restart(args.app, data.resolve(), ui_only=args.ui_only)
     except (OSError, RuntimeError, subprocess.SubprocessError) as error:
         raise SystemExit(f'Lorca rebuild restart failed: {error}')

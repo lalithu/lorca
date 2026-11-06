@@ -56,11 +56,29 @@ final class ChatStore: ObservableObject {
         didSet { defaults.set(appearance.rawValue, forKey: "appearance"); appearanceChanged?() }
     }
     @Published private(set) var isConnected = false
+    @Published private(set) var providerName = "Ollama"
     @Published private(set) var isChecking = false
     @Published private(set) var isGenerating = false
     @Published private(set) var receivedText = false
     @Published var error: String?
     @Published private(set) var usage = ChatUsage()
+    private var contextKey: String { "contextWindow.\(providerName).\(selectedModel)" }
+    var contextOverride: Int? {
+        get { defaults.object(forKey: contextKey) as? Int }
+        set {
+            defaults.set(newValue, forKey: contextKey)
+            objectWillChange.send()
+        }
+    }
+    @Published private(set) var allocatedContext: Int?
+    private var contextTarget: Int {
+        let memory = ProcessInfo.processInfo.physicalMemory
+        return memory < 24 * 1024 * 1024 * 1024 ? 8192 : 16384
+    }
+    var recommendedContext: Int { min(contextTarget, allocatedContext ?? contextTarget) }
+    var workingContext: Int {
+        min(contextOverride ?? contextTarget, allocatedContext ?? 16384)
+    }
     var displayUsage: ChatUsage {
         if let task=agent.latest,task.conversationId==library.selectedID,task.model==nil || task.model==selectedModel {return task.usage ?? ChatUsage(contextUsed:nil)}
         return usage
@@ -244,6 +262,8 @@ final class ChatStore: ObservableObject {
         modelSession.apply(session)
         models = session.models
         isConnected = session.isConnected
+        allocatedContext = session.allocatedContext
+        providerName = session.provider == "llama.cpp" ? "llama.cpp" : "Ollama"
         applying = true
         selectedModel = session.model
         applying = false
@@ -258,15 +278,35 @@ final class ChatStore: ObservableObject {
     func send() {
         guard !closing, canSend, agent.reserveSubmission(allowActive: canSteerActive) else { return }
         let conversation = library.selectedID, request = UUID(), text = draft, model = selectedModel
-        let workspace=agentWorkspace, effort=thinkingEffort.rawValue
+        let workspace=agentWorkspace, effort=thinkingEffort.rawValue, contextWindow=contextOverride ?? contextTarget
         let continueTaskID = continuation?.conversation == conversation ? continuation?.task : nil
         let preceding = pending
         pending = Task { [weak self] in
             await preceding?.value
             guard let self, !self.closing, !Task.isCancelled else { return }
-            let accepted = await self.agent.submit(task: text, workspace: workspace, conversation: conversation, request: request, model: model, effort: effort, continueTaskID: continueTaskID)
+            let accepted = await self.agent.submit(task: text, workspace: workspace, conversation: conversation, request: request, model: model, effort: effort, continueTaskID: continueTaskID, contextWindow: contextWindow)
             if accepted && self.continuation?.task == continueTaskID { self.continuation = nil }
             _ = await self.perform(["op": "snapshot"])
+        }
+    }
+    func chooseWorkspaceForTask() {
+        guard !agent.busy, let id = messages.last?.agentTaskId, let task = agent.runs[id],
+              task.conversationId == library.selectedID,
+              task.status == .waitingForInput, task.workspace.isEmpty else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Choose a folder for this conversation"
+        panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
+        let conversation = library.selectedID
+        guard let window = NSApp.keyWindow else { return }
+        panel.beginSheetModal(for: window) { response in
+            guard response == .OK, let url = panel.url,
+                  self.library.selectedID == conversation, self.messages.last?.agentTaskId == task.id,
+                  !self.agent.busy else { return }
+            self.agent.workspaces[conversation] = url
+            if self.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                self.draft = "Use the selected folder to continue the task."
+            }
+            self.send()
         }
     }
     func sendChat() { send() }

@@ -202,19 +202,29 @@ impl Core {
                                 m.extra.get("agentStatus").and_then(Value::as_str),
                                 Some("incomplete" | "failed" | "cancelled")
                             )))
-                    && m.extra
-                        .get("agentWorkspace")
-                        .and_then(Value::as_str)
-                        .or_else(|| {
-                            request_for(chat, m)
-                                .and_then(|request| request.extra.get("agentWorkspace"))
-                                .and_then(Value::as_str)
-                        })
-                        .unwrap_or("")
-                        == workspace
-                            .as_ref()
-                            .map(|w| w.root.to_str().unwrap_or(""))
+                    && ((workspace.is_some()
+                        && m.extra
+                            .get("agentWorkspace")
+                            .and_then(Value::as_str)
                             .unwrap_or("")
+                            .is_empty()
+                        && m.extra.get("agentStatus") == Some(&json!("waiting_for_input"))
+                        && m.extra
+                            .get("agentContract")
+                            .is_some_and(|c| c["workspaceRequested"] == true))
+                        || m.extra
+                            .get("agentWorkspace")
+                            .and_then(Value::as_str)
+                            .or_else(|| {
+                                request_for(chat, m)
+                                    .and_then(|request| request.extra.get("agentWorkspace"))
+                                    .and_then(Value::as_str)
+                            })
+                            .unwrap_or("")
+                            == workspace
+                                .as_ref()
+                                .map(|w| w.root.to_str().unwrap_or(""))
+                                .unwrap_or(""))
             }) {
                 let original = previous
                     .extra
@@ -222,7 +232,7 @@ impl Core {
                     .and_then(Value::as_str)
                     .or_else(|| request_for(chat, previous).map(|request| request.content.as_str()))
                     .ok_or("Waiting task has no saved objective")?;
-                pending_task = Some(crate::agentloop::intent::PendingTask {
+                pending_task = Some(crate::agentloop::context::PendingTask {
                     completed: false,
                     id: previous.extra["agentTaskId"].as_str().unwrap_or("").into(),
                     objective: original.into(),
@@ -233,7 +243,7 @@ impl Core {
                     .get("agentContract")
                     .filter(|c| matches!(c["relation"].as_str(), Some("status" | "conversation")))
                     .and_then(|c| c.get("pendingTask"))
-                    && let Ok(task) = serde_json::from_value::<crate::agentloop::intent::PendingTask>(
+                    && let Ok(task) = serde_json::from_value::<crate::agentloop::context::PendingTask>(
                         saved.clone(),
                     )
                 {
@@ -273,7 +283,7 @@ impl Core {
                 .and_then(Value::as_str)
                 .or_else(|| request_for(chat, previous).map(|m| m.content.as_str()))
             {
-                pending_task = Some(crate::agentloop::intent::PendingTask {
+                pending_task = Some(crate::agentloop::context::PendingTask {
                     id: previous.extra["agentTaskId"].as_str().unwrap_or("").into(),
                     objective: objective.into(),
                     contract: previous.extra.get("agentContract").cloned(),
@@ -313,13 +323,27 @@ impl Core {
                 core: self.clone(),
                 session: session.into(),
                 model,
+                engine: s
+                    .clients
+                    .get(session)
+                    .ok_or("Session expired; reconnect.")?
+                    .engine,
+                context_window: match v.get("contextWindow").filter(|value| !value.is_null()) {
+                    None => None,
+                    Some(value) => Some(
+                        value
+                            .as_u64()
+                            .filter(|n| (2048..=131072).contains(n))
+                            .ok_or("Context window must be between 2048 and 131072 tokens")?,
+                    ),
+                },
                 effort: serde_json::from_value(v.get("effort").cloned().unwrap_or(json!("off")))
                     .map_err(|e| format!("Invalid thinking effort: {e}"))?,
             }),
             if workspace.is_some() {
                 Registry::default()
             } else {
-                Registry::empty()
+                Registry::without_workspace()
             },
             resume_evidence,
             pending_task,

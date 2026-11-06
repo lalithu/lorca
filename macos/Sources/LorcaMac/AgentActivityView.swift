@@ -2,6 +2,7 @@ import SwiftUI
 
 struct AgentActivityView: View {
     @ObservedObject var store: AgentStore
+    @AppStorage("showModelReasoning") private var showModelReasoning = true
     let taskID: String
     var savedMessage: ChatMessage? = nil
     var textSize: CGFloat = 14
@@ -9,6 +10,7 @@ struct AgentActivityView: View {
     @State private var clarificationAnswer = ""
     var expandTools = false
     var onContinue: (() -> Void)? = nil
+    var onChooseWorkspace: (() -> Void)? = nil
     private var snapshot: AgentTaskSnapshot? {
         if let current = store.runs[taskID] { return current }
         guard let message = savedMessage,
@@ -24,9 +26,9 @@ struct AgentActivityView: View {
             let activities = events == task.events ? (store.activities[task.id] ?? AgentActivity.make(from: events)) : AgentActivity.make(from: events)
             let clarification = AgentPresentation.clarification(task, events: events)
             let question = clarification?["question"].string
-            let timeline = AgentTimelineItem.make(text: text, events: events, activities: activities, thinking: task.thinking ?? [])
+            let timeline = AgentTimelineItem.make(text: text, events: events, activities: activities, thinking: showModelReasoning ? (task.thinking ?? []) : [])
             VStack(alignment: .leading, spacing: 10) {
-                AgentRunHeader(store: store, task: task, text: text)
+                if task.status != .completed { AgentRunHeader(store: store, task: task, text: text) }
                 if events.first?.sequence ?? 0 > 1 {
                     Text("Earlier activity is unavailable.").font(.caption).foregroundStyle(.secondary)
                 }
@@ -52,7 +54,9 @@ struct AgentActivityView: View {
                 }
                 if let clarification {
                     MarkdownText(text: question ?? "Your answer is needed", size: textSize, showsCopyButton: false)
-                    if let choose = onChoose {
+                    if clarification["needsWorkspace"].boolean == true, let chooseWorkspace = onChooseWorkspace {
+                        Button("Choose folder…", action: chooseWorkspace).buttonStyle(.bordered).controlSize(.small)
+                    } else if let choose = onChoose {
                         HStack {
                             TextField("Your answer", text: $clarificationAnswer).textFieldStyle(.roundedBorder).onSubmit {
                                 if !clarificationAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { choose(clarificationAnswer) }
@@ -64,6 +68,10 @@ struct AgentActivityView: View {
                             VStack(alignment: .leading) { ForEach(clarification["options"].strings, id: \.self) { option in Button(option) { choose(option) } } }
                         }.buttonStyle(.bordered).controlSize(.small)
                     }
+                }
+                if !task.status.active {
+                    ResponseDetails(usage: task.usage ?? savedMessage?.agentUsage, model: task.model ?? savedMessage?.agentModel,
+                        elapsed: AgentElapsed(events: events)?.elapsedSeconds, text: text)
                 }
                 if task.status.active && task.generating == true {
                     Text("Generating response…").font(.caption).foregroundStyle(.secondary)
@@ -100,7 +108,7 @@ private struct AgentRunHeader: View {
                 } else { Text(status) }
                 if task.correctionPending {Text("Correction queued · waiting for a safe boundary").foregroundStyle(Color.lorcaBlue)}
                 Spacer(minLength: 0)
-                if !text.isEmpty {Button("Copy response") {NativeClipboard.copy(text)}.buttonStyle(.borderless).accessibilityLabel("Copy whole response")}
+
                 if task.status.active {
                     Button("Cancel") { Task { await store.cancel() } }.buttonStyle(.borderless)
                         .disabled(store.cancelling || task.owner != store.sessionID || !store.connected)

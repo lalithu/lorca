@@ -5,6 +5,8 @@ pub(super) struct CoreInference {
     pub(super) core: Arc<Core>,
     pub(super) session: String,
     pub(super) model: String,
+    pub(super) engine: provider::Engine,
+    pub(super) context_window: Option<u64>,
     pub(super) effort: crate::agent_types::ThinkingEffort,
 }
 /// Keep the existing model preparation future alive until it has cleaned up its
@@ -43,9 +45,6 @@ impl CoreInference {
     }
 }
 impl Inference for CoreInference {
-    fn interprets_tasks(&self) -> bool {
-        true
-    }
     fn effort(&self) -> crate::agent_types::ThinkingEffort {
         self.effort
     }
@@ -63,10 +62,13 @@ impl Inference for CoreInference {
     fn capacity(&self) -> FutureResult<'_, Option<u64>> {
         Box::pin(async {
             self.ready().await?;
-            Ok(self
+            let allocated = self
                 .core
-                .context_limit(&self.core.host(&self.session)?, &self.model)
-                .await)
+                .context_limit_for(self.engine, &self.core.host(&self.session)?, &self.model)
+                .await;
+            Ok(self.context_window.map_or(allocated, |target| {
+                Some(target.min(allocated.unwrap_or(crate::context::DEFAULT_CAPACITY)))
+            }))
         })
     }
     fn generate_stream<'a>(
@@ -77,12 +79,9 @@ impl Inference for CoreInference {
     ) -> FutureResult<'a, Turn> {
         Box::pin(async move {
             self.ready().await?;
-            let provider = provider::agent::OllamaAgent {
-                client: self.core.client.clone(),
-                host: self.core.host(&self.session)?,
-                model: self.model.clone(),
-            };
-            provider.generate_stream(messages, tools, updates).await
+            self.provider()
+                .generate_stream(messages, tools, updates)
+                .await
         })
     }
     fn generate_budgeted<'a>(
@@ -92,15 +91,9 @@ impl Inference for CoreInference {
         budget: crate::context::GenerationBudget,
         updates: &'a (dyn Fn(ModelUpdate) + Send + Sync),
     ) -> FutureResult<'a, Turn> {
-        self.generate_at_stage(
-            messages,
-            tools,
-            budget,
-            updates,
-            crate::agent_types::ThinkingStage::Execution,
-        )
+        self.generate_at_stage(messages, tools, budget, updates, self.effort)
     }
-    fn generate_interpretation<'a>(
+    fn generate_public_reply<'a>(
         &'a self,
         messages: &'a [Value],
         tools: &'a [Value],
@@ -112,7 +105,7 @@ impl Inference for CoreInference {
             tools,
             budget,
             updates,
-            crate::agent_types::ThinkingStage::Interpretation,
+            crate::agent_types::ThinkingEffort::Off,
         )
     }
 }
@@ -123,30 +116,49 @@ impl CoreInference {
         tools: &'a [Value],
         budget: crate::context::GenerationBudget,
         updates: &'a (dyn Fn(ModelUpdate) + Send + Sync),
-        stage: crate::agent_types::ThinkingStage,
+        effort: crate::agent_types::ThinkingEffort,
     ) -> FutureResult<'a, Turn> {
         Box::pin(async move {
             self.ready().await?;
-            let provider = provider::agent::OllamaAgent {
-                client: self.core.client.clone(),
-                host: self.core.host(&self.session)?,
-                model: self.model.clone(),
-            };
+            let provider = self.provider();
             let forward = |update| match update {
                 ModelUpdate::Reasoning {
                     request_id,
                     state,
                     text,
-                } => self
-                    .core
-                    .agent()
-                    .reasoning_update(request_id, stage, state, text),
+                } => self.core.agent().reasoning_update(
+                    request_id,
+                    crate::agent_types::ThinkingStage::Execution,
+                    state,
+                    text,
+                ),
+                ModelUpdate::Usage(mut usage) => {
+                    if self.context_window.is_some() {
+                        usage.context_limit = usage
+                            .context_limit
+                            .map(|limit| limit.min(budget.context_limit));
+                    }
+                    updates(ModelUpdate::Usage(usage));
+                }
                 other => updates(other),
             };
             provider
-                .generate_for_effort(messages, tools, budget, self.effort, &forward)
+                .generate_for_effort(messages, tools, budget, effort, &forward)
                 .await
         })
+    }
+}
+impl CoreInference {
+    fn provider(&self) -> provider::llama_cpp::LocalAgent {
+        provider::llama_cpp::LocalAgent {
+            client: self.core.client.clone(),
+            host: self
+                .core
+                .host(&self.session)
+                .unwrap_or_else(|_| self.engine.default_host().into()),
+            model: self.model.clone(),
+            engine: self.engine,
+        }
     }
 }
 

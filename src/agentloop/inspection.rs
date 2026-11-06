@@ -1,7 +1,15 @@
 //! Read requirements grounded in user references and task-local tool evidence.
 //! Model target labels describe intent; they cannot manufacture filenames.
-use super::{intent::InspectionCoverage, recovery::path_key};
-use serde::Serialize;
+use super::recovery::path_key;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InspectionCoverage {
+    Relevant,
+    AllImmediate,
+    AllRecursive,
+}
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -224,6 +232,7 @@ pub(super) fn explicit_files(task: &str) -> Vec<String> {
                     "files"
                         | "file"
                         | "everything"
+                        | "only"
                         | "all"
                         | "it"
                         | "this"
@@ -475,66 +484,6 @@ impl Collection {
                     && v["error"].is_null()
                     && v["path"].as_str().and_then(path_key) == path_key(&self.directory)
             })
-    }
-
-    pub(super) fn lists_member(&self, history: &[Value], path: &str) -> bool {
-        if self.unresolved {
-            return false;
-        }
-        let Some(path) = path_key(path) else {
-            return false;
-        };
-        let parent = path.rsplit_once('/').map_or(".", |(parent, _)| parent);
-        let mut dir = parent;
-        let root = path_key(&self.directory).unwrap_or_default();
-        {
-            let scoped = Collection {
-                directory: dir.into(),
-                ..self.clone()
-            };
-            let Some(list) = scoped.latest_listing(history) else {
-                return false;
-            };
-            let child = &path;
-            if !list["entries"].as_array().is_some_and(|entries| {
-                entries.iter().any(|entry| {
-                    entry["kind"] == "file"
-                        && entry["path"].as_str().and_then(path_key).as_ref() == Some(child)
-                })
-            }) {
-                return false;
-            }
-            if path_key(dir).as_deref() == Some(root.as_str()) {
-                return true;
-            }
-            if self.coverage != InspectionCoverage::AllRecursive {
-                return false;
-            }
-            // Confirm the ancestor chain is actually in the recursive collection.
-            while dir != "." {
-                let ancestor = dir.rsplit_once('/').map_or(".", |(ancestor, _)| ancestor);
-                let scoped = Collection {
-                    directory: ancestor.into(),
-                    ..self.clone()
-                };
-                let Some(list) = scoped.latest_listing(history) else {
-                    return false;
-                };
-                if !list["entries"].as_array().is_some_and(|entries| {
-                    entries.iter().any(|entry| {
-                        entry["kind"] == "directory"
-                            && entry["path"].as_str().and_then(path_key).as_deref() == Some(dir)
-                    })
-                }) {
-                    return false;
-                }
-                if path_key(ancestor).as_deref() == Some(root.as_str()) {
-                    return true;
-                }
-                dir = ancestor;
-            }
-            false
-        }
     }
 
     pub(super) fn missing(&self, history: &[Value]) -> Vec<String> {

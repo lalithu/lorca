@@ -3,8 +3,8 @@ pub struct SearchFiles;
 impl Tool for SearchFiles {
     fn schema(&self) -> Value {
         let (description, properties, required) = (
-            "Search filenames and UTF-8 contents for a literal query. Skips build and hidden folders; bounded scan.",
-            json!({"query":{"type":"string","description":"Literal substring, NOT a regex. Example: reqwest"},"path":{"type":"string"}}),
+            "Find files or matching text with a nonempty literal query. Use list_directory to browse folders and read_file to read contents. Skips build and hidden folders; bounded scan.",
+            json!({"query":{"type":"string","minLength":1,"maxLength":200,"description":"Literal substring, NOT a regex; 1–200 UTF-8 bytes. Example: reqwest"},"path":{"type":"string"}}),
             vec!["query"],
         );
         schema("search_files", description, properties, required)

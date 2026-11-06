@@ -29,10 +29,6 @@ pub struct Turn {
     pub finish_reason: FinishReason,
 }
 pub trait Inference: Send + Sync {
-    /// Real adapters opt into bounded task interpretation; simple test/custom adapters remain compatible.
-    fn interprets_tasks(&self) -> bool {
-        false
-    }
     fn effort(&self) -> ThinkingEffort {
         ThinkingEffort::Off
     }
@@ -64,8 +60,9 @@ pub trait Inference: Send + Sync {
     ) -> FutureResult<'a, Turn> {
         self.generate_stream(messages, tools, updates)
     }
-    /// Same inference request, tagged explicitly by the interpretation caller for presentation.
-    fn generate_interpretation<'a>(
+    /// One missing-answer recovery, using the same tools and budget.
+    /// Providers with thinking controls can disable it for this request.
+    fn generate_public_reply<'a>(
         &'a self,
         messages: &'a [Value],
         tools: &'a [Value],
@@ -108,6 +105,7 @@ pub enum ModelUpdate {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 pub struct Limits {
+    /// Zero allows the task to continue without a fixed turn cap.
     pub iterations: usize,
     pub model_seconds: u64,
     pub command_seconds: u64,
@@ -123,11 +121,11 @@ impl Default for Limits {
 }
 impl Limits {
     pub fn validate(&self) -> Result<()> {
-        if !(1..=32).contains(&self.iterations)
+        if self.iterations > 32
             || !(1..=180).contains(&self.model_seconds)
             || !(1..=120).contains(&self.command_seconds)
         {
-            return Err("Limits: iterations 1–32, modelSeconds 1–180, commandSeconds 1–120".into());
+            return Err("Limits: iterations 0–32 (0 means no fixed cap), modelSeconds 1–180, commandSeconds 1–120".into());
         }
         Ok(())
     }

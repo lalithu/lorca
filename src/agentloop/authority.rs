@@ -169,6 +169,23 @@ impl Authority {
     pub fn new(instruction: &str) -> Self {
         let requirements = super::verification::Requirements::new(instruction);
         let commands_forbidden = prohibits_mutating_commands(instruction, &requirements);
+        let targets = if instruction.to_lowercase().contains("other")
+            && EDIT_RESTRICTIONS
+                .iter()
+                .any(|p| instruction.to_lowercase().contains(p))
+        {
+            super::verification::requested_paths(instruction)
+                .into_iter()
+                .filter(|p| {
+                    requirements
+                        .edit_targets()
+                        .iter()
+                        .any(|t| t.eq_ignore_ascii_case(p))
+                })
+                .collect()
+        } else {
+            vec![]
+        };
         Self {
             instruction: instruction.into(),
             patch_requirements: requirements,
@@ -176,6 +193,7 @@ impl Authority {
             scope: Scope {
                 read_only: prohibits_edits(instruction),
                 commands_forbidden,
+                targets,
                 ..Scope::default()
             },
         }
@@ -185,23 +203,17 @@ impl Authority {
 mod contract_policy_tests {
     use super::*;
     fn corrected_authority(current: &str, raw: &str) -> Authority {
-        let intent = super::super::intent::Interpretation {
-            relation: super::super::intent::Relation::Correct,
-            objective: current.into(),
-            outcomes: vec![super::super::intent::Outcome {
-                kind: super::super::intent::OutcomeKind::Edit,
-                target: Some("CHOSEN.md".into()),
-                inspection: None,
-            }],
-            edit_targets: vec!["CHOSEN.md".into()],
-            forbidden_targets: vec![],
-            read_only: false,
-            commands_forbidden: true,
-            clarification: None,
+        let previous = super::super::context::PendingTask {
+            completed: false,
+            id: "old-task".into(),
+            objective: raw.into(),
+            contract: Some(
+                json!({"authority":{"constraint_instruction":raw,"scope":{"read_only":false,"commands_forbidden":true,"targets":["CHOSEN.md"],"forbidden":[]}}}),
+            ),
         };
-        Authority::interpreted(
-            raw,
-            &intent,
+        Authority::continued(
+            &previous,
+            current,
             &super::super::verification::Requirements::new(current),
         )
     }
@@ -246,22 +258,15 @@ mod contract_policy_tests {
         );
     }
     fn revise(old: &str, scope: Scope, latest: &str) -> Authority {
-        let previous = super::super::intent::PendingTask {
+        let previous = super::super::context::PendingTask {
             completed: false,
             id: "old-task".into(),
             objective: old.into(),
             contract: Some(json!({"authority":{"constraint_instruction":old,"scope":scope}})),
         };
-        let mut intent: super::super::intent::Interpretation = serde_json::from_value(json!({
-            "relation":"correct","objective":"Create CHOSEN.md","outcomes":[{"kind":"edit","target":"CHOSEN.md"}],
-            "edit_targets":[],"forbidden_targets":[],"read_only":false,"commands_forbidden":false,"clarification":null
-        })).unwrap();
-        // Deliberately permissive model output must not erase inherited limits.
-        intent.edit_targets.clear();
         Authority::continued(
             &previous,
             latest,
-            &intent,
             &super::super::verification::Requirements::new(latest),
         )
     }
@@ -369,30 +374,10 @@ pub struct Scope {
     pub forbidden: Vec<String>,
 }
 impl Authority {
-    pub(super) fn interpreted(
-        instruction: &str,
-        i: &super::intent::Interpretation,
-        requirements: &super::verification::Requirements,
-    ) -> Self {
-        Self {
-            instruction: instruction.into(),
-            patch_requirements: requirements.clone(),
-            requires_action_approval: true,
-            scope: Scope {
-                read_only: i.read_only || prohibits_edits(instruction),
-                commands_forbidden: i.commands_forbidden
-                    || prohibits_mutating_commands(instruction, requirements),
-                targets: i.edit_targets.clone(),
-                forbidden: i.forbidden_targets.clone(),
-            },
-        }
-    }
     /// Only explicit grants in the latest user instruction revise earlier limits.
-    /// Model-authored scope may narrow these bounds, never broaden them.
     pub(super) fn continued(
-        previous: &super::intent::PendingTask,
+        previous: &super::context::PendingTask,
         latest: &str,
-        intent: &super::intent::Interpretation,
         requirements: &super::verification::Requirements,
     ) -> Self {
         let prior = previous.contract.as_ref();
@@ -402,7 +387,7 @@ impl Authority {
             .unwrap_or(&previous.objective);
         let mut previous_scope: Scope = prior
             .and_then(|c| serde_json::from_value(c["authority"]["scope"].clone()).ok())
-            .unwrap_or_default();
+            .unwrap_or_else(|| Self::new(old).scope);
         let clauses = latest.replace(". ", "\n").replace(';', "\n");
         let mut grants = Vec::new();
         let mut commands_allowed = false;
@@ -436,8 +421,7 @@ impl Authority {
                 }
             }
         }
-        // Keep explicitly prohibited files even if the old interpretation omitted
-        // them. A grant for one file cannot unlock unrelated prohibited paths.
+        // Keep explicitly prohibited files from the original user instruction. A grant for one file cannot unlock unrelated prohibited paths.
         for clause in old.replace(". ", "\n").replace(';', "\n").lines() {
             if EDIT_RESTRICTIONS
                 .iter()
@@ -460,10 +444,12 @@ impl Authority {
                     replace_ascii_case_insensitive(&raw, marker, "superseded command restriction");
             }
         }
-        let mut value = Self::interpreted(&format!("{raw}\n{latest}"), intent, requirements);
-        value.scope.commands_forbidden = intent.commands_forbidden
-            || prohibits_edits(latest)
-            || (!commands_allowed && previous_scope.commands_forbidden);
+        let mut value = Self::new(&format!("{raw}\n{latest}"));
+        value.patch_requirements = requirements.clone();
+        value.scope.commands_forbidden = !commands_allowed
+            && (previous_scope.commands_forbidden
+                || prohibits_mutating_commands(latest, requirements));
+        value.scope.forbidden = previous_scope.forbidden.clone();
         if previous_scope.read_only && grants.is_empty() {
             value.scope.read_only = true;
         }
@@ -489,12 +475,7 @@ impl Authority {
         {
             value.scope.targets = grants.clone();
         }
-        value.scope.forbidden.extend(
-            previous_scope
-                .forbidden
-                .into_iter()
-                .filter(|p| !grants.contains(p)),
-        );
+        value.scope.forbidden.retain(|p| !grants.contains(p));
         value.scope.forbidden.sort();
         value.scope.forbidden.dedup();
         value

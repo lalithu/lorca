@@ -1,6 +1,6 @@
 # 🌊 Lorca
 
-A local-first AI workspace for macOS: native SwiftUI Dashboard and floating orca Mini, backed by one Rust core and Ollama.
+A local-first AI workspace for macOS: native SwiftUI Dashboard and floating orca Mini, backed by one Rust core and a local Ollama or llama.cpp server.
 
 ## Features
 
@@ -18,17 +18,17 @@ flowchart LR
     UI[SwiftUI Dashboard + Mini] --> Core[Rust core]
     CLI[Terminal client] --> Core
     Core --> Loop[agentloop: objective / context / authority / verification]
-    Loop <--> Ollama
+    Loop <--> Providers[Ollama or llama.cpp]
     Loop --> Tools[tools: registry / validation / workspace / execution]
     Core --> Storage[Local persistence]
 ```
 
 ## Build and run
 
-Requires macOS 14+, Rust/Cargo, Xcode or Swift command-line tools, and Ollama with an installed model. Job Apps requires Python 3.
+Requires macOS 14+, Rust/Cargo, Xcode or Swift command-line tools, and either Ollama or a running llama.cpp server with a model already available. Lorca does not download models. Job Apps requires Python 3.
 
 ```sh
-ollama pull qwen3.5:9b   # Keep Ollama running.
+ollama pull qwen3.5:9b   # Optional: install a model in Ollama.
 cargo install --path . --locked --force
 ./macos/build.sh
 lorca main              # Dashboard; Mini is optional.
@@ -37,6 +37,8 @@ lorca                   # Terminal chat.
 
 After installing, use `lorca rebuild` from any directory to rebuild the core, CLI and app, update the installed command, and gracefully restart the UI and backend. Conversations, unsent drafts, settings and Job Apps data are preserved. The shared Ollama service and loaded models are left alone.
 
+For UI changes, use `lorca rebuild ui`: incrementally compiles Swift in debug mode, signs and relaunches the app, and reuses the bundled Rust core and running backend. No Cargo build or CLI installation. Run a full rebuild once first, and after Rust, protocol, or bundled-resource changes. Saved data is preserved; active work is cancelled when the UI closes.
+
 ## Repository
 
 ```text
@@ -44,7 +46,7 @@ src/
   agentloop/       Single runtime; objective, context, authority, verification
   tools/           Registry, native tools, workspace and command sandbox
   agent_types.rs   Shared protocol/tool types without runtime dependencies
-  provider/        Ollama structured tool-call streaming
+  provider/        Ollama + llama.cpp native tool-call streaming
   core/            Sessions, conversations, model lifecycle and task association
   context.rs       Shared bounded context and compaction
   storage.rs       Atomic conversation/image persistence

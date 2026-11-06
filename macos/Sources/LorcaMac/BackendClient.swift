@@ -10,6 +10,7 @@ struct BackendSnapshot: Codable {
 struct BackendSession: Codable {
     let id: String
     let selectedId: UUID
+    let provider: String?
     let model: String
     let loadingModel: String?
     let activeModel: String?
@@ -17,6 +18,7 @@ struct BackendSession: Codable {
     let models: [String]
     let isConnected: Bool
     let error: String?
+    var allocatedContext: Int? = nil
     let usage: ChatUsage
 }
 struct BackendTurn: Codable {
@@ -117,7 +119,7 @@ final class BackendClient: BackendTransport {
         if previous?.token == endpoint?.token, sessionID != nil,
            let data = try? await command(["op": "snapshot"]),
            let snapshot = try? JSONDecoder().decode(BackendSnapshot.self, from: data) { return snapshot }
-        let data = try await command(["op": "connect", "model": model, "host": "http://127.0.0.1:11434"])
+        let data = try await command(["op": "connect", "model": model, "provider": "auto"])
         struct Connected: Decodable { let session: String; let state: BackendSnapshot }
         let result = try JSONDecoder().decode(Connected.self, from: data)
         sessionID = result.session
@@ -190,6 +192,8 @@ struct ChatUsage: Codable, Equatable, Sendable {
     var promptTokens: UInt64?
     var generatedTokens: UInt64?
     var generationDurationNs: UInt64?
+    var promptDurationNs: UInt64?
+    var promptTokensPerSecond: Double?
     var fraction: Double? {
         guard let used = contextUsed, let limit = contextLimit, limit > 0 else { return nil }
         return min(1, max(0, Double(used) / Double(limit)))

@@ -15,6 +15,7 @@ impl Core {
                     return Err("Invalid model name".into());
                 }
                 s.view.sessions[si].model = model.into();
+                s.view.sessions[si].allocated_context = None;
                 s.view.sessions[si].usage = Usage::default();
             }
             "new" => {

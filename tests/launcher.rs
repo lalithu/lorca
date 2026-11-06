@@ -39,3 +39,20 @@ fn normal_help_includes_rebuild_and_main_help_remains_available() {
     assert!(result.status.success());
     assert!(String::from_utf8_lossy(&result.stdout).contains("dashboard and Mini"));
 }
+
+#[test]
+fn ui_rebuild_help_and_invalid_options_do_not_launch_or_build() {
+    let result = Command::new(env!("CARGO_BIN_EXE_lorca"))
+        .args(["rebuild", "ui", "--help"])
+        .current_dir(std::env::temp_dir())
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    assert!(String::from_utf8_lossy(&result.stdout).contains("only Swift"));
+    let result = Command::new(env!("CARGO_BIN_EXE_lorca"))
+        .args(["rebuild", "ui", "unexpected"])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("takes no options"));
+}
