@@ -370,6 +370,7 @@ impl Agent {
                 continue;
             }
             if turn.calls.is_empty() {
+                registry.record_history(&turn.message);
                 // A final reply ends generation. The audit records what the
                 // tools proved independently of what the model said.
                 let current = resume_evidence
