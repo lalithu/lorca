@@ -1,5 +1,6 @@
 use super::*;
 mod history;
+mod compact_context;
 mod request_permissions;
 mod request_user_input;
 pub(crate) use request_user_input::RequestWorkspace;
@@ -7,6 +8,12 @@ mod tool_search;
 mod update_plan;
 pub(crate) use update_plan::WorkingCheckpoint;
 pub(super) fn register(r: &mut Registry) {
+    r.register(
+        "compact_context",
+        Category::Agent,
+        Authority::TaskState,
+        Arc::new(compact_context::CompactContext),
+    );
     r.register(
         "search_history",
         Category::Agent,
