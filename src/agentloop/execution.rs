@@ -31,7 +31,9 @@ impl Agent {
             w.restore_references(&history);
         }
         registry.restore_visibility(&history);
-        registry.seed_history(&history);
+        registry.seed_history(&history)?;
+        let original_task = task.clone();
+        task = registry.virtualize_user_input(&original_task)?;
         let mut messages = vec![
             json!({"role":"system","content":format!("{}\nWorkspace: {}\nUnavailable tools: {}\nVerified initial entries: {}",SYSTEM,
             w.map(|w|format!("{} (active, already selected). Use workspace tools directly; paths are relative to this folder. Do not request workspace selection again.", w.root.display())).unwrap_or_else(||"None selected. Answer conversationally. If the task needs local files or commands, call request_workspace to let the user choose a folder, then pause.".into()),
@@ -39,9 +41,12 @@ impl Agent {
             bounded(&w.map(|w|w.references()).unwrap_or_default().join(", "),6000))}),
         ];
         messages.extend(history);
+        registry.virtualize_messages(&mut messages)?;
         if messages.last().is_none_or(|m| m["role"] != "user") {
             let user = json!({"role":"user","content":task});
-            registry.record_history(&user);
+            if original_task == task {
+                registry.record_history(&user)?;
+            }
             messages.push(user);
         }
         let mut context = crate::context::Context::default();
@@ -66,6 +71,7 @@ impl Agent {
                     .as_ref()
                     .and_then(|c| c["objective"]["original_instruction"].as_str())
                     .unwrap_or(&previous.objective);
+                let original = registry.virtualize_user_input(original)?;
                 task = format!("{original}\nLatest user instruction: {latest_instruction}");
                 messages.push(json!({"role":"system","content":"Continue the explicitly linked unfinished task. Preserve its original scope and restrictions. The latest user instruction may refine it; do not treat prior tool results as fresh verification unless they are linked verified records."}));
             }
@@ -370,7 +376,7 @@ impl Agent {
                 continue;
             }
             if turn.calls.is_empty() {
-                registry.record_history(&turn.message);
+                registry.record_history(&turn.message)?;
                 // A final reply ends generation. The audit records what the
                 // tools proved independently of what the model said.
                 let current = resume_evidence
@@ -426,7 +432,7 @@ impl Agent {
                     json!({"content":bounded(&turn.content,4000)}),
                 );
             }
-            registry.record_history(&turn.message);
+            registry.record_history(&turn.message)?;
             messages.push(turn.message);
             let checkpoint_only = turn.calls.iter().any(|call| call.name == "update_plan")
                 && turn
@@ -668,7 +674,7 @@ impl Agent {
                     }
                 }
                 let full = json!({"role":"tool","tool_name":call.name,"tool_call_id":call.id,"content":value.to_string()});
-                registry.record_history(&full);
+                registry.record_history(&full)?;
                 self.state
                     .lock()
                     .unwrap()
