@@ -31,6 +31,7 @@ impl Agent {
             w.restore_references(&history);
         }
         registry.restore_visibility(&history);
+        registry.seed_history(&history);
         let mut messages = vec![
             json!({"role":"system","content":format!("{}\nWorkspace: {}\nUnavailable tools: {}\nVerified initial entries: {}",SYSTEM,
             w.map(|w|format!("{} (active, already selected). Use workspace tools directly; paths are relative to this folder. Do not request workspace selection again.", w.root.display())).unwrap_or_else(||"None selected. Answer conversationally. If the task needs local files or commands, call request_workspace to let the user choose a folder, then pause.".into()),
