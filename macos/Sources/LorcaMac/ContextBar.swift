@@ -22,21 +22,48 @@ struct ContextBar: View {
             .accessibilityLabel("Context settings")
             .accessibilityValue("\(percent), \(used) of \(limit) tokens")
             .popover(isPresented: $showingSettings, arrowEdge: .top) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Context window").font(.headline)
-                    LabeledContent("Server allocation", value: store.allocatedContext?.formatted() ?? "Not reported")
-                    LabeledContent("Next task", value: store.workingContext.formatted())
-                    Picker("Working window", selection: $store.contextOverride) {
-                        Text("Recommended (\(store.recommendedContext.formatted()))").tag(nil as Int?)
-                        ForEach([2048, 4096, 8192, 16384, 32768, 65536, 131072], id: \.self) { size in
-                            Text(size.formatted()).tag(Optional(size))
-                        }
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text("Context").font(.headline)
+                        Spacer()
+                        Text("\(used) / \(limit)").font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
                     }
-                    Text("Recommended starts with a conservative target based on this Mac’s memory. Lorca caps requests at the reported server allocation. Changes apply to the next task.")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    GeometryReader { geometry in
+                        Capsule().fill(.primary.opacity(0.09))
+                            .overlay(alignment: .leading) {
+                                Capsule().fill(.cyan)
+                                    .frame(width: geometry.size.width * (usage.fraction ?? 0))
+                            }
+                    }.frame(height: 5)
+                    HStack {
+                        Text("\(percent) last reported use")
+                        Spacer()
+                        if let n=usage.contextLimit, let u=usage.contextUsed {
+                            Text("\(max(0,n-u).formatted()) remaining")
+                        }
+                    }.font(.caption).foregroundStyle(.secondary)
+                    Divider()
+                    Text("Working context for next task").fontWeight(.medium)
+                    ContextChoices(store: store, allocated: store.allocatedContext, compact: true)
+                    Button("Use recommended \(store.recommendedContext.formatted())") {
+                        store.contextOverride = nil
+                    }.font(.caption).buttonStyle(.link)
+                    Divider()
+                    Text("Last confirmed inference").font(.caption).foregroundStyle(.secondary)
+                    if let count=usage.promptTokens {
+                        LabeledContent("Prompt evaluated", value: "\(count.formatted()) tokens")
+                    }
+                    if let count=usage.generatedTokens {
+                        LabeledContent("Tokens generated", value: "\(count.formatted()) tokens")
+                    }
+                    if let speed=usage.tokensPerSecond {
+                        LabeledContent("Generation speed", value: String(format: "%.1f t/s",speed))
+                    }
+                    Text("These are inference statistics, not live KV-cache measurements. Older turns remain recoverable through Lorca memory.")
+                        .font(.caption2).foregroundStyle(.tertiary)
                 }
-                .padding().frame(width: 320)
+                .padding().frame(width: 360)
             }
             GeometryReader { geometry in
                 Capsule().fill(Color.cyan.opacity(0.15))
