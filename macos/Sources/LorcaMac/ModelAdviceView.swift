@@ -64,13 +64,31 @@ struct ModelAdviceView: View {
             INSTALLED MODELS
 
             """
+            if let context = result["allocatedContext"] as? NSNumber {
+                text += "CURRENT ALLOCATED CONTEXT: \(context.intValue) tokens (reported by backend)\n\n"
+            } else {
+                text += "CURRENT ALLOCATED CONTEXT: unknown; no verified context-fit recommendation\n\n"
+            }
             for entry in result["installedModels"] as? [[String: Any]] ?? [] {
                 let model = entry["model"] as? String ?? "Unnamed"
                 let parameters = entry["parameterSize"] as? String ?? "unknown parameters"
                 let quant = entry["quantization"] as? String ?? "unknown quantization"
                 let fits = (entry["likelyFitsWeights"] as? Bool).map { $0 ? "likely" : "unlikely" } ?? "unverified"
-                text += "\(model) · \(parameters) · \(quant) · weights fit: \(fits)\n"
+                text += "\(model) · \(parameters) · \(quant) · new-load weight headroom: \(fits)\n"
                 if let confidence = entry["confidence"] as? String { text += "  \(confidence)\n" }
+                if let context = entry["context"] as? NSNumber {
+                    text += "  Allocated context: \(context.intValue) tokens\n"
+                }
+                for (key, label) in [("minMemory", "Minimum"), ("maxMemory", "Maximum snapshot"), ("effectiveMemory", "Actual allocation")] {
+                    if let measurement = entry[key] as? [String: Any] {
+                        let context = (measurement["n_ctx"] as? NSNumber)?.intValue ?? 0
+                        text += "  \(label): \(context) context tokens\n"
+                        for device in measurement["devices"] as? [[String: Any]] ?? [] {
+                            let bytes = ["model", "context", "compute"].reduce(0.0) { $0 + ((device[$1] as? NSNumber)?.doubleValue ?? 0) }
+                            text += String(format: "    %@: %.2f GiB (weights + KV + compute)\n", device["name"] as? String ?? "device", bytes / 1_073_741_824)
+                        }
+                    }
+                }
             }
             if online {
                 text += "\nHUGGING FACE GGUF DISCOVERY (fit not yet verified)\n\n"
@@ -82,7 +100,7 @@ struct ModelAdviceView: View {
                     text += "\nCatalog unavailable: \(warning)\n"
                 }
             }
-            text += "\nNo models were downloaded or reconfigured. Check model licenses, tool-call support and GGUF memory/context measurements before installing."
+            text += "\nAlready-loaded models occupy RAM; headroom estimates describe an additional allocation.\n\nNo models were downloaded or reconfigured. Check model licenses, tool-call support and GGUF memory/context measurements before installing."
             report = text
         } catch {
             report = "Could not retrieve model advice: \(friendlyError(error))"

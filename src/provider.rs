@@ -36,7 +36,7 @@ pub async fn detect_local_engine(client: &reqwest::Client) -> Engine {
     if healthy
         && model_list(client, Engine::LlamaCpp, Engine::LlamaCpp.default_host())
             .await
-            .is_ok()
+            .is_ok_and(|(models, _)| !models.is_empty())
     {
         Engine::LlamaCpp
     } else {
