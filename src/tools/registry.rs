@@ -70,12 +70,47 @@ impl Default for Registry {
     }
 }
 impl Registry {
-    pub(crate) fn seed_history(&self, messages: &[Value]) {
-        self.history.reset(messages);
+    /// Set once for an ordinary conversation, never for a restricted custom registry.
+    pub(crate) fn attach_history(&self, root: &std::path::Path, conversation: &str) -> Result<()> {
+        if !self.adaptive {
+            return Err("Restricted tool registries cannot attach chat history".into());
+        }
+        self.history.attach(root, conversation)
     }
 
-    pub(crate) fn record_history(&self, message: &Value) {
-        self.history.record(message);
+    pub(crate) fn seed_history(&self, messages: &[Value]) -> Result<()> {
+        self.history.reset(messages)
+    }
+
+    pub(crate) fn record_history(&self, message: &Value) -> Result<()> {
+        self.history.record(message)
+    }
+
+    /// The original is durably recorded before replacement. The manifest
+    /// cannot be treated as full task evidence or permission.
+    pub(crate) fn virtualize_user_input(&self, text: &str) -> Result<String> {
+        if text.chars().count() <= crate::memory::ingest::DIRECT_INPUT_CHARS {
+            return Ok(text.to_owned());
+        }
+        if self.history.manifest_for(text).is_none() {
+            self.history.record(&json!({"role":"user","content":text}))?;
+        }
+        let manifest = self.history.manifest_for(text)
+            .ok_or("Could not index oversized user input")?;
+        Ok(crate::memory::ingest::envelope(&manifest))
+    }
+
+    pub(crate) fn virtualize_messages(&self, messages: &mut [Value]) -> Result<()> {
+        for message in messages {
+            if message["role"] == "user" {
+                if let Some(raw) = message["content"].as_str() {
+                    if raw.chars().count() > crate::memory::ingest::DIRECT_INPUT_CHARS {
+                        message["content"] = json!(self.virtualize_user_input(raw)?);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(crate) async fn settle_for_revision(&self) -> Result<()> {
