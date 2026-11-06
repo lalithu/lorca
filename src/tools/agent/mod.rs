@@ -8,6 +8,18 @@ mod update_plan;
 pub(crate) use update_plan::WorkingCheckpoint;
 pub(super) fn register(r: &mut Registry) {
     r.register(
+        "search_history",
+        Category::Agent,
+        Authority::TaskState,
+        Arc::new(history::HistoryTool::search(r.history.clone())),
+    );
+    r.register(
+        "get_history_record",
+        Category::Agent,
+        Authority::TaskState,
+        Arc::new(history::HistoryTool::read(r.history.clone())),
+    );
+    r.register(
         "tool_search",
         Category::Agent,
         Authority::TaskState,
