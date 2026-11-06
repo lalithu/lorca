@@ -14,7 +14,24 @@ impl Core {
                 let chat = &s.view.conversations[ci];
                 let format = v["format"].as_str().unwrap_or("markdown");
                 let content = match format {
-                    "json" => serde_json::to_string_pretty(chat).map_err(|e| e.to_string())?,
+                    "json" => {
+                        use base64::Engine;
+                        let mut embedded = serde_json::Map::new();
+                        for attachment in chat.images() {
+                            let file = self.repository.image_path(&attachment.id)
+                                .map_err(|e| e.to_string())?;
+                            let bytes = std::fs::read(file).map_err(|e| e.to_string())?;
+                            embedded.insert(
+                                attachment.id.clone(),
+                                json!(base64::engine::general_purpose::STANDARD.encode(bytes)),
+                            );
+                        }
+                        serde_json::to_string_pretty(&json!({
+                            "format":"lorca-full-chat-v1",
+                            "conversation":chat,
+                            "embeddedImagesBase64":embedded
+                        })).map_err(|e| e.to_string())?
+                    },
                     "markdown" => export_markdown(chat),
                     _ => return Err("Export format must be json or markdown".into()),
                 };
