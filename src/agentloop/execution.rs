@@ -148,7 +148,6 @@ impl Agent {
             view.contract = Some(saved);
         }
         self.emit("task_contract", json!(contract));
-        let requirements = &contract.objective.completion;
         let mut capacity = capacity.unwrap_or(crate::context::DEFAULT_CAPACITY);
         let mut evidence = Vec::<Value>::new();
         let mut completed = HashMap::<String, Value>::new();
@@ -654,7 +653,6 @@ impl Agent {
                     failure.result = value.clone();
                     failure.invalid_arguments = invalid_arguments;
                     if !invalid_arguments
-                        && !(requirements.reports_failure() && value["exitCode"].is_number())
                         && matches!(
                             call.name.as_str(),
                             "apply_patch" | "run_command" | "exec_command" | "write_stdin"
