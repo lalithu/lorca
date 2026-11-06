@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="850" viewBox="0 0 1440 850" role="img" aria-labelledby="title desc">
+<title id="title">Lorca v0.5 Target Agent Architecture</title>
+<desc id="desc">User input enters Lorca's modular Rust harness: input virtualization, context checkpoints, searchable archive, tools, and output continuation. The harness exchanges prompts, decisions and observations with a local model. Model owns reasoning, harness owns execution and memory. Hardware advisor is last.</desc>
+<defs>
+ <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0 0L8 3L0 6Z" fill="#087f84"/></marker>
+ <style>
+ .bg{fill:#f6fafb}.frame{fill:#fff;stroke:#b6cfd2;stroke-width:2}
+ .head{fill:#153042}.box{fill:#edf8f6;stroke:#69a9a4;stroke-width:1.5}
+ .model{fill:#eef2ff;stroke:#8191ba;stroke-width:2}.dark{font-family:Inter,Arial,sans-serif;fill:#173241}
+ .white{font-family:Inter,Arial,sans-serif;fill:#fff}.title{font-size:39px;font-weight:750}
+ .sub{font-size:19px}.boxhead{font-size:18px;font-weight:700}.body{font-size:15px}
+ .note{font-size:15px;fill:#4b6775}.wire{stroke:#087f84;stroke-width:4;fill:none;marker-end:url(#arrow)}
+ </style>
+</defs>
+<rect class="bg" width="1440" height="850"/>
+<text x="720" y="64" text-anchor="middle" class="dark title">Lorca v0.5 · Agent = Model + Harness</text>
+<text x="720" y="100" text-anchor="middle" class="dark sub">Finite model inference · Persistent memory-backed execution</text>
+<rect x="30" y="265" width="230" height="192" rx="18" class="frame"/>
+<text x="145" y="310" text-anchor="middle" class="dark boxhead">USER INPUT</text>
+<text x="145" y="340" text-anchor="middle" class="dark body">Prompts · Documents</text>
+<text x="145" y="363" text-anchor="middle" class="dark body">Long tasks · History</text>
+<text x="145" y="402" text-anchor="middle" class="note">Originals preserved</text>
+<path d="M260 360H304" class="wire"/>
+<rect x="300" y="148" width="816" height="488" rx="22" class="frame"/>
+<path d="M322 148H1094Q1116 148 1116 170V223H300V170Q300 148 322 148Z" class="head"/>
+<text x="708" y="186" text-anchor="middle" class="white" font-size="28" font-weight="740">LORCA RUST HARNESS</text>
+<text x="708" y="213" text-anchor="middle" class="white" font-size="15">Resource budgeting · Durable memory · Authorization · Agent loop</text>
+<rect x="332" y="256" width="236" height="150" rx="14" class="box"/>
+<text x="450" y="291" text-anchor="middle" class="dark boxhead">INPUT INGESTION</text>
+<text x="450" y="322" text-anchor="middle" class="dark body">Oversized source chunks</text>
+<text x="450" y="345" text-anchor="middle" class="dark body">Bounded source manifests</text>
+<text x="450" y="368" text-anchor="middle" class="dark body">Exact retrieval IDs</text>
+<rect x="589" y="256" width="236" height="150" rx="14" class="box"/>
+<text x="707" y="291" text-anchor="middle" class="dark boxhead">CONTEXT ENGINE</text>
+<text x="707" y="322" text-anchor="middle" class="dark body">Protected operational state</text>
+<text x="707" y="345" text-anchor="middle" class="dark body">Stable checkpoint epochs</text>
+<text x="707" y="368" text-anchor="middle" class="dark body">Model-directed notes</text>
+<rect x="846" y="256" width="236" height="150" rx="14" class="box"/>
+<text x="964" y="291" text-anchor="middle" class="dark boxhead">SEARCHABLE MEMORY</text>
+<text x="964" y="322" text-anchor="middle" class="dark body">Append-only original records</text>
+<text x="964" y="345" text-anchor="middle" class="dark body">Search + exact chunk reads</text>
+<text x="964" y="368" text-anchor="middle" class="dark body">No permission by recall</text>
+<rect x="332" y="434" width="365" height="151" rx="14" class="box"/>
+<text x="514" y="469" text-anchor="middle" class="dark boxhead">TOOL ORCHESTRATION</text>
+<text x="514" y="500" text-anchor="middle" class="dark body">Discover → Validate → Approve → Execute</text>
+<text x="514" y="523" text-anchor="middle" class="dark body">Return real observations to the model</text>
+<text x="514" y="546" text-anchor="middle" class="dark body">No mandatory planner or semantic verifier</text>
+<rect x="717" y="434" width="365" height="151" rx="14" class="box"/>
+<text x="900" y="469" text-anchor="middle" class="dark boxhead">OUTPUT CONTINUATION</text>
+<text x="900" y="500" text-anchor="middle" class="dark body">Public response segments across calls</text>
+<text x="900" y="523" text-anchor="middle" class="dark body">Safe handling of incomplete tool JSON</text>
+<text x="900" y="546" text-anchor="middle" class="dark body">One logical response in the UI</text>
+<rect x="1161" y="265" width="250" height="192" rx="18" class="model"/>
+<text x="1286" y="307" text-anchor="middle" class="dark boxhead">LOCAL MODEL</text>
+<text x="1286" y="339" text-anchor="middle" class="dark body">Ollama / llama.cpp</text>
+<text x="1286" y="375" text-anchor="middle" class="dark body">Reason · Plan · Recall</text>
+<text x="1286" y="398" text-anchor="middle" class="dark body">Select tools · Finish</text>
+<path d="M1116 318H1159" class="wire"/>
+<path d="M1160 410H1118" class="wire"/>
+<text x="1140" y="290" text-anchor="middle" class="note">Prompt</text>
+<text x="1140" y="446" text-anchor="middle" class="note">Decision</text>
+<rect x="300" y="674" width="816" height="81" rx="15" fill="#e7eefc" stroke="#a6b9d8"/>
+<text x="708" y="704" text-anchor="middle" class="dark boxhead">HARDWARE-AWARE PREPARATION · FINAL PHASE</text>
+<text x="708" y="733" text-anchor="middle" class="dark body">Available memory/storage · Model metadata · Backend measurements · User-controlled downloads</text>
+<rect x="30" y="783" width="1380" height="44" rx="12" class="head"/>
+<text x="720" y="811" text-anchor="middle" class="white" font-size="19" font-weight="700">Model owns reasoning and completion. Rust owns memory, execution and safety.</text>
+</svg>
