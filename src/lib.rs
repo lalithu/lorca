@@ -8,6 +8,7 @@ pub mod context;
 pub mod core;
 pub mod hardware;
 pub mod memory;
+pub mod model_library;
 pub mod provider;
 pub mod storage;
 pub mod transport;
