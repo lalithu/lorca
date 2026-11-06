@@ -1,11 +1,21 @@
 import SwiftUI
 
+struct ContextCost {
+    let tokens: Int
+    let estimatedBytes: UInt64?
+    init(_ value: [String: Any]) {
+        tokens = (value["tokens"] as? NSNumber)?.intValue ?? 0
+        estimatedBytes = (value["estimatedBytes"] as? NSNumber)?.uint64Value
+    }
+}
+
 /// Model-facing working context is separate from the backend allocation.
 /// The picker never claims a request has changed the running server yet.
 struct ContextChoices: View {
     @ObservedObject var store: ChatStore
     let allocated: Int?
     var compact = false
+    var memory: [ContextCost] = []
     private let tiers = [4096, 8192, 16384, 32768, 65536, 131072]
 
     private func short(_ value: Int) -> String {
@@ -20,7 +30,10 @@ struct ContextChoices: View {
                     } label: {
                         VStack(spacing: 3) {
                             Text(short(value)).font(.system(size: compact ? 10 : 12, weight: .semibold))
-                            if let allocated, value == allocated {
+                            if let cost = memory.first(where: { $0.tokens == value }), let bytes = cost.estimatedBytes {
+                                Text(ByteCountFormatter.string(fromByteCount: Int64(clamping: bytes), countStyle: .file))
+                                    .font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
+                            } else if let allocated, value == allocated {
                                 Text("Loaded").font(.system(size: 9)).foregroundStyle(.secondary)
                             }
                         }
@@ -38,6 +51,10 @@ struct ContextChoices: View {
                 Text("Backend: \(allocated.map(short) ?? "not reported")")
             }
             .font(.caption2).foregroundStyle(.secondary)
+            if !memory.isEmpty {
+                Text("Tier memory figures are interpolated from llama.cpp measurements, not exact allocations.")
+                    .font(.caption2).foregroundStyle(.tertiary)
+            }
             Text(store.providerName == "Ollama"
                  ? "Ollama receives the requested num_ctx on the next inference. Confirm actual allocation afterward."
                  : "llama.cpp uses its loaded context. A larger selection cannot take effect until the runtime is loaded at that size.")
