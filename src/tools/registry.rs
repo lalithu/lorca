@@ -37,6 +37,7 @@ pub struct Registry {
     pub(super) catalog: Catalog,
     pub(super) visible: Visible,
     adaptive: bool,
+    input_character_limit: std::sync::atomic::AtomicUsize,
     workspace_available: bool,
     unavailable: BTreeMap<String, String>,
     pub(super) history: crate::memory::HistoryIndex,
@@ -79,35 +80,60 @@ impl Registry {
     }
 
     pub(crate) fn seed_history(&self, messages: &[Value]) -> Result<()> {
+        if !self.adaptive {
+            return Ok(());
+        }
         self.history.reset(messages)
     }
 
     pub(crate) fn record_history(&self, message: &Value) -> Result<()> {
+        if !self.adaptive {
+            return Ok(());
+        }
         self.history.record(message)
     }
 
     /// The original is durably recorded before replacement. The manifest
     /// cannot be treated as full task evidence or permission.
+    pub(crate) fn context_capacity(&self, capacity: u64) {
+        // Leave room for schemas, policy, retrieval and generation. This affects
+        // only the prompt projection; source text and authority stay complete.
+        let chars =
+            (capacity / 2).clamp(512, crate::memory::ingest::DIRECT_INPUT_CHARS as u64) as usize;
+        self.input_character_limit
+            .store(chars, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub(crate) fn virtualize_user_input(&self, text: &str) -> Result<String> {
-        if text.chars().count() <= crate::memory::ingest::DIRECT_INPUT_CHARS {
+        if !self.adaptive
+            || text.chars().count()
+                <= self
+                    .input_character_limit
+                    .load(std::sync::atomic::Ordering::Relaxed)
+        {
             return Ok(text.to_owned());
         }
         if self.history.manifest_for(text).is_none() {
-            self.history.record(&json!({"role":"user","content":text}))?;
+            self.history
+                .record(&json!({"role":"user","content":text}))?;
         }
-        let manifest = self.history.manifest_for(text)
+        let manifest = self
+            .history
+            .manifest_for(text)
             .ok_or("Could not index oversized user input")?;
         Ok(crate::memory::ingest::envelope(&manifest))
     }
 
     pub(crate) fn virtualize_messages(&self, messages: &mut [Value]) -> Result<()> {
         for message in messages {
-            if message["role"] == "user" {
-                if let Some(raw) = message["content"].as_str() {
-                    if raw.chars().count() > crate::memory::ingest::DIRECT_INPUT_CHARS {
-                        message["content"] = json!(self.virtualize_user_input(raw)?);
-                    }
-                }
+            if message["role"] == "user"
+                && let Some(raw) = message["content"].as_str()
+                && raw.chars().count()
+                    > self
+                        .input_character_limit
+                        .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                message["content"] = json!(self.virtualize_user_input(raw)?);
             }
         }
         Ok(())
@@ -127,6 +153,9 @@ impl Registry {
             catalog: Default::default(),
             visible: Default::default(),
             adaptive: false,
+            input_character_limit: std::sync::atomic::AtomicUsize::new(
+                crate::memory::ingest::DIRECT_INPUT_CHARS,
+            ),
             workspace_available: true,
             unavailable: BTreeMap::new(),
             history: crate::memory::HistoryIndex::default(),
@@ -395,10 +424,22 @@ mod tests {
     fn historical_recall_is_scoped_to_each_registry_and_never_expands_custom_tool_sets() {
         let first = Registry::without_workspace();
         let second = Registry::without_workspace();
-        first.seed_history(&[json!({"role":"user","content":"first private conversation"})]).unwrap();
-        second.seed_history(&[json!({"role":"user","content":"second different conversation"})]).unwrap();
-        assert_eq!(first.history.search("first", None, 5)["matches"][0]["recordId"], "h0");
-        assert!(second.history.search("first", None, 5)["matches"].as_array().unwrap().is_empty());
+        first
+            .seed_history(&[json!({"role":"user","content":"first private conversation"})])
+            .unwrap();
+        second
+            .seed_history(&[json!({"role":"user","content":"second different conversation"})])
+            .unwrap();
+        assert_eq!(
+            first.history.search("first", None, 5)["matches"][0]["recordId"],
+            "h0"
+        );
+        assert!(
+            second.history.search("first", None, 5)["matches"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         assert!(first.get("search_history").is_ok());
         assert!(!names(&first).contains("search_history"));
         let custom = Registry::empty();

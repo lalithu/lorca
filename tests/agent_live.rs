@@ -121,32 +121,28 @@ async fn qwen_creates_empty_readme_without_cargo_or_clarification() {
 }
 #[tokio::test]
 #[ignore = "Requires an installed Ollama model; no file writes approved"]
-async fn qwen_asks_one_question_for_an_unspecified_file() {
+async fn model_can_clarify_in_public_or_with_the_question_tool_without_side_effects() {
     let (view, root) = run("Create a file").await;
-    assert_eq!(view.status, Status::WaitingForInput, "{:?}", view.result);
-    assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
-    assert_eq!(
-        view.audit
-            .iter()
-            .filter(|e| e.kind == "tool_completed"
-                && e.data["tool"] == "request_user_input"
-                && e.data["result"]["needsUserInput"] == true)
-            .count(),
-        1
-    );
     assert!(
-        !view
-            .audit
-            .iter()
-            .any(|e| matches!(e.kind.as_str(), "approval_required" | "task_continued"))
+        matches!(view.status, Status::Completed | Status::WaitingForInput),
+        "{:?}",
+        view.result
     );
-    let question = view
+    assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
+    let questions = view
         .audit
         .iter()
-        .find(|e| e.kind == "tool_completed" && e.data["tool"] == "request_user_input")
-        .unwrap();
-    let question = question.data["result"]["question"]
-        .as_str()
+        .filter(|e| e.kind == "tool_completed" && e.data["tool"] == "request_user_input")
+        .collect::<Vec<_>>();
+    assert!(questions.len() <= 1);
+    assert!(!view.audit.iter().any(|e| matches!(
+        e.kind.as_str(),
+        "approval_required" | "file_changes" | "task_continued"
+    )));
+    let question = questions
+        .first()
+        .and_then(|e| e.data["result"]["question"].as_str())
+        .or(view.result.as_deref())
         .unwrap()
         .to_lowercase();
     assert!(

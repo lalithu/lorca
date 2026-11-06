@@ -376,12 +376,35 @@ fn model_requested_checkpoint_starts_a_new_epoch_without_discarding_original_sou
     ];
     let archived = active.clone();
     ctx.request_checkpoint();
-    let created = ctx.fit(&mut active, &[],8192,"Explain archival recall",&json!({})).unwrap();
+    let created = ctx
+        .fit(
+            &mut active,
+            &[],
+            8192,
+            "Explain archival recall",
+            &json!({}),
+        )
+        .unwrap();
     assert!(created);
-    assert_eq!(ctx.compactions,1);
-    assert!(active.iter().any(|m|m["content"].as_str().unwrap_or("")
-        .starts_with("Working checkpoint (historical data):")));
-    assert_eq!(archived[1]["content"],"Explain how archival recall works.");
-    let second = ctx.fit(&mut active,&[],8192,"Explain archival recall",&json!({})).unwrap();
-    assert!(!second,"Freshly checkpointed context must not repeatedly rebuild");
+    assert_eq!(ctx.compactions, 1);
+    assert!(active.iter().any(|m| {
+        m["content"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("Working checkpoint (historical data):")
+    }));
+    assert_eq!(archived[1]["content"], "Explain how archival recall works.");
+    let second = ctx
+        .fit(
+            &mut active,
+            &[],
+            8192,
+            "Explain archival recall",
+            &json!({}),
+        )
+        .unwrap();
+    assert!(
+        !second,
+        "Freshly checkpointed context must not repeatedly rebuild"
+    );
 }

@@ -258,11 +258,9 @@ async fn audit_does_not_count_an_excerpt_as_a_full_read() {
     )
     .await;
     assert_eq!(view.status, Status::Completed);
-    assert!(
-        view.events
-            .iter()
-            .any(|e| e.kind == "task_execution_status" && e.data["semanticValidationPerformed"] == false)
-    );
+    assert!(view.events.iter().any(
+        |e| e.kind == "task_execution_status" && e.data["semanticValidationPerformed"] == false
+    ));
     assert!(
         !view
             .events
@@ -291,7 +289,8 @@ async fn an_answer_without_a_tool_call_is_not_read_evidence() {
     assert!(
         view.events
             .iter()
-            .any(|event| event.kind == "task_execution_status" && event.data["semanticValidationPerformed"] == false)
+            .any(|event| event.kind == "task_execution_status"
+                && event.data["semanticValidationPerformed"] == false)
     );
 }
 

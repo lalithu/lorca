@@ -310,10 +310,7 @@ impl Core {
             Registry::without_workspace()
         };
         if let Some(ci) = ci {
-            registry.attach_history(
-                &self.repository.root,
-                &s.view.conversations[ci].id,
-            )?;
+            registry.attach_history(&self.repository.root, &s.view.conversations[ci].id)?;
         }
         let id = self.agent.submit_continuation(
             Submission {

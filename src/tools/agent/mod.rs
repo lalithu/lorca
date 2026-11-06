@@ -1,6 +1,6 @@
 use super::*;
-mod history;
 mod compact_context;
+mod history;
 mod request_permissions;
 mod request_user_input;
 pub(crate) use request_user_input::RequestWorkspace;

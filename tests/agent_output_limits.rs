@@ -572,7 +572,10 @@ async fn mixed_http_interruption_and_length_stop_share_a_bounded_recovery() {
     let (fixture, view) = run(Scenario::HttpThenLength).await;
     assert_eq!(view.status, Status::Incomplete, "{:?}", view.result);
     let attempts = fixture.server.requests.lock().unwrap().len();
-    assert!((3..=6).contains(&attempts), "Length exhaustion should continue only while making observable progress");
+    assert!(
+        (3..=6).contains(&attempts),
+        "Length exhaustion should continue only while making observable progress"
+    );
     assert_eq!(
         std::fs::read_to_string(fixture.root.join("index.html")).unwrap(),
         DARK

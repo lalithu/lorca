@@ -64,10 +64,12 @@ pub(super) fn operational(
         }
     }
     operations.extend(reads.into_values());
+    let omitted = operations.len().saturating_sub(24);
+    operations.drain(..omitted);
     // The original instruction is pinned separately by Context::fit. Outcome
     // and restrictions are verbatim copies/substrings, not independent policy.
     json!({"context":contract.context,"requiresActionApproval":contract.authority.requires_action_approval,
-        "scope":contract.authority.scope,"operations":operations})
+        "scope":contract.authority.scope,"operations":operations,"archivedOperations":omitted})
 }
 
 #[cfg(test)]

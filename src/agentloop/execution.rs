@@ -32,6 +32,9 @@ impl Agent {
         }
         registry.restore_visibility(&history);
         registry.seed_history(&history)?;
+        let capacity = tokio::select! {biased; _=cancel.changed()=>return Err("Cancelled".into()),
+        result=tokio::time::timeout(Duration::from_secs(limits.model_seconds),inference.capacity())=>result.map_err(|_|"Model preparation timed out")??};
+        registry.context_capacity(capacity.unwrap_or(crate::context::DEFAULT_CAPACITY));
         let original_task = task.clone();
         task = registry.virtualize_user_input(&original_task)?;
         let mut messages = vec![
@@ -50,8 +53,6 @@ impl Agent {
             messages.push(user);
         }
         let mut context = crate::context::Context::default();
-        let capacity = tokio::select! {biased; _=cancel.changed()=>return Err("Cancelled".into()),
-        result=tokio::time::timeout(Duration::from_secs(limits.model_seconds),inference.capacity())=>result.map_err(|_|"Model preparation timed out")??};
         self.state
             .lock()
             .unwrap()
@@ -95,7 +96,7 @@ impl Agent {
                 .unwrap_or(&task)
                 .to_owned()
         } else {
-            latest_instruction.clone()
+            original_task.clone()
         };
         contract.objective.requested_outcome = task.clone();
         let mut instructions = if continuing {
@@ -109,8 +110,8 @@ impl Agent {
         } else {
             vec![]
         };
-        if instructions.last() != Some(&latest_instruction) {
-            instructions.push(latest_instruction.clone());
+        if instructions.last() != Some(&original_task) {
+            instructions.push(original_task.clone());
         }
         if continuing {
             contract
@@ -183,8 +184,7 @@ impl Agent {
         // Distinct acknowledged public segments form one logical response.
         // They are preserved in the original journal and can cross many
         // bounded inference calls without forcing the user to request "continue".
-        let mut output_segments = Vec::<String>::new();
-        let mut duplicate_output_segments = 0_usize;
+        let mut output = crate::memory::continuation::Output::default();
         // A successful read must not renew the malformed-runtime-call allowance.
         let mut interrupted_tool_retries = 0;
         let mut revisions = self.revision_receiver();
@@ -217,6 +217,9 @@ impl Agent {
             }
             operational["activeInstructions"] = json!(active_instructions);
             operational["unavailableTools"] = json!(registry.unavailable());
+            if output.segments > 0 {
+                operational["publicOutput"] = json!({"segments":output.segments,"bytes":output.text.len(),"tail":output.tail()});
+            }
             let budget = crate::context::GenerationBudget::new(
                 capacity,
                 expanded_output || inference.effort() == ThinkingEffort::High,
@@ -250,11 +253,18 @@ impl Agent {
                 "model_generating",
                 json!({"iteration":iteration,"estimatedTokens":estimated,"budget":budget,"timeoutSeconds":model_seconds,"effort":inference.effort()}),
             );
+            let before = self.snapshot().unwrap().assistant_text.len();
+            let streamed = std::sync::Mutex::new(String::new());
             let updates = |update| {
                 let mut s = self.state.lock().unwrap();
                 let v = s.view.as_mut().unwrap();
                 match update {
-                    ModelUpdate::Text(text) => v.assistant_text.push_str(&text),
+                    ModelUpdate::Text(text) => {
+                        let mut current = streamed.lock().unwrap();
+                        current.push_str(&text);
+                        v.assistant_text.truncate(before);
+                        v.assistant_text.push_str(output.visible(&current, false));
+                    }
                     ModelUpdate::Usage(mut usage) => {
                         usage.context_limit = usage.context_limit.or(v.usage.context_limit);
                         v.usage = usage;
@@ -264,7 +274,6 @@ impl Agent {
                 drop(s);
                 self.changed();
             };
-            let before = self.snapshot().unwrap().assistant_text.len();
             let generation = if std::mem::take(&mut recover_public_reply) {
                 inference.generate_public_reply(&messages, &schemas, budget, &updates)
             } else {
@@ -323,18 +332,25 @@ impl Agent {
                 let mut s = self.state.lock().unwrap();
                 let v = s.view.as_mut().unwrap();
                 v.generating = false;
-                if v.assistant_text.len() == before {
-                    v.assistant_text.push_str(&turn.content);
-                }
-                if !v.assistant_text.is_empty() && turn.finish_reason != FinishReason::Length {
+                v.assistant_text.truncate(before);
+                v.assistant_text
+                    .push_str(output.visible(&turn.content, true));
+                if !v.assistant_text.is_empty()
+                    && turn.finish_reason != FinishReason::Length
+                    && output.segments == 0
+                {
                     v.assistant_text.push_str("\n\n");
                 }
-                v.transcript
-                    .push(if turn.finish_reason == FinishReason::Length {
+                v.transcript.push(
+                    if matches!(
+                        turn.finish_reason,
+                        FinishReason::Length | FinishReason::InterruptedToolCall
+                    ) {
                         json!({"role":"assistant","content":turn.content})
                     } else {
                         turn.message.clone()
-                    });
+                    },
+                );
                 if let Some(limit) = v.usage.context_limit {
                     capacity = limit;
                 }
@@ -359,12 +375,12 @@ impl Agent {
                     // Native tool arguments must never be continued by stitching
                     // partial JSON and must never be executed until fully valid.
                     if interrupted_tool_retries >= 1 {
-                        return Err("Task incomplete: The provider repeatedly returned incomplete tool JSON; no rejected tool arguments executed. Original work is preserved.".into());
+                        return Err("Task incomplete: The provider returned incomplete tool-call JSON after bounded recovery; no rejected tool arguments executed. Original work is preserved.".into());
                     }
                     interrupted_tool_retries += 1;
                     expanded_output = true;
                     messages.push(json!({"role":"user","content":
-                        "Internal Lorca recovery: an incomplete tool call was discarded and never executed. Reissue one complete native tool call or respond publicly. Preserve the original task and permissions."}));
+                        "Internal Lorca recovery: incomplete tool arguments were discarded. No tool calls from the rejected response executed. Reissue one complete call using small, targeted patches; do not rewrite an entire file. Preserve the original task and permissions."}));
                     continue;
                 }
 
@@ -381,21 +397,17 @@ impl Agent {
                     continue;
                 }
                 truncation_retries = 0;
-                if output_segments.last().is_some_and(|last| last == &turn.content) {
-                    duplicate_output_segments += 1;
-                } else {
-                    duplicate_output_segments = 0;
-                }
-                if duplicate_output_segments >= 2 {
-                    return Err("Task incomplete: The model repeated the same output segment without advancing. Partial response preserved; resume with a different strategy or model.".into());
-                }
-                registry.record_history(&turn.message)?;
-                output_segments.push(turn.content.clone());
+                let segment = output.commit(&turn.content)?;
+                let record = json!({"role":"assistant","content":turn.content});
+                registry.record_history(&record)?;
                 expanded_output = true;
-                self.emit("output_segment_committed", json!({
-                    "segment":output_segments.len(),"characters":turn.content.chars().count(),
-                    "continuation":true
-                }));
+                self.emit(
+                    "output_segment_committed",
+                    json!({
+                        "segment":output.segments,"characters":segment.chars().count(),
+                        "continuation":true
+                    }),
+                );
                 // This is an already-acknowledged text segment; do not attempt to
                 // replay it as a tool call. Context fitting can archive it later.
                 messages.push(json!({"role":"assistant","content":turn.content}));
@@ -408,16 +420,16 @@ impl Agent {
                 // The model owns semantic completion. Rust reports factual
                 // execution state, without interpreting requested task quality
                 // or forcing model-selected completion into another action.
-                self.emit("task_execution_status", json!({
-                    "unresolvedOperations":unresolved.keys().collect::<Vec<_>>(),
-                    "runningCommands":running_commands.iter().collect::<Vec<_>>(),
-                    "semanticValidationPerformed":false
-                }));
+                self.emit(
+                    "task_execution_status",
+                    json!({
+                        "unresolvedOperations":unresolved.keys().collect::<Vec<_>>(),
+                        "runningCommands":running_commands.iter().collect::<Vec<_>>(),
+                        "semanticValidationPerformed":false
+                    }),
+                );
                 if !running_commands.is_empty() {
                     return Err("Task incomplete: The model stopped before collecting the command exit status.".into());
-                }
-                if turn.content.trim().is_empty() && !output_segments.is_empty() {
-                    return Ok(output_segments.concat());
                 }
                 if turn.content.trim().is_empty() {
                     if reply_recovery_used {
@@ -429,14 +441,17 @@ impl Agent {
                     messages.push(json!({"role":"user","content":"No public answer was received. Continue the current request using the tool results already in this conversation. Provide your answer in the public response, or call the next necessary tool if work remains. Reuse existing results; do not repeat completed actions."}));
                     continue;
                 }
-                if !output_segments.is_empty() {
-                    output_segments.push(turn.content);
-                    return Ok(output_segments.concat());
+                if output.segments > 0 {
+                    output.commit(&turn.content)?;
+                    return Ok(output.text);
                 }
                 return Ok(turn.content);
             }
             if turn.calls.len() > 8 {
                 return Err("Model requested too many tools in one turn (maximum 8)".into());
+            }
+            if output.segments > 0 && !turn.content.is_empty() {
+                output.commit(&turn.content)?;
             }
             if !turn.content.trim().is_empty() {
                 self.emit(
@@ -454,9 +469,12 @@ impl Agent {
             if checkpoint_only {
                 // Planning and memory updates are legitimate model decisions.
                 // Only repeated *identical* plans without progress are blocked.
-                let signature = turn.calls.iter()
-                    .map(|call| format!("{}:{}",call.name,call.arguments))
-                    .collect::<Vec<_>>().join("|");
+                let signature = turn
+                    .calls
+                    .iter()
+                    .map(|call| format!("{}:{}", call.name, call.arguments))
+                    .collect::<Vec<_>>()
+                    .join("|");
                 if signature == last_checkpoint_signature {
                     repeated_checkpoint_turns += 1;
                 } else {

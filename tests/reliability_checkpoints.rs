@@ -141,7 +141,13 @@ async fn native_tool_calls_cannot_erase_read_only_or_expand_targets() {
             ],
         )
         .await;
-        assert_ne!(v.status, Status::Completed);
+        assert_eq!(v.status, Status::Completed);
+        assert!(v.events.iter().any(|e| e.kind == "tool_failed"));
+        assert!(
+            !v.events
+                .iter()
+                .any(|e| e.kind == "approval_required" || e.kind == "tool_started")
+        );
         for n in ["one.rs", "two.rs"] {
             assert_eq!(std::fs::read_to_string(root.0.join(n)).unwrap(), "before");
         }
@@ -160,7 +166,8 @@ async fn a_reply_cannot_manufacture_edit_evidence() {
     assert!(
         v.events
             .iter()
-            .any(|event| event.kind == "task_execution_status" && event.data["semanticValidationPerformed"] == false)
+            .any(|event| event.kind == "task_execution_status"
+                && event.data["semanticValidationPerformed"] == false)
     );
     assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
 }
