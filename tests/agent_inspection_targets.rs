@@ -195,19 +195,10 @@ async fn partial_collection_is_recorded_without_reopening_the_reply() {
     let report = view
         .events
         .iter()
-        .find(|event| event.kind == "task_verification")
+        .find(|event| event.kind == "task_execution_status")
         .unwrap();
-    assert_eq!(report.data["satisfied"], false);
-    assert!(
-        report.data["unsatisfied"]
-            .to_string()
-            .contains("index.html")
-    );
-    assert!(
-        report.data["unsatisfied"]
-            .to_string()
-            .contains("lalith.txt")
-    );
+    assert_eq!(report.data["semanticValidationPerformed"], false);
+    assert_eq!(report.data["unresolvedOperations"], json!([]));
 }
 
 #[tokio::test]
@@ -270,7 +261,7 @@ async fn audit_does_not_count_an_excerpt_as_a_full_read() {
     assert!(
         view.events
             .iter()
-            .any(|e| e.kind == "task_verification" && e.data["satisfied"] == false)
+            .any(|e| e.kind == "task_execution_status" && e.data["semanticValidationPerformed"] == false)
     );
     assert!(
         !view
@@ -300,7 +291,7 @@ async fn an_answer_without_a_tool_call_is_not_read_evidence() {
     assert!(
         view.events
             .iter()
-            .any(|event| event.kind == "task_verification" && event.data["satisfied"] == false)
+            .any(|event| event.kind == "task_execution_status" && event.data["semanticValidationPerformed"] == false)
     );
 }
 
