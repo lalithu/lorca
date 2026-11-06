@@ -68,7 +68,7 @@ impl HistoryIndex {
         let records = self.records.read().unwrap();
         let mut matches = Vec::new();
         for (index, record) in records.iter().enumerate().rev() {
-            if role.is_some_and(|role| role != record.role) {
+            if role.is_some_and(|role| role != record.role.as_str()) {
                 continue;
             }
             let haystack = format!("{} {} {}", record.content, record.tool_name, record.call_id)
