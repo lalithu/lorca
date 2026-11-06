@@ -29,7 +29,7 @@ pub fn manifest(input: &str, id: &str) -> Value {
 /// are delivered in a compact task envelope instead.
 pub fn envelope(manifest: &Value) -> String {
     format!(
-        "Oversized user input preserved in Lorca's conversation archive. The original contains {} Unicode characters and approximately {} source chunks. Source record: {}. Use the discoverable get_history_record tool (recordId, offset, length) to inspect in bounded chunks of up to 4096 characters. For any task requiring whole-input coverage, inspect all chunks, recording progress in working notes. The first/last excerpts are orientation only and must not be treated as the full request.\nFirst excerpt: {}\nLast excerpt: {}",
+        "Oversized user input preserved in Lorca's conversation archive. The original contains {} Unicode characters and approximately {} source chunks. Source record: {}. Use tool_search to discover get_history_record, then inspect recordId with chunkIndex 0 through the final chunk (or use offset and length for targeted excerpts). For any task requiring whole-input coverage, inspect all chunks, recording progress in working notes. The first/last excerpts are orientation only and must not be treated as the full request.\nFirst excerpt: {}\nLast excerpt: {}",
         manifest["totalCharacters"].as_u64().unwrap_or(0),
         manifest["estimatedChunks"].as_u64().unwrap_or(0),
         manifest["sourceRecordId"].as_str().unwrap_or("unavailable"),
