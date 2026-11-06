@@ -51,9 +51,27 @@ fn validate_model(model: &str) -> Result<()> {
     Ok(())
 }
 impl Core {
-    pub(super) async fn model_library(&self, session: &str) -> Result<Value> {
-        let host = self.host(session)?;
-        let engine = self.engine(session)?;
+    /// Model management may inspect the other local backend without switching
+    /// the active chat session. No caller-supplied host is accepted.
+    fn library_runtime(&self, session: &str, runtime: Option<&str>)
+        -> Result<(provider::Engine, String)> {
+        let active = self.engine(session)?;
+        let active_host = self.host(session)?;
+        let target = match runtime {
+            None | Some("active") => active,
+            Some("ollama") => provider::Engine::Ollama,
+            Some("llama_cpp") => provider::Engine::LlamaCpp,
+            _ => return Err("Runtime must be ollama or llama_cpp".into()),
+        };
+        Ok((target, if target == active {
+            active_host
+        } else {
+            target.default_host().to_string()
+        }))
+    }
+
+    pub(super) async fn model_library(&self, session: &str, runtime: Option<&str>) -> Result<Value> {
+        let (engine,host) = self.library_runtime(session,runtime)?;
         let url = if engine == provider::Engine::Ollama {
             format!("{host}/api/tags")
         } else {
@@ -194,17 +212,16 @@ impl Core {
             if error.is_some() {d.error=error;}
         }
     }
-    pub(super) fn model_transfers(&self,session:&str)->Result<Value> {
-        let host=self.host(session)?;
+    pub(super) fn model_transfers(&self,session:&str,runtime:Option<&str>)->Result<Value> {
+        let (_,host)=self.library_runtime(session,runtime)?;
         let items=self.downloads.lock().unwrap().values()
             .filter(|d|d.host==host).map(DownloadState::view).collect::<Vec<_>>();
         Ok(json!({"downloads":items}))
     }
     pub(super) async fn model_install(self:&Arc<Self>,session:&str,
-        model:&str)->Result<Value> {
+        model:&str,runtime:Option<&str>)->Result<Value> {
         validate_model(model)?;
-        let host=self.host(session)?;
-        let engine=self.engine(session)?;
+        let (engine,host)=self.library_runtime(session,runtime)?;
         let key=Self::transfer_key(&host,model);
         let (tx,rx)=watch::channel(false);
         {
@@ -332,10 +349,9 @@ impl Core {
         Err("llama.cpp progress stream disconnected; check model status and retry if needed".into())
     }
 
-    pub(super) async fn model_cancel_download(&self,session:&str,model:&str)->Result<Value>{
+    pub(super) async fn model_cancel_download(&self,session:&str,model:&str,runtime:Option<&str>)->Result<Value>{
         validate_model(model)?;
-        let host=self.host(session)?;
-        let engine=self.engine(session)?;
+        let (engine,host)=self.library_runtime(session,runtime)?;
         let key=Self::transfer_key(&host,model);
         {
             let downloads=self.downloads.lock().unwrap();
@@ -346,22 +362,19 @@ impl Core {
             d.cancel.send_replace(true);
         }
         if engine==provider::Engine::LlamaCpp {
-            // llama.cpp removes partials on DELETE; unlike Ollama, cancellation
-            // here is destructive and the UI must state that explicitly.
-            let mut url=reqwest::Url::parse(&format!("{host}/models")).map_err(|e|e.to_string())?;
-            url.query_pairs_mut().append_pair("model",model);
-            let result=self.client.delete(url).timeout(Duration::from_secs(10))
-                .send().await.map_err(|e|e.to_string())?;
-            if !result.status().is_success(){return Err(format!("llama.cpp cancel HTTP {}",result.status()));}
+            // Router pause preserves partial files for a later POST /models.
+            let result=self.client.post(format!("{host}/models/unload"))
+                .json(&json!({"model":model}))
+                .timeout(Duration::from_secs(10)).send().await.map_err(|e|e.to_string())?;
+            if !result.status().is_success(){return Err(format!("llama.cpp pause HTTP {}",result.status()));}
         }
         self.update_transfer(&host,model,None,Some("paused"),None);
         Ok(json!({"cancelled":true,"model":model}))
     }
 
-    pub(super) async fn model_delete(&self,session:&str,model:&str)->Result<Value>{
+    pub(super) async fn model_delete(&self,session:&str,model:&str,runtime:Option<&str>)->Result<Value>{
         validate_model(model)?;
-        let host=self.host(session)?;
-        let engine=self.engine(session)?;
+        let (engine,host)=self.library_runtime(session,runtime)?;
         {
             let s=self.state.lock().unwrap();
             if s.view.sessions.iter().any(|v|s.clients.get(&v.id).is_some_and(|c|c.host==host)
@@ -387,7 +400,11 @@ impl Core {
         };
         let status=response.status();
         if !status.is_success(){return Err(http_error(status,&response.text().await.unwrap_or_default()));}
-        let _=self.refresh(session).await?;
+        // The existing chat's selected model may be on a different runtime.
+        // Only refresh its session if this deletion affected that runtime.
+        if engine==self.engine(session)? {
+            let _=self.refresh(session).await?;
+        }
         Ok(json!({"deleted":true,"model":model}))
     }
 }
