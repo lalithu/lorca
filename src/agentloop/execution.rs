@@ -426,6 +426,7 @@ impl Agent {
                     json!({"content":bounded(&turn.content,4000)}),
                 );
             }
+            registry.record_history(&turn.message);
             messages.push(turn.message);
             let checkpoint_only = turn.calls.iter().any(|call| call.name == "update_plan")
                 && turn
