@@ -298,9 +298,6 @@ impl Requirements {
     pub(super) fn requests_command(&self) -> bool {
         !self.commands.is_empty()
     }
-    pub(super) fn reports_failure(&self) -> bool {
-        self.report_only && !self.commands.is_empty()
-    }
     pub fn action(&self) -> bool {
         self.inspect
             || self.edit
