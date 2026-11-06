@@ -158,3 +158,50 @@ mod tests {
         assert_eq!(unknown["recommendedQuant"],Value::Null);
     }
 }
+
+/// Memory interpolation from llama.cpp's two measured fit profiles.
+/// The result is an estimate, never an actual live KV or runtime guarantee.
+pub fn context_tiers(profile: &Value) -> Value {
+    if profile["status"] != "measured" {
+        return json!([]);
+    }
+    fn total(entry: &Value) -> Option<u64> {
+        let devices = entry["devices"].as_array()?;
+        if devices.is_empty() { return None; }
+        Some(devices.iter().fold(0_u64, |acc, d| {
+            acc.saturating_add(d["model"].as_u64().unwrap_or(0))
+                .saturating_add(d["context"].as_u64().unwrap_or(0))
+                .saturating_add(d["compute"].as_u64().unwrap_or(0))
+        }))
+    }
+    let min_ctx = profile["min"]["n_ctx"].as_u64().unwrap_or(0);
+    let max_ctx = profile["max"]["n_ctx"].as_u64().unwrap_or(0);
+    let (Some(lo), Some(hi)) = (total(&profile["min"]), total(&profile["max"])) else {
+        return json!([]);
+    };
+    if min_ctx == 0 || max_ctx < min_ctx || hi < lo { return json!([]); }
+    let entries = [4096_u64,8192,16384,32768,65536,131072].into_iter()
+        .filter(|ctx| *ctx >= min_ctx && *ctx <= max_ctx)
+        .map(|ctx| {
+            let memory = if min_ctx == max_ctx { lo } else {
+                lo.saturating_add((hi-lo).saturating_mul(ctx-min_ctx) / (max_ctx-min_ctx))
+            };
+            json!({"tokens":ctx, "estimatedBytes":memory, "basis":"interpolated measured snapshots"})
+        }).collect::<Vec<_>>();
+    json!(entries)
+}
+#[cfg(test)]
+mod tier_tests {
+    use super::*;
+    #[test]
+    fn model_context_costs_are_monotonic_and_explicitly_estimated() {
+        let p = json!({"status":"measured",
+            "min":{"n_ctx":4096,"devices":[{"model":2_000_000_000_u64,"context":100_000_000_u64,"compute":100_000_000_u64}]},
+            "max":{"n_ctx":65536,"devices":[{"model":2_000_000_000_u64,"context":900_000_000_u64,"compute":100_000_000_u64}]}});
+        let tiers=context_tiers(&p);
+        assert_eq!(tiers.as_array().unwrap().len(),5);
+        assert_eq!(tiers[0]["estimatedBytes"],2_200_000_000_u64);
+        assert_eq!(tiers[4]["estimatedBytes"],3_000_000_000_u64);
+        assert!(context_tiers(&json!({"status":"unmeasured"})).as_array().unwrap().is_empty());
+    }
+}
