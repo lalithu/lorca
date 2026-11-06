@@ -397,37 +397,14 @@ impl Agent {
             }
             if turn.calls.is_empty() {
                 registry.record_history(&turn.message)?;
-                // A final reply ends generation. The audit records what the
-                // tools proved independently of what the model said.
-                let current = resume_evidence
-                    .iter()
-                    .chain(self.snapshot().unwrap().transcript.iter())
-                    .cloned()
-                    .collect();
-                let current = super::inspection::current_observations(current, w);
-                let mut report = requirements.report(&current);
-                let failed_action = unresolved.keys().any(|key| {
-                    !requirements.reports_failure()
-                        || !(key.starts_with("exec_command:") || key.starts_with("write_stdin:"))
-                });
-                if failed_action {
-                    report.satisfied = false;
-                    report
-                        .unsatisfied
-                        .push("Tool failures remain unresolved".into());
-                }
-                if !running_commands.is_empty() {
-                    report.satisfied = false;
-                    report
-                        .unsatisfied
-                        .push("Command exit status is unavailable".into());
-                }
-                self.emit("task_verification", json!(report));
-                if failed_action {
-                    return Err(
-                        "A command or file change failed. See the tool result for details.".into(),
-                    );
-                }
+                // The model owns semantic completion. Rust reports factual
+                // execution state, without interpreting requested task quality
+                // or forcing model-selected completion into another action.
+                self.emit("task_execution_status", json!({
+                    "unresolvedOperations":unresolved.keys().collect::<Vec<_>>(),
+                    "runningCommands":running_commands.iter().collect::<Vec<_>>(),
+                    "semanticValidationPerformed":false
+                }));
                 if !running_commands.is_empty() {
                     return Err("Task incomplete: The model stopped before collecting the command exit status.".into());
                 }
@@ -624,6 +601,9 @@ impl Agent {
                     } else {
                         running_commands.remove(id);
                     }
+                }
+                if ok && call.name == "compact_context" {
+                    context.request_checkpoint();
                 }
                 if ok && call.name == "update_plan" {
                     plan = value["plan"].clone();
