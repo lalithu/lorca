@@ -68,6 +68,12 @@ struct ConversationHistory: View {
     }
 
     @ViewBuilder private func actions(_ conversation: Conversation) -> some View {
+        Button("Export entire chat as Markdown…") {
+            Task { await store.exportConversation(conversation.id, format: "markdown") }
+        }
+        Button("Export entire chat as JSON…") {
+            Task { await store.exportConversation(conversation.id, format: "json") }
+        }
         Button("Rename…") { title = conversation.title; renameID = conversation.id }
         Button("Delete…", role: .destructive) { deleting = conversation }
     }
