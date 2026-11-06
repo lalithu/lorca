@@ -135,8 +135,8 @@ mod tests {
             available_storage_bytes:Some(200_000_000_000),estimated:true
         };
         let models=installed_ollama(&hardware,&json!({"models":[
-            {"name":"small","size":4_000_000_000,"details":{"parameter_size":"7B","quantization_level":"Q4_K_M"}},
-            {"name":"large","size":27_000_000_000,"details":{"parameter_size":"70B","quantization_level":"Q4_K_M"}}
+            {"name":"small","size":4_000_000_000_u64,"details":{"parameter_size":"7B","quantization_level":"Q4_K_M"}},
+            {"name":"large","size":27_000_000_000_u64,"details":{"parameter_size":"70B","quantization_level":"Q4_K_M"}}
         ]}));
         assert_eq!(models[0]["model"],"small");
         assert_eq!(models[0]["likelyFitsWeights"],true);
