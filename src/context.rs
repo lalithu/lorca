@@ -42,8 +42,14 @@ pub struct Context {
     operations: std::collections::BTreeMap<String, Value>,
     scale: f64,
     pub compactions: usize,
+    requested_checkpoint: bool,
 }
 impl Context {
+    /// A model may request a checkpoint early; resource safety never depends
+    /// on that request or on a successful model-authored summary.
+    pub fn request_checkpoint(&mut self) {
+        self.requested_checkpoint = true;
+    }
     pub fn confirm(&mut self, estimated: u64, prompt: u64) {
         if estimated > 0 && prompt > 0 {
             self.scale = (self.scale.max(1.0) * prompt as f64 / estimated as f64).max(1.0);
@@ -144,10 +150,13 @@ impl Context {
         objective: &str,
         operational: &Value,
     ) -> Result<bool, String> {
-        let ceiling = (capacity * 78 / 100).min(capacity.saturating_sub(reserve));
-        if self.tokens(messages, schemas) <= ceiling {
+        let trigger = (capacity * 78 / 100).min(capacity.saturating_sub(reserve));
+        if !self.requested_checkpoint && self.tokens(messages, schemas) <= trigger {
             return Ok(false);
         }
+        // Hysteresis: compact in one event and leave meaningful space for
+        // subsequent turns instead of moving the truncation boundary each time.
+        let ceiling = (capacity * 60 / 100).min(capacity.saturating_sub(reserve));
         validate_groups(messages)?;
         let original = messages.clone();
         let latest = messages
@@ -280,10 +289,12 @@ impl Context {
             return Err("Context validation failed: latest user message changed".into());
         }
         if candidate == original {
+            self.requested_checkpoint = false;
             return Ok(false);
         }
         *messages = candidate;
         self.compactions += 1;
+        self.requested_checkpoint = false;
         Ok(true)
     }
 }
