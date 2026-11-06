@@ -395,8 +395,8 @@ mod tests {
     fn historical_recall_is_scoped_to_each_registry_and_never_expands_custom_tool_sets() {
         let first = Registry::without_workspace();
         let second = Registry::without_workspace();
-        first.seed_history(&[json!({"role":"user","content":"first private conversation"})]);
-        second.seed_history(&[json!({"role":"user","content":"second different conversation"})]);
+        first.seed_history(&[json!({"role":"user","content":"first private conversation"})]).unwrap();
+        second.seed_history(&[json!({"role":"user","content":"second different conversation"})]).unwrap();
         assert_eq!(first.history.search("first", None, 5)["matches"][0]["recordId"], "h0");
         assert!(second.history.search("first", None, 5)["matches"].as_array().unwrap().is_empty());
         assert!(first.get("search_history").is_ok());
