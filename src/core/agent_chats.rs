@@ -126,8 +126,8 @@ impl Core {
         };
         limits.validate()?;
         let task = v["task"].as_str().unwrap_or("").trim();
-        if (task.is_empty() && v["conversationId"].is_null()) || task.len() > 8000 {
-            return Err("Task must contain 1–8000 bytes".into());
+        if task.is_empty() && v["conversationId"].is_null() {
+            return Err("Write a task or provide a conversation attachment".into());
         }
         let workspace = v["workspace"]
             .as_str()
@@ -249,9 +249,8 @@ impl Core {
                 {
                     pending_task = Some(task);
                 }
-                if effective_task.len() > 8000 {
-                    return Err("The continued objective is too long; start a new request with a concise objective.".into());
-                }
+                // Oversized continuation instructions are stored as originals and
+                // virtualized before the next model inference, not rejected.
                 parent = pending_task.as_ref().map(|task| json!(task.id));
                 resume_evidence =
                     linked_evidence(chat, parent.as_ref().and_then(Value::as_str).unwrap_or(""))?;
@@ -305,6 +304,17 @@ impl Core {
             chat.messages.push(message);
             history = self.repository.wire_messages(chat)?;
         }
+        let registry = if workspace.is_some() {
+            Registry::default()
+        } else {
+            Registry::without_workspace()
+        };
+        if let Some(ci) = ci {
+            registry.attach_history(
+                &self.repository.root,
+                &s.view.conversations[ci].id,
+            )?;
+        }
         let id = self.agent.submit_continuation(
             Submission {
                 owner: session.into(),
@@ -340,11 +350,7 @@ impl Core {
                 effort: serde_json::from_value(v.get("effort").cloned().unwrap_or(json!("off")))
                     .map_err(|e| format!("Invalid thinking effort: {e}"))?,
             }),
-            if workspace.is_some() {
-                Registry::default()
-            } else {
-                Registry::without_workspace()
-            },
+            registry,
             resume_evidence,
             pending_task,
         )?;
