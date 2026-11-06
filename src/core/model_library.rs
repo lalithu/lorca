@@ -64,13 +64,9 @@ impl Core {
             .error_for_status().map_err(|e|e.to_string())?;
         let value: Value = r.json().await.map_err(|e|e.to_string())?;
         let installed = if engine == provider::Engine::Ollama {
-            let ps: Value = self.client.get(format!("{host}/api/ps"))
-                .timeout(Duration::from_secs(3)).send().await.ok()
-                .and_then(|_|None).unwrap_or(Value::Null);
-            // A fresh /api/ps request is made below; failure is nonfatal.
             let loaded: Value = match self.client.get(format!("{host}/api/ps"))
                 .timeout(Duration::from_secs(3)).send().await {
-                    Ok(r) => r.json().await.unwrap_or_default(), Err(_) => ps,
+                    Ok(r) => r.json().await.unwrap_or_default(), Err(_) => Value::Null,
                 };
             let mut models = Vec::new();
             for m in value["models"].as_array().into_iter().flatten() {
