@@ -70,6 +70,14 @@ impl Default for Registry {
     }
 }
 impl Registry {
+    pub(crate) fn seed_history(&self, messages: &[Value]) {
+        self.history.reset(messages);
+    }
+
+    pub(crate) fn record_history(&self, message: &Value) {
+        self.history.record(message);
+    }
+
     pub(crate) async fn settle_for_revision(&self) -> Result<()> {
         for tool in self.tools.values() {
             tool.settle_for_revision().await?;
