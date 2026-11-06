@@ -149,7 +149,7 @@ async fn inspection_audit_distinguishes_a_listing_from_a_read() {
     assert!(
         v.events
             .iter()
-            .any(|event| event.kind == "task_verification" && event.data["satisfied"] == false)
+            .any(|event| event.kind == "task_execution_status" && event.data["semanticValidationPerformed"] == false)
     );
     assert_eq!(script.seen.lock().unwrap().len(), 2);
     let (v, script, _) = drive(
@@ -166,7 +166,7 @@ async fn inspection_audit_distinguishes_a_listing_from_a_read() {
     assert!(
         v.events
             .iter()
-            .any(|event| event.kind == "task_verification" && event.data["satisfied"] == true)
+            .any(|event| event.kind == "task_execution_status" && event.data["semanticValidationPerformed"] == false)
     );
 }
 #[tokio::test]
@@ -186,7 +186,7 @@ async fn tool_free_replies_stop_and_do_not_change_files() {
         assert!(
             v.events
                 .iter()
-                .any(|event| event.kind == "task_verification" && event.data["satisfied"] == false)
+                .any(|event| event.kind == "task_execution_status" && event.data["semanticValidationPerformed"] == false)
         );
     }
 }
@@ -229,7 +229,7 @@ async fn combined_request_audit_distinguishes_edit_and_inspection() {
     assert!(
         v.events
             .iter()
-            .any(|event| event.kind == "task_verification" && event.data["satisfied"] == false)
+            .any(|event| event.kind == "task_execution_status" && event.data["semanticValidationPerformed"] == false)
     );
     assert_eq!(script.seen.lock().unwrap().len(), 2);
     let (v, script, _) = drive(
@@ -247,7 +247,7 @@ async fn combined_request_audit_distinguishes_edit_and_inspection() {
     assert!(
         v.events
             .iter()
-            .any(|event| event.kind == "task_verification" && event.data["satisfied"] == true)
+            .any(|event| event.kind == "task_execution_status" && event.data["semanticValidationPerformed"] == false)
     );
 }
 #[tokio::test]
@@ -268,7 +268,7 @@ async fn a_different_successful_patch_cannot_satisfy_readme_update() {
     assert!(
         v.events
             .iter()
-            .any(|event| event.kind == "task_verification" && event.data["satisfied"] == false)
+            .any(|event| event.kind == "task_execution_status" && event.data["semanticValidationPerformed"] == false)
     );
     assert_eq!(script.seen.lock().unwrap().len(), 2);
     assert_eq!(
@@ -576,7 +576,7 @@ async fn successful_nested_read_is_retained_after_other_tools_and_has_no_complet
     assert!(
         view.events
             .iter()
-            .any(|e| e.kind == "task_verification" && e.data["satisfied"] == true)
+            .any(|e| e.kind == "task_execution_status" && e.data["semanticValidationPerformed"] == false)
     );
 }
 #[tokio::test]
