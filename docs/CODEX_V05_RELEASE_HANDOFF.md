@@ -1,3 +1,8 @@
+> Historical incoming handoff. The original failure list and draft JSONL design
+> below describe the candidate before local hardening. Current architecture and
+> test results are in [v0.5 validation](v0.5-validation.md). Do not merge or release
+> without the owner's separate approval.
+
 # Codex handoff — Lorca v0.5 release review, hardening, tests, and final delivery
 
 You are working in the **actual repository** `lalithu/lorca`.

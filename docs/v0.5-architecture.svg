@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="850" viewBox="0 0 1440 850" role="img" aria-labelledby="title desc">
-<title id="title">Lorca v0.5 Target Agent Architecture</title>
+<title id="title">Lorca v0.5 Release Candidate Architecture</title>
 <desc id="desc">User input enters Lorca's modular Rust harness: input virtualization, context checkpoints, searchable archive, tools, and output continuation. The harness exchanges prompts, decisions and observations with a local model. Model owns reasoning, harness owns execution and memory. Hardware advisor is last.</desc>
 <defs>
  <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0 0L8 3L0 6Z" fill="#087f84"/></marker>
@@ -37,7 +37,7 @@
 <text x="707" y="368" text-anchor="middle" class="dark body">Model-directed notes</text>
 <rect x="846" y="256" width="236" height="150" rx="14" class="box"/>
 <text x="964" y="291" text-anchor="middle" class="dark boxhead">SEARCHABLE MEMORY</text>
-<text x="964" y="322" text-anchor="middle" class="dark body">Append-only original records</text>
+<text x="964" y="322" text-anchor="middle" class="dark body">SQLite originals + FTS5 index</text>
 <text x="964" y="345" text-anchor="middle" class="dark body">Search + exact chunk reads</text>
 <text x="964" y="368" text-anchor="middle" class="dark body">No permission by recall</text>
 <rect x="332" y="434" width="365" height="151" rx="14" class="box"/>
@@ -60,8 +60,8 @@
 <text x="1140" y="290" text-anchor="middle" class="note">Prompt</text>
 <text x="1140" y="446" text-anchor="middle" class="note">Decision</text>
 <rect x="300" y="674" width="816" height="81" rx="15" fill="#e7eefc" stroke="#a6b9d8"/>
-<text x="708" y="704" text-anchor="middle" class="dark boxhead">HARDWARE-AWARE PREPARATION · FINAL PHASE</text>
-<text x="708" y="733" text-anchor="middle" class="dark body">Available memory/storage · Model metadata · Backend measurements · User-controlled downloads</text>
+<text x="708" y="704" text-anchor="middle" class="dark boxhead">READ-ONLY HARDWARE ADVISOR</text>
+<text x="708" y="733" text-anchor="middle" class="dark body">Memory/storage estimates · Actual backend allocation · No automatic download or reload</text>
 <rect x="30" y="783" width="1380" height="44" rx="12" class="head"/>
 <text x="720" y="811" text-anchor="middle" class="white" font-size="19" font-weight="700">Model owns reasoning and completion. Rust owns memory, execution and safety.</text>
 </svg>

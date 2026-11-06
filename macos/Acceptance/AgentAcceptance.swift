@@ -41,7 +41,7 @@ enum LorcaAsset {
   for status in [AgentTaskSnapshot.Status.incomplete,.denied] {guard !status.active && status != .completed else{exit(5)}}
   var report:[[String:Any]]=[]
   var acceptedAll=true
-  let prompts = env["LORCA_ACCEPTANCE_TASK"] == "long" ? [
+  let prompts = env["LORCA_ACCEPTANCE_V05"] == "1" ? ["Read README.md and src/lib.rs. Summarize them. Do not edit files or run commands."] : env["LORCA_ACCEPTANCE_TASK"] == "long" ? [
    "Inspect this repository and update README.md to accurately describe the current implementation. Inspect these actual modules: src/agentloop/execution.rs, src/agentloop/verification.rs, src/agentloop/authority.rs, src/tools/workspace.rs, src/tools/registry.rs, src/tools/terminal/command.rs, src/agentloop/runtime.rs, src/provider/agent.rs, src/core/agent_chats.rs, and src/context.rs. Document the real architecture, safety boundaries and limitations in a concise README, then run cargo test. Use nextOffset for relevant truncated sections. Keep the README under 250 words."
   ] : [
    "Inspect this repository and update README.md to accurately describe the current implementation.",
@@ -106,6 +106,29 @@ enum LorcaAsset {
   print("NATIVE_READBACK README_BYTES=\(readme.utf8.count)")
   let view=NSApp.windows.first{$0.title == "lorca"}?.contentView
   if let view,let rep=view.bitmapImageRepForCachingDisplay(in:view.bounds) {view.cacheDisplay(in:view.bounds,to:rep);if let data=rep.representation(using:.png,properties:[:]){try? data.write(to:root.appendingPathComponent("native-final.png"))}}
+  if env["LORCA_ACCEPTANCE_V05"] == "1", acceptedAll {
+   do {
+    for format in ["json", "markdown"] {
+     let raw = try await store.backend.command(["op":"exportConversation", "conversationId":store.library.selectedID.uuidString,"format":format])
+     guard let export = try JSONSerialization.jsonObject(with:raw) as? [String:Any],let text=export["content"] as? String,!text.isEmpty else {throw BackendError(message:"Empty export")}
+     if format == "json" {
+      guard let payload = try JSONSerialization.jsonObject(with:Data(text.utf8)) as? [String:Any],let records=payload["originalRecords"] as? [[String:Any]],records.contains(where:{$0["role"] as? String == "tool"}) else {throw BackendError(message:"Export lost original tool results")}
+     }
+     try text.write(to:root.appendingPathComponent("entire-chat."+(format == "json" ? "json":"md")),atomically:true,encoding:.utf8)
+    }
+    let raw = try await store.backend.command(["op":"hardwareAdvice","online":false])
+    guard let advice = try JSONSerialization.jsonObject(with:raw) as? [String:Any],let hardware=advice["hardware"] as? [String:Any],hardware["physicalMemoryBytes"] as? NSNumber != nil else {throw BackendError(message:"Missing native hardware advice")}
+    try raw.write(to:root.appendingPathComponent("hardware-advice.json"))
+    let panel=NSWindow(contentRect:NSRect(x:0,y:0,width:740,height:620),styleMask:[.titled,.closable],backing:.buffered,defer:false)
+    panel.appearance=NSAppearance(named:.darkAqua)
+    panel.contentView=NSHostingView(rootView:ModelAdviceView(backend:store.backend).preferredColorScheme(.dark).background(Color(nsColor:.windowBackgroundColor)));panel.center();panel.makeKeyAndOrderFront(nil)
+    try? await Task.sleep(for:.seconds(2))
+    panel.displayIfNeeded()
+    if let content=panel.contentView {Chunk2Acceptance.capture(content,"v05-advisor",root)}
+    panel.orderOut(nil)
+    print("NATIVE_V05_EXPORT_AND_ADVISOR_PASSED")
+   } catch {print("NATIVE_V05_FAILED \(error)");acceptedAll=false}
+  }
   _=await store.modelSession.close(unload:false)
   print(acceptedAll ? "NATIVE_ACCEPTANCE_PASSED":"NATIVE_ACCEPTANCE_FAILED")
   exit(acceptedAll ? 0:3)
