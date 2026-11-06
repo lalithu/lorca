@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import Metal
 
 // Presentation-only state: the Rust core and native runtimes own actual model
 // inventory, transfers, allocations and file deletion.
@@ -115,11 +116,16 @@ struct ModelTransfer: Identifiable {
             issue = nil
         } catch { issue = "Cannot read models: \(error.localizedDescription)" }
     }
+    private var metalWorkingSetBytes: UInt64? {
+        MTLCreateSystemDefaultDevice()?.recommendedMaxWorkingSetSize
+    }
     func searchHub() async {
         searching = true
         defer { searching = false }
         do {
-            let v = try await response("modelCatalog", extra: ["query": search])
+            var args: [String: Any] = ["query":search]
+            if let limit = metalWorkingSetBytes { args["metalWorkingSetBytes"] = limit }
+            let v = try await response("modelCatalog", extra: args)
             candidates = (v["items"] as? [[String: Any]] ?? []).map(HubModel.init)
             issue = nil
         } catch { issue = "Hugging Face search failed: \(error.localizedDescription)" }
@@ -136,7 +142,9 @@ struct ModelTransfer: Identifiable {
         selected = model.id
         selectedQuant = model.recommendedQuant
         do {
-            let v = try await response("modelDetails", extra: ["repo": model.id])
+            var args: [String: Any] = ["repo":model.id]
+            if let limit = metalWorkingSetBytes { args["metalWorkingSetBytes"] = limit }
+            let v = try await response("modelDetails", extra: args)
             let detail = HubModel(v)
             if let index = candidates.firstIndex(where: { $0.id == model.id }) {
                 candidates[index] = detail
