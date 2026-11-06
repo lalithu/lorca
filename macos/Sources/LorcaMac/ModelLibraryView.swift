@@ -15,6 +15,7 @@ struct LibraryModel: Identifiable {
     let allocatedContext: Int?
     let loadedMemoryBytes: UInt64?
     let canDelete: Bool
+    let contextTiers: [ContextCost]
 
     init(_ value: [String: Any]) {
         id = value["id"] as? String ?? ""
@@ -28,6 +29,7 @@ struct LibraryModel: Identifiable {
         allocatedContext = (value["allocatedContext"] as? NSNumber)?.intValue
         loadedMemoryBytes = (value["loadedMemoryBytes"] as? NSNumber)?.uint64Value
         canDelete = value["canDelete"] as? Bool ?? true
+        contextTiers = (value["contextTiers"] as? [[String: Any]] ?? []).map(ContextCost.init)
     }
 }
 struct HubModel: Identifiable {
@@ -455,7 +457,7 @@ struct ModelLibraryView: View {
             Text("Change your next-task working window in Chat. Ollama may reallocate per request; llama.cpp requires a compatible loaded context. This panel never claims a change succeeded before the runtime reports it.")
                 .font(.caption).foregroundStyle(.secondary)
             if model.id == store.selectedModel && store.providerName == library.provider {
-                ContextChoices(store: store, allocated: model.allocatedContext, compact: false)
+                ContextChoices(store: store, allocated: model.allocatedContext, compact: false, memory: model.contextTiers)
             }
             HStack(spacing: 12) {
                 Button {
