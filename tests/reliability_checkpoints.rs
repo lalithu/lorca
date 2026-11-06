@@ -160,7 +160,7 @@ async fn a_reply_cannot_manufacture_edit_evidence() {
     assert!(
         v.events
             .iter()
-            .any(|event| event.kind == "task_verification" && event.data["satisfied"] == false)
+            .any(|event| event.kind == "task_execution_status" && event.data["semanticValidationPerformed"] == false)
     );
     assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
 }
