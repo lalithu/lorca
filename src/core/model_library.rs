@@ -112,7 +112,10 @@ impl Core {
                 let memory = &m["memory"]["effective"];
                 models.push(json!({
                     "id":id,"name":id,"provider":"llama.cpp",
-                    "sizeBytes":m["size"],"parameters":m["meta"]["n_params"],
+                    "sizeBytes":m["meta"]["size"].as_u64()
+                        .or_else(||m["size"].as_u64()),
+                    "parameters":m["meta"]["n_params"].as_u64()
+                        .map(|n|format!("{:.1}B",n as f64/1e9)),
                     "quant":m["meta"]["ftype"],
                     "vision":m["architecture"]["input_modalities"].as_array()
                         .map(|xs|xs.iter().any(|v|v == "image")),
