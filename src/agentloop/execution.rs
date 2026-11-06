@@ -40,7 +40,9 @@ impl Agent {
         ];
         messages.extend(history);
         if messages.last().is_none_or(|m| m["role"] != "user") {
-            messages.push(json!({"role":"user","content":task}));
+            let user = json!({"role":"user","content":task});
+            registry.record_history(&user);
+            messages.push(user);
         }
         let mut context = crate::context::Context::default();
         let capacity = tokio::select! {biased; _=cancel.changed()=>return Err("Cancelled".into()),
