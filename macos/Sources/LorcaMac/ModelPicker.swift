@@ -5,6 +5,7 @@ struct ModelPicker: View {
     var compact = false
     @State private var confirmingReload = false
     @State private var confirmingUnload = false
+    @State private var showingAdvisor = false
     var body: some View {
         Menu {
             ForEach(store.modelChoices, id: \.self) { model in
@@ -14,6 +15,7 @@ struct ModelPicker: View {
                 }
             }
             Divider()
+            Button("Hardware-aware model advisor…") { showingAdvisor = true }
             Button("Reload model…") { confirmingReload = true }.disabled(!store.canReloadModel)
             Button("Unload model…") { confirmingUnload = true }.disabled(!store.canUnloadModel)
         } label: {
@@ -37,6 +39,9 @@ struct ModelPicker: View {
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("The local model server may share models with other apps. Unloading can interrupt another client using this model. Your chats are kept; the model loads again when you send a message.")
+        }
+        .sheet(isPresented: $showingAdvisor) {
+            ModelAdviceView(backend: store.backend)
         }
         .confirmationDialog("Reload \(store.selectedModel)?", isPresented: $confirmingReload) {
             Button("Reload model", role: .destructive) { Task { await store.reloadModel() } }
