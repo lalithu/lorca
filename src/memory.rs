@@ -9,7 +9,6 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     fs::{self, OpenOptions},
-    hash::Hash,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
@@ -60,7 +59,6 @@ impl Record {
 struct State {
     records: Vec<Record>,
     journal: Option<PathBuf>,
-    initialized: bool,
 }
 
 /// Cheap clones share one task/conversation-scoped index and disk journal.
@@ -78,7 +76,6 @@ impl HistoryIndex {
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let mut state = self.state.write().map_err(|e| e.to_string())?;
         state.journal = Some(dir.join(format!("{id}.jsonl")));
-        state.initialized = false;
         Ok(())
     }
 
@@ -110,7 +107,6 @@ impl HistoryIndex {
         }
         records.extend(additions);
         state.records = records;
-        state.initialized = true;
         Ok(())
     }
 
