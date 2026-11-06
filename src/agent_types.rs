@@ -113,7 +113,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            iterations: 20,
+            iterations: 0,
             model_seconds: 120,
             command_seconds: 30,
         }
