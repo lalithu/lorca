@@ -261,6 +261,7 @@ impl Core {
                     session,
                     text(&v, "model")?,
                     v["unloadPrevious"].as_bool().unwrap_or(false),
+                    requested_context(&v)?,
                 )
                 .await
             }
@@ -315,4 +316,15 @@ impl Core {
 
 pub fn text<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
     v[key].as_str().ok_or_else(|| format!("Missing {key}"))
+}
+
+fn requested_context(v: &Value) -> Result<Option<u64>> {
+    match v.get("contextWindow").filter(|value| !value.is_null()) {
+        None => Ok(None),
+        Some(value) => value
+            .as_u64()
+            .filter(|n| (2048..=262144).contains(n))
+            .map(Some)
+            .ok_or_else(|| "Context window must be between 2048 and 262144 tokens".into()),
+    }
 }

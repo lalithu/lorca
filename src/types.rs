@@ -105,6 +105,8 @@ pub struct ModelChoice {
     pub route: ModelRoute,
     pub model: String,
     pub managed: bool,
+    #[serde(default, rename = "contextLimit")]
+    pub context_limit: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

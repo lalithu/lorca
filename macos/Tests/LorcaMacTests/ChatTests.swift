@@ -9,6 +9,7 @@ class MockBackend: BackendTransport {
     var chats = [Conversation()]
     var selected: UUID
     var model = "qwen3.5:9b"
+    var modelContextLimit: Int?
     var activeModel: String? = "qwen3.5:9b"
     var fail = false
     var breakNextStream = false
@@ -21,10 +22,16 @@ class MockBackend: BackendTransport {
     init() { selected = chats[0].id }
     func snapshot() throws -> BackendSnapshot {
         let encoded = try JSONEncoder().encode(chats)
+        let choices: Any = modelContextLimit.map { limit in
+            [model, "other"].map { name in
+                ["route": ["provider": "ollama", "host": "http://127.0.0.1:11434"],
+                 "model": name, "managed": true, "contextLimit": limit] as [String: Any]
+            }
+        } as Any? ?? NSNull()
         return try JSONDecoder().decode(BackendSnapshot.self, from: JSONSerialization.data(withJSONObject: [
             "revision": revision, "conversations": JSONSerialization.jsonObject(with: encoded),
             "sessions": [["id": sessionID!, "selectedId": selected.uuidString, "model": model, "activeModel": activeModel as Any? ?? NSNull(),
-                          "modelsToRelease": activeModel.map { [$0] } ?? [], "models": [model, "other"], "isConnected": true,
+                          "modelsToRelease": activeModel.map { [$0] } ?? [], "models": [model, "other"], "modelChoices": choices, "isConnected": true,
                           "usage": ["contextUsed": 0, "contextLimit": 4096]]], "turns": turn.map { [$0] } ?? []
         ]))
     }
@@ -89,10 +96,15 @@ final class ChatTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
         defaults.set("qwen3.5:9b", forKey: "model")
+        backend.modelContextLimit = 40960
         let store = ChatStore(backend: backend, defaults: defaults)
         await store.refreshConnection()
         await store.refreshConnection()
-        await store.selectModel(try XCTUnwrap(store.modelChoices.first { $0.model == "other" }))
+        let other = try XCTUnwrap(store.modelChoices.first { $0.model == "other" })
+        XCTAssertEqual(other.contextOptions, [2048, 4096, 8192, 16384, 32768, 40960])
+        await store.selectModel(other, contextWindow: 32768)
+        XCTAssertEqual(store.displayUsage.contextLimit, 32768)
+        XCTAssertEqual(ChatStore(backend: backend, defaults: defaults).contextPreference(for: other), 32768)
         for _ in 0..<200 {
             if backend.requests.contains(where: { $0["op"] as? String == "selectModel" }) { break }
             try await Task.sleep(for: .milliseconds(5))
@@ -106,7 +118,10 @@ final class ChatTests: XCTestCase {
             if backend.requests.contains(where: { $0["op"] as? String == "agent_start" }) { break }
             try await Task.sleep(for: .milliseconds(5))
         }
-        XCTAssertEqual(backend.requests.last(where: { $0["op"] as? String == "agent_start" })?["model"] as? String, "other")
+        let start = backend.requests.last { $0["op"] as? String == "agent_start" }
+        XCTAssertEqual(start?["model"] as? String, "other")
+        XCTAssertEqual(start?["contextWindow"] as? Int, 32768)
+        XCTAssertEqual(start?["configureContext"] as? Bool, true)
         _ = await store.modelSession.close(unload: false)
     }
     func testDraftIsSentBeforePromptAndNeverReplayedAfterFailure() async throws {

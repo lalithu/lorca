@@ -66,8 +66,31 @@ final class ChatStore: ObservableObject {
         let memory = ProcessInfo.processInfo.physicalMemory
         return memory < 24 * 1024 * 1024 * 1024 ? 8192 : 16384
     }
+    private var priorUsageTaskID: String?
+    private func contextPreferenceKey(_ choice: LocalModel) -> String {
+        "modelContext.\(choice.route.provider).\(choice.route.host).\(choice.model)"
+    }
+    func contextPreference(for choice: LocalModel) -> Int? {
+        let saved = min(defaults.integer(forKey: contextPreferenceKey(choice)), choice.contextLimit ?? Int.max)
+        return saved >= 2048 ? saved : nil
+    }
+    private var fixedContextWindow: Int? { modelChoice.flatMap { contextPreference(for: $0) } }
+    private var selectedContextWindow: Int { fixedContextWindow ?? contextTarget }
     var displayUsage: ChatUsage {
-        if let task=agent.latest,task.conversationId==library.selectedID,task.model==nil || task.model==selectedModel {return task.usage ?? ChatUsage(contextUsed:nil)}
+        let task = agent.latest
+        let matchingTask = task.flatMap {
+            $0.id != priorUsageTaskID && $0.conversationId == library.selectedID
+                && ($0.model == nil || $0.model == selectedModel)
+                && (fixedContextWindow == nil || $0.owner == agent.sessionID) ? $0 : nil
+        }
+        let selectedLimit = fixedContextWindow.map { _ in selectedContextWindow }
+        if var measured = matchingTask?.usage {
+            measured.contextLimit = measured.contextLimit ?? selectedLimit
+            return measured
+        }
+        if modelChoice != nil {
+            return ChatUsage(contextUsed: nil, contextLimit: selectedLimit ?? usage.contextLimit ?? selectedContextWindow)
+        }
         return usage
     }
     private var continuation: (conversation: UUID, task: String)?
@@ -248,7 +271,11 @@ final class ChatStore: ObservableObject {
         modelChoices = session.modelChoices ?? session.models.map {
             LocalModel(route: fallbackRoute, model: $0, managed: true)
         }
-        modelChoice = session.modelChoice ?? modelChoices.first { $0.model == session.model && $0.route == fallbackRoute }
+        let nextChoice = session.modelChoice ?? modelChoices.first { $0.model == session.model && $0.route == fallbackRoute }
+        if let previous = modelChoice, !previous.matches(nextChoice) {
+            priorUsageTaskID = agent.latest?.id
+        }
+        modelChoice = nextChoice
         isConnected = session.isConnected
         providerName = session.provider == "llama.cpp" ? "llama.cpp" : "Ollama"
         selectedModel = session.model
@@ -261,30 +288,38 @@ final class ChatStore: ObservableObject {
             usage = turn.running ? ChatUsage(contextUsed: nil, contextLimit: session.usage.contextLimit) : turn.usage
         } else { usage = session.usage }
     }
-    func selectModel(_ choice: LocalModel) async {
+    func selectModel(_ choice: LocalModel, contextWindow: Int? = nil) async {
         guard !isSelectingModel, !isChecking, !closing, modelChoices.contains(choice),
-              modelChoice != choice else { return }
+              contextWindow.map({ choice.contextOptions.contains($0) }) ?? true else { return }
+        let changingModel = !choice.matches(modelChoice)
+        guard changingModel || contextWindow != contextPreference(for: choice) else { return }
         isSelectingModel = true
         defer { isSelectingModel = false }
         await pending?.value
         guard !closing else { return }
-        if await perform(["op": "selectModel", "model": choice.model,
-                          "route": ["provider": choice.route.provider, "host": choice.route.host]]),
-           let encoded = try? JSONEncoder().encode(choice) {
-            defaults.set(encoded, forKey: "preferredModel")
+        if changingModel {
+            guard await perform(["op": "selectModel", "model": choice.model,
+                                 "route": ["provider": choice.route.provider, "host": choice.route.host]]) else { return }
+            if let encoded = try? JSONEncoder().encode(choice) {
+                defaults.set(encoded, forKey: "preferredModel")
+            }
         }
+        priorUsageTaskID = agent.latest?.id
+        defaults.set(contextWindow, forKey: contextPreferenceKey(choice))
+        objectWillChange.send()
     }
 
     func send() {
         guard !closing, !isSelectingModel, canSend, agent.reserveSubmission(allowActive: canSteerActive) else { return }
         let conversation = library.selectedID, request = UUID(), text = draft, model = selectedModel
-        let workspace=agentWorkspace, effort=thinkingEffort.rawValue, contextWindow=contextTarget
+        let workspace=agentWorkspace, effort=thinkingEffort.rawValue, contextWindow=selectedContextWindow
+        let configureContext = fixedContextWindow != nil
         let continueTaskID = continuation?.conversation == conversation ? continuation?.task : nil
         let preceding = pending
         pending = Task { [weak self] in
             await preceding?.value
             guard let self, !self.closing, !Task.isCancelled else { return }
-            let accepted = await self.agent.submit(task: text, workspace: workspace, conversation: conversation, request: request, model: model, effort: effort, continueTaskID: continueTaskID, contextWindow: contextWindow)
+            let accepted = await self.agent.submit(task: text, workspace: workspace, conversation: conversation, request: request, model: model, effort: effort, continueTaskID: continueTaskID, contextWindow: contextWindow, configureContext: configureContext)
             if accepted && self.continuation?.task == continueTaskID { self.continuation = nil }
             _ = await self.perform(["op": "snapshot"])
         }
@@ -322,7 +357,9 @@ final class ChatStore: ObservableObject {
         do {
             _ = try await backend.command(["op": "release", "model": model])
             _ = await perform(["op": "snapshot"])
-            _ = await perform(["op": "prepare", "model": model, "unloadPrevious": false])
+            var prepare: [String: Any] = ["op": "prepare", "model": model, "unloadPrevious": false]
+            if fixedContextWindow != nil { prepare["contextWindow"] = selectedContextWindow }
+            _ = await perform(prepare)
         } catch { self.error = "Couldn’t reload the model. \(friendlyError(error))" }
     }
     // Release only; the next message prepares the selected model normally.

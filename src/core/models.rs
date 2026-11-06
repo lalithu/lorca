@@ -171,6 +171,7 @@ impl Core {
                 for model in catalog.models {
                     choices.push(ModelChoice {
                         route: route.clone(),
+                        context_limit: catalog.context_limits.get(&model).copied(),
                         model,
                         managed: catalog.managed,
                     });
@@ -245,7 +246,11 @@ impl Core {
         if client.engine != choice.route.provider || client.host != choice.route.host {
             view.active_model = None;
         }
-        if view.model_choice.as_ref() != Some(&choice) {
+        if view
+            .model_choice
+            .as_ref()
+            .is_none_or(|previous| previous.route != choice.route || previous.model != choice.model)
+        {
             view.allocated_context = None;
             view.usage = Usage::default();
         }
@@ -338,6 +343,7 @@ impl Core {
         session: &str,
         model: &str,
         unload_previous: bool,
+        context_window: Option<u64>,
     ) -> Result<Value> {
         if model.is_empty() || model.len() > 500 || model.chars().any(char::is_control) {
             return Err("Invalid model name".into());
@@ -361,6 +367,9 @@ impl Core {
                 .active_model
                 .as_deref()
                 .is_some_and(|m| provider::same_model(m, model))
+                && (client.engine != provider::Engine::Ollama
+                    || context_window.is_none()
+                    || context_window == view.allocated_context)
             {
                 s.view.sessions[i].error = None;
                 self.publish(&mut s);
@@ -389,7 +398,7 @@ impl Core {
                     Self::held_by_other(&s, session, old, &route)
                 };
                 if !shared {
-                    provider::manage(&self.client, engine, host, old, false).await?;
+                    provider::manage(&self.client, engine, host, old, false, None).await?;
                     released = true;
                     let mut s = self.state.lock().unwrap();
                     let i = Self::session_index(&s, session)?;
@@ -410,8 +419,10 @@ impl Core {
                             .is_some_and(|m| provider::same_model(m, model))
                 })
             };
-            if managed && !shared {
-                provider::manage(&self.client, engine, host, model, true).await?;
+            if managed
+                && (!shared || (engine == provider::Engine::Ollama && context_window.is_some()))
+            {
+                provider::manage(&self.client, engine, host, model, true, context_window).await?;
             }
             Ok::<_, String>(())
         };
@@ -421,7 +432,7 @@ impl Core {
             && released
             && let Some(old) = &previous
         {
-            let _ = provider::manage(&self.client, engine, host, old, true)
+            let _ = provider::manage(&self.client, engine, host, old, true, None)
                 .await
                 .map(|()| {
                     let mut s = self.state.lock().unwrap();
@@ -495,19 +506,15 @@ impl Core {
         }
         let mut url = reqwest::Url::parse(&format!("{host}/props")).ok()?;
         url.query_pairs_mut().append_pair("model", model);
-        let value: Value = self
+        if let Ok(response) = self
             .client
             .get(url)
             .timeout(Duration::from_secs(2))
             .send()
             .await
-            .ok()?
-            .json()
-            .await
-            .ok()?;
-        if let Some(limit) = value["default_generation_settings"]["n_ctx"]
-            .as_u64()
-            .filter(|n| *n > 0)
+            && let Ok(response) = response.error_for_status()
+            && let Ok(value) = response.json::<Value>().await
+            && let Some(limit) = provider::llama_props_context(&value)
         {
             return Some(limit);
         }
@@ -525,13 +532,11 @@ impl Core {
             .json()
             .await
             .ok()?;
-        models["data"].as_array()?.iter().find(|m| {
+        provider::llama_allocation(models["data"].as_array()?.iter().find(|m| {
             m["id"]
                 .as_str()
                 .is_some_and(|id| provider::same_model(id, model))
-        })?["meta"]["n_ctx"]
-            .as_u64()
-            .filter(|n| *n > 0)
+        })?)
     }
     pub(super) async fn release(&self, session: &str, model: &str) -> Result<()> {
         let route = self.model_route(session)?;
@@ -556,7 +561,15 @@ impl Core {
                 ));
             }
         }
-        provider::manage(&self.client, route.provider, &route.host, model, false).await?;
+        provider::manage(
+            &self.client,
+            route.provider,
+            &route.host,
+            model,
+            false,
+            None,
+        )
+        .await?;
         let mut s = self.state.lock().unwrap();
         let i = Self::session_index(&s, session)?;
         Self::update_allocation(&mut s, i, session, route, model, false);

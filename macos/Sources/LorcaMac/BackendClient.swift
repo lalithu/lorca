@@ -18,6 +18,18 @@ struct LocalModel: Codable, Hashable {
     let route: Route
     let model: String
     let managed: Bool
+    var contextLimit: Int? = nil
+
+    var contextOptions: [Int] {
+        guard let reported = contextLimit, reported >= 2048 else { return [] }
+        let limit = min(reported, 262144)
+        return [2048, 4096, 8192, 16384, 32768, 65536, 131072]
+            .filter { $0 < limit } + [limit]
+    }
+
+    func matches(_ other: LocalModel?) -> Bool {
+        route == other?.route && model == other?.model
+    }
 }
 
 struct BackendSession: Codable {

@@ -120,10 +120,10 @@ final class AgentStore: ObservableObject {
         submitting = true; error = nil
         return true
     }
-    func submit(task: String, workspace: URL?, conversation: UUID, request: UUID, model: String, effort: String = "off", continueTaskID: String? = nil, contextWindow: Int? = nil) async -> Bool {
+    func submit(task: String, workspace: URL?, conversation: UUID, request: UUID, model: String, effort: String = "off", continueTaskID: String? = nil, contextWindow: Int? = nil, configureContext: Bool = false) async -> Bool {
         defer { submitting = false }
         do {
-            _ = try await client.start(task: task, workspace: workspace, conversation: conversation, request: request, model: model, effort: effort, continueTaskID: continueTaskID, contextWindow: contextWindow)
+            _ = try await client.start(task: task, workspace: workspace, conversation: conversation, request: request, model: model, effort: effort, continueTaskID: continueTaskID, contextWindow: contextWindow, configureContext: configureContext)
             try await restore()
             return true
         } catch {

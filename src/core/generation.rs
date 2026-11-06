@@ -104,7 +104,7 @@ impl Core {
             let core = self.clone();
             let sid = turn.session_id.clone();
             let name = model.clone();
-            let ready = tokio::spawn(async move { core.prepare(&sid, &name, false).await })
+            let ready = tokio::spawn(async move { core.prepare(&sid, &name, false, None).await })
                 .await
                 .map_err(|e| e.to_string())??;
             let session = ready["sessions"]

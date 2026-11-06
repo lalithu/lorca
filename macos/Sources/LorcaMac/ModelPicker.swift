@@ -12,14 +12,24 @@ struct ModelPicker: View {
                 Text("No models available")
             }
             ForEach(store.modelChoices, id: \.self) { choice in
-                Button { Task { await store.selectModel(choice) } } label: {
+                Menu {
+                    contextOption("Recommended", choice: choice, window: nil)
+                    ForEach(choice.contextOptions, id: \.self) { window in
+                        contextOption("\(window.formatted()) tokens", choice: choice, window: window)
+                    }
+                    if choice.contextOptions.isEmpty {
+                        Text("Context size unavailable from server").disabled(true)
+                    } else if choice.route.provider == "llama_cpp" {
+                        Text("Working window within server allocation").disabled(true)
+                    }
+                } label: {
                     let sameName = store.modelChoices.filter {
                         $0.model == choice.model && $0.route.provider == choice.route.provider
                     }.count > 1
                     let server = sameName ? choice.route.host.replacingOccurrences(of: "http://", with: "") : nil
                     let source = [choice.route.label, server].compactMap { $0 }.joined(separator: " · ")
                     let label = "\(choice.model) · \(source)"
-                    if choice == store.modelChoice { Label(label, systemImage: "checkmark") }
+                    if choice.matches(store.modelChoice) { Label(label, systemImage: "checkmark") }
                     else { Text(label) }
                 }
             }
@@ -60,4 +70,17 @@ struct ModelPicker: View {
             Text("The local model server may share models with other apps. Reloading can interrupt another client using this model. Your chats are kept.")
         }
     }
+
+    private func contextOption(_ title: String, choice: LocalModel, window: Int?) -> some View {
+        Button {
+            Task { await store.selectModel(choice, contextWindow: window) }
+        } label: {
+            if store.contextPreference(for: choice) == window {
+                Label(title, systemImage: "checkmark")
+            } else {
+                Text(title)
+            }
+        }
+    }
+
 }

@@ -7,6 +7,7 @@ pub(super) struct CoreInference {
     pub(super) model: String,
     pub(super) engine: provider::Engine,
     pub(super) context_window: Option<u64>,
+    pub(super) configure_context: bool,
     pub(super) effort: crate::agent_types::ThinkingEffort,
 }
 /// Keep the existing model preparation future alive until it has cleaned up its
@@ -18,14 +19,14 @@ impl Drop for LoadGuard {
     }
 }
 impl CoreInference {
-    async fn ready(&self) -> Result<()> {
+    async fn ready(&self, context_window: Option<u64>) -> Result<()> {
         let core = self.core.clone();
         let session = self.session.clone();
         let model = self.model.clone();
         let (tx, mut cancel) = watch::channel(false);
         let _guard = LoadGuard(tx);
         let prepared=tokio::spawn(async move {
-                let operation=core.prepare(&session,&model,false);tokio::pin!(operation);
+                let operation=core.prepare(&session,&model,false,context_window);tokio::pin!(operation);
                 tokio::select! {biased;
                     _=cancel.changed()=>{
                         let loading={let s=core.state.lock().unwrap();s.loads.get(&session).map(|tx|tx.send_replace(true)).is_some()};
@@ -61,13 +62,20 @@ impl Inference for CoreInference {
     }
     fn capacity(&self) -> FutureResult<'_, Option<u64>> {
         Box::pin(async {
-            self.ready().await?;
+            let requested = self
+                .context_window
+                .filter(|_| self.configure_context && self.engine == provider::Engine::Ollama);
+            self.ready(requested).await?;
             let allocated = self
                 .core
                 .context_limit_for(self.engine, &self.core.host(&self.session)?, &self.model)
                 .await;
             Ok(self.context_window.map_or(allocated, |target| {
-                Some(target.min(allocated.unwrap_or(crate::context::DEFAULT_CAPACITY)))
+                Some(target.min(allocated.unwrap_or(if requested.is_some() {
+                    target
+                } else {
+                    crate::context::DEFAULT_CAPACITY
+                })))
             }))
         })
     }
@@ -78,7 +86,7 @@ impl Inference for CoreInference {
         updates: &'a (dyn Fn(ModelUpdate) + Send + Sync),
     ) -> FutureResult<'a, Turn> {
         Box::pin(async move {
-            self.ready().await?;
+            self.ready(None).await?;
             self.provider()
                 .generate_stream(messages, tools, updates)
                 .await
@@ -119,7 +127,7 @@ impl CoreInference {
         effort: crate::agent_types::ThinkingEffort,
     ) -> FutureResult<'a, Turn> {
         Box::pin(async move {
-            self.ready().await?;
+            self.ready(None).await?;
             let provider = self.provider();
             let forward = |update| match update {
                 ModelUpdate::Reasoning {

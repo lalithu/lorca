@@ -16,9 +16,20 @@ async fn serve(
 }
 
 async fn reply(core: &Arc<Core>, session: &str, model: &str, expected: &str) {
-    core.command(json!({"op":"agent_start","session":session,"task":"Say hello","model":model}))
-        .await
-        .unwrap();
+    start_and_check_reply(
+        core,
+        json!({"op":"agent_start","session":session,"task":"Say hello","model":model}),
+        expected,
+    )
+    .await;
+}
+
+async fn start_and_check_reply(
+    core: &Arc<Core>,
+    request: Value,
+    expected: &str,
+) -> crate::types::Usage {
+    core.command(request).await.unwrap();
     let result = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Some(task) = core.agent.snapshot().filter(|task| !task.status.active()) {
@@ -31,6 +42,7 @@ async fn reply(core: &Arc<Core>, session: &str, model: &str, expected: &str) {
     .unwrap();
     assert_eq!(result.status, crate::agent::Status::Completed, "{result:?}");
     assert_eq!(result.result.as_deref(), Some(expected));
+    result.usage
 }
 
 async fn llama_reply(Json(body): Json<Value>) -> String {
@@ -228,4 +240,75 @@ async fn refresh_and_select_route_duplicate_model_ids_and_retire_each_allocation
     );
     empty_task.abort();
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn explicit_ollama_window_reconfigures_the_loaded_model_before_chat() {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    let root = std::env::temp_dir().join(format!("lorca-context-test-{}", uuid::Uuid::new_v4()));
+    let core = Core::new(Repository::new(root.clone()).unwrap()).unwrap();
+    let allocation = Arc::new(AtomicU64::new(8192));
+    let ps = allocation.clone();
+    let load = allocation.clone();
+    let chat = allocation.clone();
+    let (route, server) = serve(
+        Router::new()
+            .route(
+                "/api/tags",
+                get(|| async {
+                    Json(json!({"models":[{"name":"same","details":{"context_length":40960}}]}))
+                }),
+            )
+            .route(
+                "/api/ps",
+                get(move || async move {
+                    Json(json!({"models":[{"name":"same","context_length":ps.load(Relaxed)}]}))
+                }),
+            )
+            .route(
+                "/api/generate",
+                post(move |Json(body): Json<Value>| async move {
+                    assert_eq!(body["options"]["num_ctx"], 32768);
+                    load.store(32768, Relaxed);
+                    Json(json!({"model":"same","done":true}))
+                }),
+            )
+            .route(
+                "/api/chat",
+                post(move |Json(body): Json<Value>| async move {
+                    assert_eq!(body["options"]["num_ctx"], 32768);
+                    assert_eq!(chat.load(Relaxed), 32768);
+                    Json(json!({"message":{"role":"assistant","content":"Hello"},"done":true}))
+                }),
+            ),
+        Ollama,
+    )
+    .await;
+    let connected = core
+        .command(json!({"op":"connect","provider":"auto","model":"same"}))
+        .await
+        .unwrap();
+    let session = connected["session"].as_str().unwrap();
+    core.refresh_local_catalogs(session, &[route])
+        .await
+        .unwrap();
+    assert_eq!(
+        core.snapshot().sessions[0]
+            .model_choice
+            .as_ref()
+            .unwrap()
+            .context_limit,
+        Some(40960)
+    );
+    let usage = start_and_check_reply(
+        &core,
+        json!({"op":"agent_start","session":session,"task":"Say hello","model":"same",
+            "contextWindow":32768,"configureContext":true}),
+        "Hello",
+    )
+    .await;
+    assert_eq!(usage.context_limit, Some(32768));
+    server.abort();
+    let _ = std::fs::remove_dir_all(root);
 }

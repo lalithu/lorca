@@ -340,15 +340,14 @@ impl Core {
                     .get(session)
                     .ok_or("Session expired; reconnect.")?
                     .engine,
-                context_window: match v.get("contextWindow").filter(|value| !value.is_null()) {
-                    None => None,
-                    Some(value) => Some(
-                        value
-                            .as_u64()
-                            .filter(|n| (2048..=131072).contains(n))
-                            .ok_or("Context window must be between 2048 and 131072 tokens")?,
-                    ),
-                },
+                context_window: requested_context(v)?.map(|window| {
+                    s.view.sessions[si]
+                        .model_choice
+                        .as_ref()
+                        .and_then(|choice| choice.context_limit)
+                        .map_or(window, |limit| window.min(limit))
+                }),
+                configure_context: v["configureContext"].as_bool().unwrap_or(false),
                 effort: serde_json::from_value(v.get("effort").cloned().unwrap_or(json!("off")))
                     .map_err(|e| format!("Invalid thinking effort: {e}"))?,
             }),

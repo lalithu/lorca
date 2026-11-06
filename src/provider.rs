@@ -41,6 +41,7 @@ pub(crate) struct ModelCatalog {
     pub models: Vec<String>,
     pub loaded: Option<String>,
     pub managed: bool,
+    pub context_limits: std::collections::HashMap<String, u64>,
 }
 
 pub async fn manage(
@@ -49,9 +50,10 @@ pub async fn manage(
     base_url: &str,
     name: &str,
     load: bool,
+    context_window: Option<u64>,
 ) -> Result<(), String> {
     match engine {
-        Engine::Ollama => manage_model(client, base_url, name, load).await,
+        Engine::Ollama => manage_model(client, base_url, name, load, context_window).await,
         Engine::LlamaCpp => {
             if load {
                 // Reuse a model already loaded by the Llama app; an explicit load
@@ -148,24 +150,34 @@ pub(crate) async fn model_list(
                 .json()
                 .await
                 .map_err(|_| "Invalid Ollama model list".to_string())?;
-            let mut models = value["models"]
+            let entries = value["models"]
                 .as_array()
-                .ok_or("Invalid Ollama model list")?
-                .iter()
-                .filter_map(|m| {
-                    m["name"]
-                        .as_str()
-                        .or_else(|| m["model"].as_str())
-                        .filter(|name| !name.is_empty())
-                        .map(String::from)
-                })
-                .collect::<Vec<_>>();
+                .ok_or("Invalid Ollama model list")?;
+            let mut context_limits = std::collections::HashMap::new();
+            let mut models = Vec::new();
+            for entry in entries {
+                let Some(name) = entry["name"]
+                    .as_str()
+                    .or_else(|| entry["model"].as_str())
+                    .filter(|name| !name.is_empty())
+                else {
+                    continue;
+                };
+                if let Some(limit) = entry["details"]["context_length"]
+                    .as_u64()
+                    .filter(|n| *n > 0)
+                {
+                    context_limits.insert(name.to_owned(), limit);
+                }
+                models.push(name.to_owned());
+            }
             models.sort();
             models.dedup();
             Ok(ModelCatalog {
                 models,
                 loaded: None,
                 managed: true,
+                context_limits,
             })
         }
         Engine::LlamaCpp => {
@@ -191,11 +203,15 @@ pub(crate) async fn model_list(
                 .ok_or("Invalid llama.cpp model list")?;
             let mut models = Vec::new();
             let mut loaded = None;
+            let mut context_limits = std::collections::HashMap::new();
             for entry in entries {
                 let Some(id) = entry["id"].as_str().filter(|id| !id.is_empty()) else {
                     continue;
                 };
                 models.push(id.to_owned());
+                if let Some(limit) = llama_allocation(entry) {
+                    context_limits.insert(id.to_owned(), limit);
+                }
                 if entry["status"]["value"] == "loaded" && loaded.is_none() {
                     loaded = Some(id.to_owned());
                 }
@@ -205,14 +221,40 @@ pub(crate) async fn model_list(
             let managed = entries
                 .iter()
                 .any(|entry| entry["status"]["value"].is_string());
+            // Bare /props is read-only for a single-model server. Do not query
+            // router /props?model= from discovery, which can start a model.
+            if !managed
+                && models.len() == 1
+                && context_limits.is_empty()
+                && let Ok(response) = request("/props").send().await
+                && let Ok(response) = response.error_for_status()
+                && let Ok(props) = response.json::<Value>().await
+                && let Some(limit) = llama_props_context(&props)
+            {
+                context_limits.insert(models[0].clone(), limit);
+            }
             Ok(ModelCatalog {
                 models,
                 loaded,
                 managed,
+                context_limits,
             })
         }
     }
 }
+pub(crate) fn llama_props_context(props: &Value) -> Option<u64> {
+    props["default_generation_settings"]["n_ctx"]
+        .as_u64()
+        .filter(|n| *n > 0)
+}
+
+pub(crate) fn llama_allocation(entry: &Value) -> Option<u64> {
+    entry["memory"]["effective"]["n_ctx"]
+        .as_u64()
+        .filter(|n| *n > 0)
+        .or_else(|| entry["meta"]["n_ctx"].as_u64().filter(|n| *n > 0))
+}
+
 impl Usage {
     pub(crate) fn from_response(value: &Value) -> Self {
         let generated = value["eval_count"].as_u64();
@@ -267,11 +309,16 @@ pub async fn manage_model(
     base_url: &str,
     name: &str,
     load: bool,
+    context_window: Option<u64>,
 ) -> Result<(), String> {
     let action = if load { "load" } else { "unload" };
+    let mut body = json!({"model": name, "stream": false, "keep_alive": if load { -1 } else { 0 }});
+    if load && let Some(window) = context_window {
+        body["options"] = json!({"num_ctx": window});
+    }
     let response = client
         .post(format!("{base_url}/api/generate"))
-        .json(&json!({"model": name, "stream": false, "keep_alive": if load { -1 } else { 0 }}))
+        .json(&body)
         .timeout(Duration::from_secs(if load { 120 } else { 5 }))
         .send()
         .await
