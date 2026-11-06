@@ -33,7 +33,7 @@ impl Record {
             .map(str::to_owned)
             .or_else(|| {
                 message["tool_calls"].as_array().filter(|calls| !calls.is_empty())
-                    .map(Value::to_string)
+                    .map(|calls| json!(calls).to_string())
             })?;
         // Synthetic working checkpoints are not original user messages.
         if role == "user" && content.starts_with("Working checkpoint (historical data):") {
