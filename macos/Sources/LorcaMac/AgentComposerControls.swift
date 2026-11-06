@@ -16,10 +16,28 @@ struct AgentComposerControls: View {
         .toggleStyle(.button).controlSize(.small)
         .accessibilityLabel("Model thinking").accessibilityIdentifier("thinking-toggle")
         .help(store.currentAgentActive ? "Applies to the next task. Current inference and task remain unchanged." : "Show actual local-model thinking when supported. Reasoning is retained only in this session.")
-        .contextMenu {
-            Picker("Thinking effort",selection:$store.thinkingEffort) {ForEach(ThinkingEffort.allCases) {Text($0.label).tag($0)}}
-            Toggle("Show model reasoning", isOn: $showModelReasoning)
+        .overlay(alignment: .trailing) {
+            Menu {
+                Button("Off") { store.thinkingEffort = .off }
+                Button("Standard") { store.thinkingEffort = .nominal }
+                Button("High") { store.thinkingEffort = .high }
+                Divider()
+                Toggle("Show emitted reasoning", isOn: $showModelReasoning)
+                Text("Options are model-dependent; no fixed thinking-token cap is promised.")
+                    .font(.caption)
+            } label: {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(7)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .offset(x: 25)
+            .accessibilityIdentifier("thinking-effort-menu")
+            .help("Choose the reasoning mode for the next task.")
         }
+        .padding(.trailing, 26)
     }
 
 }

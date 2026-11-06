@@ -1,13 +1,14 @@
 import SwiftUI
 
 enum SidebarPage: String, CaseIterable, Identifiable {
-    case overview = "Overview", chats = "Chats", tasks = "Job Apps"
+    case overview = "Overview", chats = "Chats", models = "Models", tasks = "Job Apps"
     case settings = "Settings"
     var id: String { rawValue }
     var symbol: String {
         switch self {
         case .overview: return "square.grid.2x2"
         case .chats: return "bubble.left.and.bubble.right"
+        case .models: return "square.stack.3d.up"
         case .tasks: return "briefcase"
         case .settings: return "slider.horizontal.3"
         }
@@ -38,6 +39,8 @@ struct DashboardView: View {
                 if windows.page == .chats {
                     ChatView(store: store)
                         .padding(.horizontal, 32).padding(.bottom, 24)
+                } else if windows.page == .models {
+                    ModelLibraryView(store: store)
                 } else if windows.page == .tasks {
                     JobAppsView(store: store.jobs, chat: store)
                 } else if windows.page == .settings {

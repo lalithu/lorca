@@ -78,8 +78,13 @@ final class ChatStore: ObservableObject {
         return memory < 24 * 1024 * 1024 * 1024 ? 8192 : 16384
     }
     var recommendedContext: Int { min(contextTarget, allocatedContext ?? contextTarget) }
+    var requestedContext: Int { contextOverride ?? contextTarget }
     var workingContext: Int {
-        min(contextOverride ?? contextTarget, allocatedContext ?? 16384)
+        // An explicit Ollama num_ctx can resize on the next request. The
+        // existing allocation is not a permanent ceiling for that provider.
+        // llama.cpp requires the model to be loaded with enough context first.
+        providerName == "Ollama" ? requestedContext
+            : min(requestedContext, allocatedContext ?? contextTarget)
     }
     var displayUsage: ChatUsage {
         if let task=agent.latest,task.conversationId==library.selectedID,task.model==nil || task.model==selectedModel {return task.usage ?? ChatUsage(contextUsed:nil)}

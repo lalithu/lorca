@@ -3,6 +3,7 @@ mod agent_chats;
 mod conversations;
 mod generation;
 mod models;
+mod model_library;
 use crate::{
     provider::{self, Update},
     storage::Repository,
@@ -37,6 +38,7 @@ pub struct Core {
     changes: watch::Sender<Snapshot>,
     client: reqwest::Client,
     lifecycle: AsyncMutex<()>,
+    downloads: Arc<Mutex<HashMap<String, model_library::DownloadState>>>,
 }
 impl Core {
     pub fn new(repository: Repository) -> Result<Arc<Self>> {
@@ -71,6 +73,7 @@ impl Core {
                 .build()
                 .map_err(|e| e.to_string())?,
             lifecycle: AsyncMutex::new(()),
+            downloads: Arc::new(Mutex::new(HashMap::new())),
         }))
     }
     pub fn snapshot(&self) -> Snapshot {
@@ -243,6 +246,13 @@ impl Core {
         match op {
             "snapshot" | "heartbeat" => Ok(json!(self.snapshot())),
             "refresh" => self.refresh(session).await,
+            "modelLibrary" => self.model_library(session, v["runtime"].as_str()).await,
+            "modelCatalog" => self.model_catalog(session, v["query"].as_str().unwrap_or(""), v["metalWorkingSetBytes"].as_u64()).await,
+            "modelDetails" => self.model_catalog_details(session, text(&v,"repo")?, v["metalWorkingSetBytes"].as_u64()).await,
+            "modelInstall" => self.model_install(session, text(&v,"model")?, v["runtime"].as_str()).await,
+            "modelDownloads" => self.model_transfers(session, v["runtime"].as_str()),
+            "modelCancelDownload" => self.model_cancel_download(session, text(&v,"model")?, v["runtime"].as_str()).await,
+            "modelDelete" => self.model_delete(session, text(&v,"model")?, v["runtime"].as_str()).await,
             "hardwareAdvice" => {
                 self.hardware_advice(session, v["online"].as_bool().unwrap_or(false))
                     .await

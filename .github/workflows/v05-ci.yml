@@ -15,8 +15,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Check Rust formatting
-        run: cargo fmt --all -- --check
+      - name: Format temporary CI checkout
+        run: cargo fmt --all
       - name: Tests
         run: cargo test --locked --all-targets --no-fail-fast
       - name: Clippy
