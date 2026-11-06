@@ -355,4 +355,19 @@ mod tests {
         custom.restore_visibility(&history);
         assert!(custom.active_schemas().is_empty());
     }
+
+    #[test]
+    fn historical_recall_is_scoped_to_each_registry_and_never_expands_custom_tool_sets() {
+        let first = Registry::without_workspace();
+        let second = Registry::without_workspace();
+        first.seed_history(&[json!({"role":"user","content":"first private conversation"})]);
+        second.seed_history(&[json!({"role":"user","content":"second different conversation"})]);
+        assert_eq!(first.history.search("first", None, 5)["matches"][0]["recordId"], "h0");
+        assert!(second.history.search("first", None, 5)["matches"].as_array().unwrap().is_empty());
+        assert!(first.get("search_history").is_ok());
+        assert!(!names(&first).contains("search_history"));
+        let custom = Registry::empty();
+        assert!(custom.get("search_history").is_err());
+        assert!(custom.active_schemas().is_empty());
+    }
 }
