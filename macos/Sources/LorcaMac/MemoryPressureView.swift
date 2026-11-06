@@ -63,21 +63,24 @@ struct MemoryPressureView: View {
             Text(label).foregroundStyle(.secondary)
             Spacer(minLength: 0)
             Text(bytes.map(MemoryMetrics.gigabytes) ?? "—").monospacedDigit()
-        }.font(.system(size: 10))
+        }.font(.system(size: 10, design: .monospaced))
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 5) {
             HStack {
-                Text("Memory pressure")
+                Text("Memory pressure").fontWeight(.medium)
                 Spacer(minLength: 4)
-                Text(current?.label ?? "Unavailable").foregroundStyle(current?.color ?? .secondary)
+                Text(current?.label ?? "Unavailable")
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 5).padding(.vertical, 2)
+                    .background(tint.opacity(0.15), in: Capsule())
             }.font(.system(size: 10)).foregroundStyle(.secondary)
             HStack {
                 Text("RAM usage")
                 Spacer()
                 if let metrics = samples.last?.metrics { Text(String(format: "%.0f%%", Double(metrics.fraction) * 100)).monospacedDigit() }
-            }.font(.system(size: 9)).foregroundStyle(.secondary)
+            }.font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary)
             Canvas { context, size in
                 guard let last = samples.last else { return }
                 let step = size.width / CGFloat(capacity - 1)
@@ -96,9 +99,9 @@ struct MemoryPressureView: View {
                 let dot = CGRect(x: size.width - 3, y: size.height * (1 - last.metrics.fraction) - 1.5, width: 3, height: 3)
                 context.fill(Path(ellipseIn: dot), with: .color(tint))
             }
-            .frame(height: 37)
-            .background(.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 4))
-            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .frame(height: 34)
+            .background(.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 5))
+            .clipShape(RoundedRectangle(cornerRadius: 5))
             .overlay(alignment: .bottom) { Rectangle().fill(.secondary.opacity(0.15)).frame(height: 0.5) }
             .opacity(available ? 1 : 0.4)
             if available, let metrics = samples.last?.metrics {
@@ -113,8 +116,10 @@ struct MemoryPressureView: View {
                 }.padding(.top, 3)
             }
         }
-        .padding(.horizontal, 9)
-        .padding(.bottom, 17)
+        .padding(8)
+        .background(.primary.opacity(0.03), in: RoundedRectangle(cornerRadius: 10))
+        .overlay { RoundedRectangle(cornerRadius: 10).strokeBorder(.primary.opacity(0.07)).allowsHitTesting(false) }
+        .padding(.bottom, 10)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Memory pressure: \(current?.label ?? "Unavailable")")
         .help("Live macOS VM counters, sampled every 0.5 seconds. The graph shows RAM usage over four minutes; its color is the OS memory-pressure state. Used = app + wired + compressed. Values may differ from Activity Monitor due to sampling and accounting; this is not its pressure-curve algorithm.")

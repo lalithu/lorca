@@ -11,16 +11,18 @@ struct ConversationHistory: View {
         VStack(alignment: .leading, spacing: 5) {
             Button { store.newChat() } label: {
                 Label("New chat", systemImage: "square.and.pencil")
-                    .font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 8)
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 8).padding(.vertical, 7)
+                    .background(.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 7))
             }
             .buttonStyle(.plain).accessibilityIdentifier("history-new-chat")
-            Text("RECENTS").font(.system(size: 9, weight: .semibold)).tracking(1)
-                .foregroundStyle(.tertiary).padding(.top, 9).padding(.bottom, 5)
+            Text("RECENTS").font(.system(size: 9, weight: .medium, design: .monospaced)).tracking(1)
+                .foregroundStyle(.secondary).padding(.leading, 8).padding(.top, 8).padding(.bottom, 3)
             ForEach(store.library.recent) { conversation in
                 HStack(spacing: 2) {
                     Button { store.openConversation(conversation.id) } label: {
-                        Text(conversation.title).font(.system(size: 11))
+                        Text(conversation.title).font(.system(size: 11, design: .monospaced))
                             .lineLimit(1).truncationMode(.tail)
                             .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                     }
@@ -29,7 +31,10 @@ struct ConversationHistory: View {
                     .accessibilityIdentifier("conversation-\(conversation.id)")
                     Button { store.deleteConversation(conversation.id) } label: {
                         Image(systemName: "xmark").font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.red).frame(width: 18, height: 18).contentShape(Rectangle())
+                            .foregroundStyle(Color(nsColor: .systemRed))
+                            .frame(width: 18, height: 18)
+                            .background(Color(nsColor: .systemRed).opacity(0.09), in: Circle())
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain).help("Delete chat")
                     .opacity(hoveredID == conversation.id ? 1 : 0)
@@ -41,8 +46,9 @@ struct ConversationHistory: View {
                         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                         .accessibilityLabel("Chat actions: \(conversation.title)")
                 }
-                .padding(.horizontal, 8).padding(.vertical, 7)
-                .background(store.library.selectedID == conversation.id ? Color.primary.opacity(0.075) : .clear,
+                .padding(.horizontal, 8).padding(.vertical, 5)
+                .background(store.library.selectedID == conversation.id
+                    ? Color.lorcaBlue.opacity(0.10) : Color.primary.opacity(hoveredID == conversation.id ? 0.05 : 0),
                     in: RoundedRectangle(cornerRadius: 7))
                 .onHover { hovering in
                     if hovering { hoveredID = conversation.id }
@@ -51,7 +57,7 @@ struct ConversationHistory: View {
                 .contextMenu { actions(conversation) }
             }
         }
-        .padding(.horizontal, 5).padding(.top, 10)
+        .padding(.horizontal, 3).padding(.top, 10)
         .alert("Rename chat", isPresented: Binding(get: { renameID != nil }, set: { if !$0 { renameID = nil } })) {
             TextField("Chat name", text: $title)
             Button("Save") { if let id = renameID { store.library.rename(id, to: title) }; renameID = nil }

@@ -31,7 +31,6 @@ final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolb
             backing: .buffered, defer: false)
         dashboard.title = "lorca"
         dashboard.titleVisibility = .hidden
-        dashboard.titlebarAppearsTransparent = true
         dashboard.isOpaque = false
         dashboard.backgroundColor = .windowBackgroundColor
         dashboard.isReleasedWhenClosed = false
@@ -44,7 +43,10 @@ final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolb
         toolbar.displayMode = .iconOnly
         dashboard.toolbar = toolbar
         dashboard.toolbarStyle = .unifiedCompact
-        dashboard.titlebarSeparatorStyle = .none
+        if #unavailable(macOS 26.0) {
+            dashboard.titlebarAppearsTransparent = true
+            dashboard.titlebarSeparatorStyle = .none
+        }
         let dashboardContent = ZoomHostingView(rootView: DashboardView(store: store, windows: self), zoom: store.uiZoom)
         // AppKit owns window geometry; SwiftUI must not replace it with a fitting size.
         dashboard.contentView = dashboardContent
@@ -225,7 +227,8 @@ final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolb
             separator.boxType = .separator
             separator.widthAnchor.constraint(equalToConstant: 1).isActive = true
             separator.heightAnchor.constraint(equalToConstant: 18).isActive = true
-            toolbarTitle.font = .systemFont(ofSize: 13, weight: .medium)
+            toolbarTitle.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
+            toolbarTitle.textColor = .secondaryLabelColor
             let title = NSStackView(views: [separator, toolbarTitle])
             title.orientation = .horizontal
             title.alignment = .centerY

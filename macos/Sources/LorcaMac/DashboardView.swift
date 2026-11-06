@@ -18,20 +18,25 @@ extension Color {
     static let lorcaBlue = Color(nsColor: .systemBlue)
 }
 
+enum ShellTypography {
+    private static let serifName = ["IowanOldStyle-Roman", "Palatino-Roman", "Georgia"]
+        .first { NSFont(name: $0, size: 13) != nil }
+
+    static func serif(_ size: CGFloat) -> Font {
+        serifName.map { .custom($0, size: size) } ?? .system(size: size, design: .serif)
+    }
+}
+
 struct DashboardView: View {
     @ObservedObject var store: ChatStore
     @ObservedObject var windows: WindowManager
     @Environment(\.colorScheme) private var scheme
+    @State private var hoveredPage: SidebarPage?
 
     var body: some View {
         HStack(spacing: 0) {
             if windows.sidebarVisible {
-                sidebar
-                    .frame(width: 190)
-                    .background(VisualEffect(material: .sidebar))
-                    .overlay(alignment: .trailing) {
-                        Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 1)
-                    }
+                sidebarSurface.frame(width: 190)
             }
             VStack(spacing: 0) {
                 header
@@ -47,22 +52,36 @@ struct DashboardView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background {
-                VisualEffect(material: .underWindowBackground)
-                (scheme == .dark ? Color.black.opacity(0.20) : Color.white.opacity(0.38))
-            }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(scheme == .dark ? Color(nsColor: .windowBackgroundColor) : Color(nsColor: .textBackgroundColor))
         .tint(.lorcaBlue)
+    }
+
+    @ViewBuilder private var sidebarSurface: some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            sidebar
+                .glassEffect(.regular, in: .rect(cornerRadius: 20))
+                .padding(.leading, 6).padding(.vertical, 6)
+        } else {
+            legacySidebar
+        }
+        #else
+        legacySidebar
+        #endif
+    }
+
+    private var legacySidebar: some View {
+        sidebar.background(VisualEffect(material: .sidebar))
     }
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 9) {
                 Text(LorcaAsset.emoji).font(.system(size: 27))
-                Text("lorca").font(.system(size: 25, weight: .semibold, design: .rounded))
+                Text("lorca").font(ShellTypography.serif(24).weight(.semibold))
             }
-            .padding(.bottom, 18)
+            .padding(.leading, 8).padding(.bottom, 14)
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(SidebarPage.allCases.filter { $0 != .settings }) { page in navigation(page) }
@@ -73,69 +92,96 @@ struct DashboardView: View {
             Spacer(minLength: 12)
             MemoryPressureView()
             navigation(.settings)
-            Divider().padding(.vertical, 17)
-            HStack(spacing: 8) {
+            Divider().padding(.vertical, 10)
+            HStack(spacing: 6) {
                 Circle().fill(store.isConnected ? Color.green : Color.orange).frame(width: 6, height: 6)
-                Text("\(store.providerName) · Local").font(.system(size: 11)).foregroundStyle(.secondary)
-                Spacer()
+                Text("\(store.providerName) · Local")
+                    .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+                    .lineLimit(1).minimumScaleFactor(0.85)
+                Spacer(minLength: 0)
                 Button { Task { await store.refreshConnection() } } label: {
                     Image(systemName: "arrow.clockwise").font(.system(size: 11))
                 }
                 .buttonStyle(.plain).help("Reconnect to local model server").disabled(store.isChecking)
             }
-            .padding(.horizontal, 9)
+            .padding(.horizontal, 5).padding(.vertical, 6)
         }
-        .padding(.horizontal, 18).padding(.top, 14).padding(.bottom, 24)
+        .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 16)
     }
 
     private func navigation(_ page: SidebarPage) -> some View {
-        Button { windows.page = page } label: {
-            HStack(spacing: 12) {
-                Image(systemName: page.symbol).font(.system(size: 15)).frame(width: 20)
-                Text(page.rawValue).font(.system(size: 13, weight: windows.page == page ? .semibold : .regular))
+        let selected = windows.page == page
+        return Button { windows.page = page } label: {
+            HStack(spacing: 10) {
+                Image(systemName: page.symbol)
+                    .font(.system(size: 14, weight: .medium)).frame(width: 19)
+                    .foregroundStyle(selected ? Color.lorcaBlue : Color.secondary)
+                Text(page.rawValue)
+                    .font(.system(size: 12, weight: selected ? .semibold : .regular, design: .monospaced))
+                    .foregroundStyle(selected ? .primary : .secondary)
                 Spacer()
             }
-            .foregroundStyle(windows.page == page ? .primary : .secondary)
-            .padding(.horizontal, 12).padding(.vertical, 12)
-            .background(windows.page == page ? Color.primary.opacity(0.075) : .clear, in: RoundedRectangle(cornerRadius: 9))
+            .padding(.horizontal, 10).padding(.vertical, 10)
+            .background(
+                selected ? Color.lorcaBlue.opacity(0.11) : Color.primary.opacity(hoveredPage == page ? 0.05 : 0),
+                in: RoundedRectangle(cornerRadius: 8)
+            )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .padding(.bottom, 4)
+        .onHover { hovering in
+            if hovering { hoveredPage = page }
+            else if hoveredPage == page { hoveredPage = nil }
+        }
+        .padding(.bottom, 3)
         .accessibilityIdentifier("sidebar-\(page.id)")
     }
 
     private var header: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 7) {
-                Text(windows.page.rawValue).font(.system(size: 27, weight: .semibold))
+                Text(windows.page.rawValue).font(ShellTypography.serif(26).weight(.semibold))
                 Text(windows.page == .chats ? "Your orca, ready when you are. 🌸" : "Your workspace, Lalith.")
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .font(ShellTypography.serif(13)).foregroundStyle(.secondary)
             }
             Spacer()
-            VStack(alignment: .trailing, spacing: 14) {
+            VStack(alignment: .trailing, spacing: 10) {
                 miniToggle
                 if windows.page == .chats { ConnectionBadge(store: store) }
             }
         }
-        .padding(.horizontal, 32).padding(.top, 14).padding(.bottom, 27)
+        .padding(.horizontal, 32).padding(.top, 14).padding(.bottom, 21)
     }
 
     private var miniToggle: some View {
+        styledMiniButton
+            .help(windows.miniVisible ? "Hide floating Mini" : "Show floating Mini")
+            .disabled(windows.isTransitioning)
+    }
+
+    @ViewBuilder private var styledMiniButton: some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            miniButton.buttonStyle(.glass).controlSize(.small).tint(nil)
+        } else {
+            miniButton.buttonStyle(.bordered).controlSize(.small)
+        }
+        #else
+        miniButton.buttonStyle(.bordered).controlSize(.small)
+        #endif
+    }
+
+    private var miniButton: some View {
         Button { windows.toggleMini() } label: {
             Text("Mini").font(.system(size: 10, weight: .medium))
-                .padding(.horizontal, 8).padding(.vertical, 6)
         }
-        .help(windows.miniVisible ? "Hide floating Mini" : "Show floating Mini")
-        .buttonStyle(.plain).foregroundStyle(.secondary)
-        .disabled(windows.isTransitioning)
     }
 
     private var placeholder: some View {
         VStack(spacing: 16) {
             Image(systemName: windows.page.symbol).font(.system(size: 30, weight: .light)).foregroundStyle(.tertiary)
-            Text("Needs to be built").font(.system(size: 22, weight: .medium))
-            Text(windows.page.rawValue).font(.system(size: 12)).foregroundStyle(.secondary)
+            Text("Needs to be built").font(ShellTypography.serif(20))
+            Text(windows.page.rawValue).font(ShellTypography.serif(13)).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(.bottom, 95)
@@ -161,7 +207,7 @@ struct DashboardView: View {
                         Text(verbatim: host).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
                     }
                     ConnectionBadge(store: store)
-                    if let error = store.error { Text(error).font(.system(size: 12)).foregroundStyle(.secondary) }
+                    if let error = store.error { Text(error).font(ShellTypography.serif(13)).foregroundStyle(.secondary) }
                 }
                 settingsCard("MINI") {
                     Toggle("Show the floating companion", isOn: Binding(
@@ -170,10 +216,10 @@ struct DashboardView: View {
                     ))
                     .toggleStyle(.switch)
                     Text("Click to chat. Drag to move. Mini works even with the dashboard closed.")
-                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                        .font(ShellTypography.serif(13)).foregroundStyle(.secondary)
                 }
                 Text("Chats and attached images are saved locally in Application Support/lorca.")
-                    .font(.system(size: 11)).foregroundStyle(.tertiary)
+                    .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
             }
             .frame(maxWidth: 650, alignment: .leading)
             .padding(.horizontal, 32).padding(.bottom, 32)
