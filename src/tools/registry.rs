@@ -86,6 +86,7 @@ impl Registry {
             adaptive: false,
             workspace_available: true,
             unavailable: BTreeMap::new(),
+            history: crate::memory::HistoryIndex::default(),
         }
     }
     /// Basic chat tools remain available before the user selects a folder.
