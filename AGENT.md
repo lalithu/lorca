@@ -1,4 +1,4 @@
-# 🫍 Lorca · Rust runtime contract (v0.5 candidate)
+# 🫍 Lorca · Rust runtime contract (v0.5)
 
 One Rust core, one active task, one chat composer. The model chooses tools,
 clarification, notes and semantic completion. Rust owns context, originals,
@@ -63,5 +63,6 @@ image attachments. Deletion removes the chat archive, not independent backups or
 exports. Disk-full/corruption errors preserve originals and surface a blocker.
 
 See [architecture](docs/architecture.md), [tool drawers](docs/tools.md), and the
-[current validation report](docs/v0.5-validation.md). This branch is a candidate:
-no merge, final tag or release without the owner's approval.
+[validation report](docs/v0.5-validation.md) and
+[v0.5.0 release notes](docs/releases/v0.5.0.md). Future merges and releases require
+the owner's approval.

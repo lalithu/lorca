@@ -1,4 +1,4 @@
-# Lorca v0.5 candidate architecture
+# Lorca v0.5 architecture
 
 **Agent = model + harness.** SwiftUI Dashboard/Mini and the terminal use the
 same authenticated Rust core. `agentloop/` owns one active task, `tools/` the
