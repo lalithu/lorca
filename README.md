@@ -1,72 +1,94 @@
-# 🌊 Lorca
+# 🌸 Lorca
 
-A local-first AI workspace for macOS: native SwiftUI Dashboard and floating orca Mini, backed by one Rust core and a local Ollama or llama.cpp server.
+Lorca is a model-agnostic AI agent for macOS, built in Rust 🫍. Its harness
+manages inference, persistent memory, context, tools, and permissions. The
+model reasons, plans, chooses tools, and decides when it’s done. Lorca adapts
+to the hardware and carries work across model calls so a single context window
+or generation budget doesn’t have to fit the whole task.
 
-## Features
+I started Lorca to learn how agent harnesses and local model runtimes work.
+It grew into an agent I could use for my own work.
 
-- Streaming chat, Markdown, saved conversations, images and compatible-model vision.
-- Workspace coding tools, live activity, diffs, exact-action approvals and cancellation.
-- Task-scoped objective, context, authority and execution-based verification.
-- Context/speed metrics, model selection, unload/reload and bounded quit cleanup.
-- Job Apps research, guided applications, Gmail drafts and optional Google Sheets sync.
-- Rust terminal chat alongside the native app; one shared backend.
+## Quick start
+
+The [v0.5.0 GitHub release](https://github.com/lalithu/lorca/releases/tag/v0.5.0)
+has the Apple Silicon app for use with an existing Ollama or llama.cpp server.
+
+For one folder with the app and both runtimes, [build the portable ZIP from source](#build-from-source).
+The portable build is ad-hoc signed for local testing. A public Mac download
+needs Developer ID signing and notarization for the standard Gatekeeper flow.
+
+Unzip the portable package and double-click **Start Lorca.command**. It reuses a
+running server or starts bundled Ollama if neither server is available.
+
+If you need a first model, run this in Terminal from the unzipped **Lorca** folder.
+It downloads [Qwen3 4B](https://ollama.com/library/qwen3:4b) (about 2.5 GB) and opens the app.
+
+```sh
+./"Start Lorca.command" --ollama qwen3:4b
+```
+
+To use a GGUF you already have, run `./"Start Lorca.command" --gguf "/path/to/model.gguf"`.
+Then pick the model in the composer. See the [portable setup guide](docs/portable-start.md)
+for server ports and how to stop a server.
+
+## What you can do
+
+- Chat with streamed Markdown, images on compatible models, and local conversation history.
+- Work in a selected folder with file reads, reviewable diffs, approvals and cancellation.
+- Work across long tasks using searchable history, context checkpoints and output continuation.
+- Export a conversation as Markdown or JSON.
+- Research jobs, guide applications, create Gmail drafts and optionally sync with Google Sheets.
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    UI[SwiftUI Dashboard + Mini] --> Core[Rust core]
-    CLI[Terminal client] --> Core
-    Core --> Loop[agentloop: objective / context / authority / verification]
-    Loop <--> Providers[Ollama or llama.cpp]
-    Loop --> Tools[tools: registry / validation / workspace / execution]
-    Core --> Storage[Local persistence]
-```
+![Lorca architecture showing native and terminal clients, the Rust core, the two local model servers, and local data](docs/architecture.svg)
 
-## Build and run
+The Rust core routes requests to the model you select. The model chooses tools and
+when to finish. Rust checks permissions, executes approved actions and records
+what happened. [Architecture and four pillars](docs/architecture.md)
 
-Requires macOS 14+, Rust/Cargo, Xcode or Swift command-line tools, and either Ollama or a running llama.cpp server with a model already available. Lorca does not download models. Job Apps requires Python 3.
+## Build from source
+
+Install Rust and Xcode or Swift command-line tools. Use an Apple Silicon Mac to
+produce the portable ZIP. The packaging script fetches pinned runtime archives,
+verifies SHA-256 checksums and writes the ZIP and its checksum under `macos/build/`.
 
 ```sh
-ollama pull qwen3.5:9b   # Optional: install a model in Ollama.
+git clone https://github.com/lalithu/lorca.git
+cd lorca
+bash macos/package.sh
+```
+
+For day-to-day source development with your own model servers:
+
+```sh
 cargo install --path . --locked --force
-./macos/build.sh
-lorca main              # Dashboard; Mini is optional.
-lorca                   # Terminal chat.
+lorca rebuild
+lorca main
 ```
 
-After installing, use `lorca rebuild` from any directory to rebuild the core, CLI and app, update the installed command, and gracefully restart the UI and backend. Conversations, unsent drafts, settings and Job Apps data are preserved. The shared Ollama service and loaded models are left alone.
+`lorca` opens terminal chat through Ollama. `lorca rebuild ui` rebuilds just the
+native UI after a full build. Use `lorca rebuild` after Rust or bundle changes.
+The base app requires macOS 14 or later. Job Apps requires Python 3.
 
-For UI changes, use `lorca rebuild ui`: incrementally compiles Swift in debug mode, signs and relaunches the app, and reuses the bundled Rust core and running backend. No Cargo build or CLI installation. Run a full rebuild once first, and after Rust, protocol, or bundled-resource changes. Saved data is preserved; active work is cancelled when the UI closes.
+## Upcoming work
 
-## Repository
-
-```text
-src/
-  agentloop/       Single runtime; objective, context, authority, verification
-  tools/           Registry, native tools, workspace and command sandbox
-  agent_types.rs   Shared protocol/tool types without runtime dependencies
-  provider/        Ollama + llama.cpp native tool-call streaming
-  core/            Sessions, conversations, model lifecycle and task association
-  context.rs       Shared bounded context and compaction
-  storage.rs       Atomic conversation/image persistence
-  transport.rs     Authenticated loopback API
-macos/             SwiftUI/AppKit views and app packaging
-jobapps/           Python companion, local tracker and Google integrations
-docs/              Detailed architecture and developer guidance
-tests/             Deterministic Rust regression coverage
-```
+- **MCP support** for connecting external tools and resources.
+- **More robust native tools** for everyday workspace and agent workflows.
+- **Leaner tool schemas** with clearer inputs and fewer tokens per declaration.
+- **Broader runtime testing** across models and Apple Silicon Macs.
 
 ## Documentation
 
 - [v0.5.0 release notes and validation](docs/releases/v0.5.0.md)
-- [Architecture and four pillars](docs/architecture.md)
-- [Runtime behavior, tools and API contract](AGENT.md)
+- [Runtime behavior and API contract](AGENT.md)
+- [Tools and approvals](docs/tools.md)
 - [macOS setup and controls](macos/README.md)
-- [Job Apps setup, sync and limitations](jobapps/README.md)
-- [Concise functionality reference](FUNCTIONALITY.md)
+- [Job Apps setup and sync](jobapps/README.md)
 - [Native acceptance checks](macos/Acceptance/README.md)
 
-Personal data lives outside Git under macOS Application Support. Optional Sheets sync contains personal Job Apps data; use a private Sheet. Credentials remain local. This personal build includes the author's Gmail address in its integration. Chat history does not sync through Sheets.
+Chats, settings and Job Apps data live outside Git in macOS Application Support.
+Optional Sheets sync is for Job Apps. Use a private Sheet for personal data.
 
 [Apache 2.0](LICENSE) · [Third-party attribution](jobapps/vendor/NOTICE.md)

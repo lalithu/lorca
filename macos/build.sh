@@ -24,7 +24,7 @@ if [[ "$ui_only" == "1" ]]; then
     configuration="${1:-debug}"
 else
     configuration="${1:-release}"
-    (cd .. && cargo build --release)
+    (cd .. && cargo build --release --locked)
 fi
 xcrun swift build -c "$configuration"
 bin_dir="$(xcrun swift build -c "$configuration" --show-bin-path)"

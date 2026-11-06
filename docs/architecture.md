@@ -4,7 +4,12 @@
 same authenticated Rust core. `agentloop/` owns one active task, `tools/` the
 native tool registry and handlers. Job Apps keeps its independent registry.
 
-![Architecture](v0.5-architecture.svg)
+![Architecture](architecture.svg)
+
+The portable Apple Silicon package ships both inference runtimes beside the app.
+Its launcher can reuse a running server, start Ollama locally, or serve an
+explicitly selected GGUF through llama.cpp. The native picker refreshes both
+catalogs and routes each selection to the corresponding local server.
 
 ## One execution loop
 

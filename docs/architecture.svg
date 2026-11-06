@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1140" height="575" viewBox="0 0 1140 575" role="img" aria-labelledby="title desc">
+  <title id="title">Lorca architecture</title>
+  <desc id="desc">The macOS app and terminal connect to one Rust harness. The macOS model picker routes inference to Ollama or llama.cpp. The harness keeps local chat data and gates tool execution. Job Apps has an independent workflow.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" markerWidth="7" markerHeight="7" refX="9" refY="5" orient="auto-start-reverse">
+      <path d="M0 0 10 5 0 10z" fill="#627086"/>
+    </marker>
+    <style>
+      text{font-family:system-ui,Arial,sans-serif;fill:#172339}
+      .title{font-size:38px;font-weight:750}.sub{font-size:17px;fill:#516078}
+      .label{font-size:13px;font-weight:700;letter-spacing:1.5px;fill:#50617b}
+      .name{font-size:22px;font-weight:700}.copy{font-size:15px;fill:#42516a}
+      .card{fill:#fff;stroke:#c6d1df;stroke-width:1.5}.line{fill:none;stroke:#627086;stroke-width:2;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect x="1" y="1" width="1138" height="573" rx="24" fill="#f6f8fc" stroke="#d4deeb"/>
+  <text x="36" y="59" class="title">Lorca architecture</text>
+  <text x="38" y="91" class="sub">One local agent harness. Choose which model serves each task.</text>
+
+  <text x="38" y="139" class="label">CLIENTS</text>
+  <rect x="36" y="157" width="238" height="114" rx="15" class="card"/>
+  <text x="56" y="193" class="name">macOS app</text>
+  <text x="56" y="224" class="copy">Dashboard and Mini</text>
+  <text x="56" y="248" class="copy">One model picker</text>
+  <rect x="36" y="294" width="238" height="92" rx="15" class="card"/>
+  <text x="56" y="329" class="name">Terminal chat</text>
+  <text x="56" y="358" class="copy">Ollama</text>
+
+  <text x="332" y="139" class="label">AGENT HARNESS</text>
+  <rect x="330" y="157" width="430" height="229" rx="15" fill="#edf3ff" stroke="#a8bbde" stroke-width="1.5"/>
+  <text x="354" y="197" class="name">Rust core</text>
+  <text x="354" y="230" class="copy">Inference routing and streaming</text>
+  <text x="354" y="257" class="copy">Context budgets and checkpoints</text>
+  <text x="354" y="284" class="copy">Tool schemas, validation and approvals</text>
+  <text x="354" y="311" class="copy">Workspace boundaries and execution evidence</text>
+  <text x="354" y="350" class="copy">The model plans, chooses tools and decides when to finish.</text>
+
+  <text x="818" y="139" class="label">LOCAL INFERENCE SERVERS</text>
+  <rect x="816" y="157" width="288" height="99" rx="15" class="card"/>
+  <text x="836" y="193" class="name">Ollama</text>
+  <text x="836" y="224" class="copy">127.0.0.1:11434</text>
+  <rect x="816" y="278" width="288" height="108" rx="15" class="card"/>
+  <text x="836" y="316" class="name">llama.cpp</text>
+  <text x="836" y="347" class="copy">127.0.0.1:9931 or :8080</text>
+
+  <path d="M274 214H325" class="line"/>
+  <path d="M274 339H325" class="line"/>
+  <path d="M765 208H810" class="line" marker-start="url(#arrow)"/>
+  <path d="M765 330H810" class="line" marker-start="url(#arrow)"/>
+  <path d="M545 388V429" class="line"/>
+
+  <rect x="36" y="435" width="238" height="104" rx="15" fill="#fff4f7" stroke="#e2bac9" stroke-width="1.5"/>
+  <text x="56" y="472" class="name">Job Apps</text>
+  <text x="56" y="502" class="copy">Independent workflow</text>
+  <rect x="330" y="435" width="430" height="104" rx="15" class="card"/>
+  <text x="354" y="472" class="name">Local data</text>
+  <text x="354" y="502" class="copy">Chats, attachments and searchable SQLite history</text>
+  <rect x="816" y="435" width="288" height="104" rx="15" class="card"/>
+  <text x="836" y="472" class="name">Portable package</text>
+  <text x="836" y="502" class="copy">Lorca, both engines and a launcher</text>
+</svg>

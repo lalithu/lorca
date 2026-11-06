@@ -330,7 +330,7 @@ fn read_input(
                                 b: 255
                             }),
                             SetAttribute(Attribute::Bold),
-                            Print("lorca🫍  "),
+                            Print("lorca 🫍 🌸  "),
                             SetAttribute(Attribute::NormalIntensity),
                             ResetColor
                         )?;

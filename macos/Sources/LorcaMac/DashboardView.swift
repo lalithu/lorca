@@ -109,7 +109,7 @@ struct DashboardView: View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 7) {
                 Text(windows.page.rawValue).font(.system(size: 27, weight: .semibold))
-                Text(windows.page == .chats ? "Your orca, ready when you are." : "Your workspace, Lalith.")
+                Text(windows.page == .chats ? "Your orca, ready when you are. 🌸" : "Your workspace, Lalith.")
                     .font(.system(size: 12)).foregroundStyle(.secondary)
             }
             Spacer()
