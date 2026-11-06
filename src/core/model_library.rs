@@ -238,6 +238,7 @@ impl Core {
         }
         let core=self.clone();
         let model=model.to_owned();
+        let acknowledged_model=model.clone();
         tokio::spawn(async move {
             let result=if engine==provider::Engine::Ollama {
                 core.download_ollama(&host,&model,rx).await
@@ -254,7 +255,7 @@ impl Core {
                 }
             }
         });
-        Ok(json!({"accepted":true,"model":model,
+        Ok(json!({"accepted":true,"model":acknowledged_model,
             "provider":if engine==provider::Engine::Ollama{"ollama"}else{"llama.cpp"}}))
     }
     async fn download_ollama(&self,host:&str,model:&str,
