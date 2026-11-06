@@ -668,6 +668,7 @@ impl Agent {
                     }
                 }
                 let full = json!({"role":"tool","tool_name":call.name,"tool_call_id":call.id,"content":value.to_string()});
+                registry.record_history(&full);
                 self.state
                     .lock()
                     .unwrap()
