@@ -121,9 +121,6 @@ impl Core {
                 match op {
                     "draft" => {
                         let value = text(v, "text")?;
-                        if value.len() > 1024 * 1024 {
-                            return Err("Draft is too long.".into());
-                        }
                         c.draft = value.into();
                     }
                     "rename" => {
