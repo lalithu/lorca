@@ -3,6 +3,7 @@ use crate::{
     tools::{arguments::parse, *},
 };
 
+#[derive(Clone, Copy)]
 pub(super) enum Kind {
     Search,
     Read,
