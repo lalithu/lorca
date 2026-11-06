@@ -83,6 +83,10 @@ impl Agent {
             w.map(|w| w.root.display().to_string()),
             messages.len().saturating_sub(1),
         );
+        // Never derive permissions from the shortened model-facing manifest.
+        // Scope and action prohibitions are evaluated against the *original*
+        // full user text, even when that text is too large for one inference.
+        contract.authority = super::authority::Authority::new(&original_task);
         contract.objective.original_instruction = if continuing {
             pending_task
                 .as_ref()
@@ -116,8 +120,8 @@ impl Agent {
             if let Some(previous) = &pending_task {
                 contract.authority = super::authority::Authority::continued(
                     previous,
-                    &latest_instruction,
-                    &contract.objective.completion,
+                    &original_task,
+                    &super::verification::Requirements::new(&original_task),
                 );
             }
         }
