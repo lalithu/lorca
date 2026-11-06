@@ -9,7 +9,9 @@ pub enum Update {
     Text(String),
     Done(Usage),
 }
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Engine {
     #[default]
@@ -26,22 +28,19 @@ impl Engine {
     }
 }
 
-pub async fn detect_local_engine(client: &reqwest::Client) -> Engine {
-    let healthy = client
-        .get("http://127.0.0.1:9931/health")
-        .timeout(Duration::from_millis(500))
-        .send()
-        .await
-        .is_ok_and(|r| r.status().is_success());
-    if healthy
-        && model_list(client, Engine::LlamaCpp, Engine::LlamaCpp.default_host())
-            .await
-            .is_ok_and(|(models, _)| !models.is_empty())
-    {
-        Engine::LlamaCpp
-    } else {
-        Engine::Ollama
+impl Engine {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Ollama => "Ollama",
+            Self::LlamaCpp => "llama.cpp",
+        }
     }
+}
+
+pub(crate) struct ModelCatalog {
+    pub models: Vec<String>,
+    pub loaded: Option<String>,
+    pub managed: bool,
 }
 
 pub async fn manage(
@@ -128,16 +127,16 @@ pub async fn manage(
     }
 }
 
-pub async fn model_list(
+pub(crate) async fn model_list(
     client: &reqwest::Client,
     engine: Engine,
     base_url: &str,
-) -> Result<(Vec<String>, Option<String>), String> {
+) -> Result<ModelCatalog, String> {
     match engine {
         Engine::Ollama => {
             let value: Value = client
                 .get(format!("{base_url}/api/tags"))
-                .timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(2))
                 .send()
                 .await
                 .map_err(|_| {
@@ -153,18 +152,35 @@ pub async fn model_list(
                 .as_array()
                 .ok_or("Invalid Ollama model list")?
                 .iter()
-                .filter_map(|m| m["name"].as_str().map(String::from))
+                .filter_map(|m| {
+                    m["name"]
+                        .as_str()
+                        .or_else(|| m["model"].as_str())
+                        .filter(|name| !name.is_empty())
+                        .map(String::from)
+                })
                 .collect::<Vec<_>>();
             models.sort();
-            Ok((models, None))
+            models.dedup();
+            Ok(ModelCatalog {
+                models,
+                loaded: None,
+                managed: true,
+            })
         }
         Engine::LlamaCpp => {
-            let value: Value = client
-                .get(format!("{base_url}/models"))
-                .timeout(Duration::from_secs(5))
-                .send()
-                .await
-                .map_err(|_| "llama.cpp isn’t available. Open the Llama app and keep its local server running.".to_string())?
+            let request = |path: &str| {
+                client
+                    .get(format!("{base_url}{path}"))
+                    .timeout(Duration::from_secs(2))
+            };
+            let offline =
+                |_| "llama.cpp isn’t available. Start its local server, then refresh.".to_string();
+            let mut response = request("/models").send().await.map_err(offline)?;
+            if matches!(response.status().as_u16(), 404 | 405) {
+                response = request("/v1/models").send().await.map_err(offline)?;
+            }
+            let value: Value = response
                 .error_for_status()
                 .map_err(|e| e.to_string())?
                 .json()
@@ -185,7 +201,15 @@ pub async fn model_list(
                 }
             }
             models.sort();
-            Ok((models, loaded))
+            models.dedup();
+            let managed = entries
+                .iter()
+                .any(|entry| entry["status"]["value"].is_string());
+            Ok(ModelCatalog {
+                models,
+                loaded,
+                managed,
+            })
         }
     }
 }

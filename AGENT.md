@@ -18,9 +18,10 @@ swift test --package-path macos
 LORCA_BUILD_ONLY=1 bash macos/build.sh
 ```
 
-The GUI prefers healthy llama.cpp at 127.0.0.1:9931 with an available model catalog,
-then Ollama at 127.0.0.1:11434. The CLI uses Ollama. Servers/models must already be
-installed. Build-only mode leaves running Lorca alone. Ordinary rebuild retains
+The GUI lists Ollama models at 127.0.0.1:11434 and llama.cpp models at
+127.0.0.1:9931 or 127.0.0.1:8080. Launch and Refresh models check all three local
+addresses. The composer selection determines which server handles the next chat
+request. The CLI uses Ollama. Servers and models must already be installed. Build-only mode leaves running Lorca alone. Ordinary rebuild retains
 its existing clean restart policy. No downloads or model replacements happen
 through the advisor.
 

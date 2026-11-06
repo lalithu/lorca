@@ -102,7 +102,7 @@ struct ChatView: View {
                 errorBanner(error)
             }
             if let error = store.error ?? store.modelSession.error ?? store.library.error { errorBanner(error) }
-            ContextBar(store: store, usage: store.displayUsage, compact: compact,processing:store.agent.active?.generating==true)
+            ContextBar(usage: store.displayUsage, compact: compact,processing:store.agent.active?.generating==true)
             if let model = store.modelSession.loadingModel, let started = store.modelSession.loadingStarted {
                 ModelLoadingBar(model: model, started: started, compact: compact)
             }

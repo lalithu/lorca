@@ -7,6 +7,19 @@ struct BackendSnapshot: Codable {
     let turns: [BackendTurn]
     let warning: String?
 }
+struct LocalModel: Codable, Hashable {
+    struct Route: Codable, Hashable {
+        let provider: String
+        let host: String
+
+        var label: String { provider == "llama_cpp" ? "llama.cpp" : "Ollama" }
+    }
+
+    let route: Route
+    let model: String
+    let managed: Bool
+}
+
 struct BackendSession: Codable {
     let id: String
     let selectedId: UUID
@@ -16,6 +29,8 @@ struct BackendSession: Codable {
     let activeModel: String?
     let modelsToRelease: [String]
     let models: [String]
+    var modelChoices: [LocalModel]? = nil
+    var modelChoice: LocalModel? = nil
     let isConnected: Bool
     let error: String?
     var allocatedContext: Int? = nil
@@ -40,7 +55,7 @@ struct BackendError: LocalizedError {
 protocol BackendTransport: AnyObject {
     var sessionID: String? { get }
     var root: URL { get }
-    func connect(model: String) async throws -> BackendSnapshot
+    func connect(model: String, preferred: LocalModel?) async throws -> BackendSnapshot
     func command(_ fields: [String: Any]) async throws -> Data
     func cancelRequests() async
     func events(_ receive: @escaping @MainActor (BackendSnapshot) -> Void) async throws
@@ -48,6 +63,7 @@ protocol BackendTransport: AnyObject {
 }
 
 extension BackendTransport {
+    func connect(model: String) async throws -> BackendSnapshot { try await connect(model: model, preferred: nil) }
     func cancelRequests() async {}
     func agentEvents(_ receive: @escaping @MainActor (AgentTaskSnapshot?) -> Void) async throws {
         throw BackendError(message: "Agent events are unavailable. Rebuild and relaunch lorca.")
@@ -113,13 +129,17 @@ final class BackendClient: BackendTransport {
         }
         throw BackendError(message: "Couldn’t start lorca’s Rust backend. Check Application Support permissions and reconnect.")
     }
-    func connect(model: String) async throws -> BackendSnapshot {
+    func connect(model: String, preferred: LocalModel?) async throws -> BackendSnapshot {
         let previous = endpoint
         try await discover()
         if previous?.token == endpoint?.token, sessionID != nil,
            let data = try? await command(["op": "snapshot"]),
            let snapshot = try? JSONDecoder().decode(BackendSnapshot.self, from: data) { return snapshot }
-        let data = try await command(["op": "connect", "model": model, "provider": "auto"])
+        var fields: [String: Any] = ["op": "connect", "model": model, "provider": "auto"]
+        if let preferred {
+            fields["preferredModel"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(preferred))
+        }
+        let data = try await command(fields)
         struct Connected: Decodable { let session: String; let state: BackendSnapshot }
         let result = try JSONDecoder().decode(Connected.self, from: data)
         sessionID = result.session

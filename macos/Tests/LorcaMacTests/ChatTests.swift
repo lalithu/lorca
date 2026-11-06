@@ -28,7 +28,7 @@ class MockBackend: BackendTransport {
                           "usage": ["contextUsed": 0, "contextLimit": 4096]]], "turns": turn.map { [$0] } ?? []
         ]))
     }
-    func connect(model: String) async throws -> BackendSnapshot { connects += 1; self.model = model; activeModel = model; return try snapshot() }
+    func connect(model: String, preferred: LocalModel?) async throws -> BackendSnapshot { connects += 1; self.model = model; activeModel = model; return try snapshot() }
     func command(_ fields: [String: Any]) async throws -> Data {
         requests.append(fields)
         if failNextCommand { failNextCommand = false; throw BackendError(message: "Backend restarted") }
@@ -92,7 +92,7 @@ final class ChatTests: XCTestCase {
         let store = ChatStore(backend: backend, defaults: defaults)
         await store.refreshConnection()
         await store.refreshConnection()
-        store.selectedModel = "other"
+        await store.selectModel(try XCTUnwrap(store.modelChoices.first { $0.model == "other" }))
         for _ in 0..<200 {
             if backend.requests.contains(where: { $0["op"] as? String == "selectModel" }) { break }
             try await Task.sleep(for: .milliseconds(5))

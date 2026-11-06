@@ -94,6 +94,19 @@ pub struct Usage {
     #[serde(default)]
     pub prompt_tokens_per_second: Option<f64>,
 }
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ModelRoute {
+    pub provider: crate::provider::Engine,
+    pub host: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelChoice {
+    pub route: ModelRoute,
+    pub model: String,
+    pub managed: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionView {
@@ -106,6 +119,10 @@ pub struct SessionView {
     pub active_model: Option<String>,
     pub models_to_release: Vec<String>,
     pub models: Vec<String>,
+    #[serde(default)]
+    pub model_choices: Vec<ModelChoice>,
+    #[serde(default)]
+    pub model_choice: Option<ModelChoice>,
     pub is_connected: bool,
     pub error: Option<String>,
     #[serde(default)]

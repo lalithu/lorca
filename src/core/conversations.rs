@@ -54,15 +54,6 @@ impl Core {
                     "filename":format!("lorca-{}.{}",chat.id,
                         if format=="json" {"json"} else {"md"})}));
             }
-            "selectModel" => {
-                let model = text(v, "model")?;
-                if model.is_empty() || model.len() > 500 || model.chars().any(char::is_control) {
-                    return Err("Invalid model name".into());
-                }
-                s.view.sessions[si].model = model.into();
-                s.view.sessions[si].allocated_context = None;
-                s.view.sessions[si].usage = Usage::default();
-            }
             "new" => {
                 self.cancel_chat_navigation(&mut s, session);
                 let c = Conversation::default();

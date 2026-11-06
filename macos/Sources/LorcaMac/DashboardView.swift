@@ -157,7 +157,9 @@ struct DashboardView: View {
                         Button("Refresh models") { Task { await store.refreshConnection() } }
                             .disabled(store.isChecking)
                     }
-                    Text(verbatim: "http://127.0.0.1:11434").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                    if let host = store.modelChoice?.route.host {
+                        Text(verbatim: host).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                    }
                     ConnectionBadge(store: store)
                     if let error = store.error { Text(error).font(.system(size: 12)).foregroundStyle(.secondary) }
                 }

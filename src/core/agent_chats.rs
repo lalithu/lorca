@@ -116,6 +116,11 @@ impl Core {
             .as_str()
             .unwrap_or(&s.view.sessions[si].model)
             .to_string();
+        if s.clients[session].auto
+            && (!s.view.sessions[si].is_connected || s.view.sessions[si].model != model)
+        {
+            return Err("Select an available local model, then send again.".into());
+        }
         if model.is_empty() || model.len() > 500 || model.chars().any(char::is_control) {
             return Err("Invalid model name".into());
         }

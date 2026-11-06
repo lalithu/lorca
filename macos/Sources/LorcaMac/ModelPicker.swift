@@ -8,19 +8,29 @@ struct ModelPicker: View {
     @State private var showingAdvisor = false
     var body: some View {
         Menu {
-            ForEach(store.modelChoices, id: \.self) { model in
-                Button { store.selectedModel = model } label: {
-                    if model == store.selectedModel { Label(model, systemImage: "checkmark") }
-                    else { Text(model) }
+            if store.modelChoices.isEmpty {
+                Text("No models available")
+            }
+            ForEach(store.modelChoices, id: \.self) { choice in
+                Button { Task { await store.selectModel(choice) } } label: {
+                    let sameName = store.modelChoices.filter {
+                        $0.model == choice.model && $0.route.provider == choice.route.provider
+                    }.count > 1
+                    let server = sameName ? choice.route.host.replacingOccurrences(of: "http://", with: "") : nil
+                    let source = [choice.route.label, server].compactMap { $0 }.joined(separator: " · ")
+                    let label = "\(choice.model) · \(source)"
+                    if choice == store.modelChoice { Label(label, systemImage: "checkmark") }
+                    else { Text(label) }
                 }
             }
             Divider()
+            Button("Refresh models") { Task { await store.refreshConnection() } }
             Button("Hardware-aware model advisor…") { showingAdvisor = true }
             Button("Reload model…") { confirmingReload = true }.disabled(!store.canReloadModel)
             Button("Unload model…") { confirmingUnload = true }.disabled(!store.canUnloadModel)
         } label: {
             HStack(spacing: 6) {
-                Text(ResponseDetails.modelName(store.selectedModel)).lineLimit(1).truncationMode(.middle)
+                Text(store.modelChoice.map { ResponseDetails.modelName($0.model) } ?? "Choose model").lineLimit(1).truncationMode(.middle)
                     .frame(maxWidth: compact ? 150 : 220, alignment: .trailing)
                 Image(systemName: "chevron.down").font(.system(size: compact ? 8 : 9, weight: .medium))
             }
@@ -31,9 +41,9 @@ struct ModelPicker: View {
         }
         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize(horizontal: true, vertical: true)
         .frame(maxWidth: compact ? 180 : 250, alignment: .trailing)
-        .disabled(!store.ready || store.isManagingModel || store.isGenerating || store.agent.busy || store.jobs.running || store.isChecking || store.modelSession.isLoading)
-        .accessibilityLabel("Model").accessibilityValue(store.selectedModel)
-        .help("Choose a model already available in the connected local server")
+        .disabled(!store.ready || store.isManagingModel || store.isGenerating || store.agent.busy || store.jobs.running || store.isChecking || store.isSelectingModel || store.modelSession.isLoading)
+        .accessibilityLabel("Model").accessibilityValue(store.modelChoice.map { "\($0.model), \($0.route.label)" } ?? "No model selected")
+        .help("Choose an available model from Ollama or llama.cpp")
         .confirmationDialog("Unload \(store.modelSession.activeModel ?? store.selectedModel)?", isPresented: $confirmingUnload) {
             Button("Unload model", role: .destructive) { Task { await store.unloadModel() } }
             Button("Cancel", role: .cancel) { }

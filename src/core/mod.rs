@@ -21,6 +21,9 @@ struct ClientSession {
     host: String,
     engine: provider::Engine,
     last_seen: Instant,
+    auto: bool,
+    preferred: Option<ModelChoice>,
+    allocations: HashMap<ModelRoute, Vec<String>>,
 }
 struct State {
     view: Snapshot,
@@ -162,10 +165,10 @@ impl Core {
     pub async fn command(self: &Arc<Self>, v: Value) -> Result<Value> {
         let op = text(&v, "op")?;
         if op == "connect" {
-            let requested_engine = match v["provider"].as_str().unwrap_or("ollama") {
-                "ollama" => provider::Engine::Ollama,
+            let mode = v["provider"].as_str().unwrap_or("ollama");
+            let requested_engine = match mode {
+                "ollama" | "auto" => provider::Engine::Ollama,
                 "llama_cpp" => provider::Engine::LlamaCpp,
-                "auto" => provider::detect_local_engine(&self.client).await,
                 _ => return Err("Provider must be ollama, llama_cpp, or auto".into()),
             };
             let host = v["host"]
@@ -202,6 +205,9 @@ impl Core {
                     host,
                     engine: requested_engine,
                     last_seen: Instant::now(),
+                    auto: mode == "auto",
+                    preferred: serde_json::from_value(v["preferredModel"].clone()).ok(),
+                    allocations: HashMap::new(),
                 },
             );
             let context_used = s
@@ -223,6 +229,8 @@ impl Core {
                 active_model: None,
                 models_to_release: vec![],
                 models: vec![],
+                model_choices: vec![],
+                model_choice: None,
                 is_connected: false,
                 error: None,
                 allocated_context: None,
@@ -243,6 +251,7 @@ impl Core {
         match op {
             "snapshot" | "heartbeat" => Ok(json!(self.snapshot())),
             "refresh" => self.refresh(session).await,
+            "selectModel" => self.select_model(session, &v),
             "hardwareAdvice" => {
                 self.hardware_advice(session, v["online"].as_bool().unwrap_or(false))
                     .await

@@ -32,24 +32,22 @@ final class ChatStore: ObservableObject {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return ["status", "what are you doing", "what is the status", "what's the status"].contains(text.trimmingCharacters(in: CharacterSet(charactersIn: "?"))) || ["actually", "correction:", "instead", "now change", "change the", "correct "].contains(where: text.hasPrefix)
     }
-    var canSend: Bool { canSendChat && (!agent.busy || canSteerActive) && !jobs.running }
-    var canSendChat: Bool { ready && !closing && !isManagingModel && !agent.submitting && (!currentAgentActive || canSteerActive) && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftImages.isEmpty)
+    var canSend: Bool { canSendChat && (!agent.busy || canSteerActive) && !jobs.running && (isConnected || canSteerActive) }
+    var canSendChat: Bool { ready && !closing && !isSelectingModel && !isManagingModel && !agent.submitting && (!currentAgentActive || canSteerActive) && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftImages.isEmpty)
         && (!isGenerating || canSteerActive) && !isImportingImages && !modelSession.isLoading && !modelSession.isClosing }
     let uiZoom: AppZoom
     @Published var isImportingImages = false
     @Published private(set) var isReloadingModel = false
     @Published private(set) var isUnloadingModel = false
     var isManagingModel: Bool { isReloadingModel || isUnloadingModel }
-    var canReloadModel: Bool { ready && !closing && !isManagingModel && (!isGenerating || canSteerActive) && !agent.busy && !jobs.running && !jobs.busy && !isChecking && !modelSession.isLoading && !modelSession.isClosing }
+    var canReloadModel: Bool { ready && isConnected && (modelChoice?.managed ?? true) && !isSelectingModel && !closing && !isManagingModel && (!isGenerating || canSteerActive) && !agent.busy && !jobs.running && !jobs.busy && !isChecking && !modelSession.isLoading && !modelSession.isClosing }
     var canUnloadModel: Bool { canReloadModel && modelSession.activeModel != nil }
-    @Published private(set) var models: [String] = []
-    @Published var selectedModel: String {
-        didSet {
-            defaults.set(selectedModel, forKey: "model")
-            guard oldValue != selectedModel, !applying else { return }
-            stop()
-            enqueue(["op": "selectModel", "model": selectedModel])
-        }
+    @Published private(set) var modelChoices: [LocalModel] = []
+    @Published private(set) var modelChoice: LocalModel?
+    @Published private(set) var selectedModel: String
+    @Published private(set) var isSelectingModel = false
+    private var preferredModel: LocalModel? {
+        defaults.data(forKey: "preferredModel").flatMap { try? JSONDecoder().decode(LocalModel.self, from: $0) }
     }
     @Published var thinkingEffort: ThinkingEffort {
         didSet { defaults.set(thinkingEffort.rawValue, forKey: "thinkingEffort") }
@@ -64,22 +62,9 @@ final class ChatStore: ObservableObject {
     @Published private(set) var receivedText = false
     @Published var error: String?
     @Published private(set) var usage = ChatUsage()
-    private var contextKey: String { "contextWindow.\(providerName).\(selectedModel)" }
-    var contextOverride: Int? {
-        get { defaults.object(forKey: contextKey) as? Int }
-        set {
-            defaults.set(newValue, forKey: contextKey)
-            objectWillChange.send()
-        }
-    }
-    @Published private(set) var allocatedContext: Int?
     private var contextTarget: Int {
         let memory = ProcessInfo.processInfo.physicalMemory
         return memory < 24 * 1024 * 1024 * 1024 ? 8192 : 16384
-    }
-    var recommendedContext: Int { min(contextTarget, allocatedContext ?? contextTarget) }
-    var workingContext: Int {
-        min(contextOverride ?? contextTarget, allocatedContext ?? 16384)
     }
     var displayUsage: ChatUsage {
         if let task=agent.latest,task.conversationId==library.selectedID,task.model==nil || task.model==selectedModel {return task.usage ?? ChatUsage(contextUsed:nil)}
@@ -95,7 +80,6 @@ final class ChatStore: ObservableObject {
     private var updates: Set<AnyCancellable> = []
     private var pending: Task<Void, Never>?
     private var eventTask: Task<Void, Never>?
-    private var applying = false
     private var revision: UInt64 = 0
     @Published private(set) var ready = false
     private var closing = false
@@ -153,7 +137,6 @@ final class ChatStore: ObservableObject {
         await jobsTask.value
         return result ?? (unload ? modelSession.modelsToRelease.sorted() : [])
     }
-    var modelChoices: [String] { Array(Set(models + [selectedModel])).sorted() }
     var status: String {
         if modelSession.isClosing { return "Closing session" }
         if isUnloadingModel { return "Unloading model" }
@@ -165,13 +148,13 @@ final class ChatStore: ObservableObject {
         return isConnected && ready ? "Connected" : "Offline"
     }
     func refreshConnection() async {
-        guard !isChecking, !closing else { return }
+        guard !isChecking, !isSelectingModel, !closing else { return }
         isChecking = true
         defer { isChecking = false }
         do {
             if !ready {
                 revision = 0
-                let state = try await backend.connect(model: selectedModel)
+                let state = try await backend.connect(model: selectedModel, preferred: preferredModel)
                 guard !closing else { return }
                 apply(state)
                 ready = true
@@ -182,11 +165,7 @@ final class ChatStore: ObservableObject {
             await pending?.value
             guard !closing else { return }
             if agent.unconfirmedSubmission || !agent.connected { try? await agent.restore() }
-            guard await perform(["op": "refresh"]) else { return }
-            guard isConnected else { return }
-            if models.isEmpty { error = "No local models yet. Run ‘ollama pull qwen3.5:9b’ to get started."; return }
-            let chosen = models.contains(selectedModel) ? selectedModel : models.contains("qwen3.5:9b") ? "qwen3.5:9b" : models[0]
-            if selectedModel != chosen { selectedModel = chosen }
+            _ = await perform(["op": "refresh"])
         } catch { ready = false; isConnected = false; self.error = friendlyError(error) }
     }
     private func observeEvents() {
@@ -210,7 +189,7 @@ final class ChatStore: ObservableObject {
                         self.error = friendlyError(error)
                         do {
                             self.revision = 0
-                            let state = try await self.backend.connect(model: self.selectedModel)
+                            let state = try await self.backend.connect(model: self.selectedModel, preferred: self.preferredModel)
                             guard !self.closing, !Task.isCancelled else { return }
                             self.apply(state)
                             self.ready = true
@@ -262,13 +241,18 @@ final class ChatStore: ObservableObject {
             }
         }
         modelSession.apply(session)
-        models = session.models
+        let fallbackRoute = LocalModel.Route(
+            provider: session.provider == "llama.cpp" ? "llama_cpp" : "ollama",
+            host: session.provider == "llama.cpp" ? "http://127.0.0.1:9931" : "http://127.0.0.1:11434"
+        )
+        modelChoices = session.modelChoices ?? session.models.map {
+            LocalModel(route: fallbackRoute, model: $0, managed: true)
+        }
+        modelChoice = session.modelChoice ?? modelChoices.first { $0.model == session.model && $0.route == fallbackRoute }
         isConnected = session.isConnected
-        allocatedContext = session.allocatedContext
         providerName = session.provider == "llama.cpp" ? "llama.cpp" : "Ollama"
-        applying = true
         selectedModel = session.model
-        applying = false
+        if isConnected && modelChoice != nil { defaults.set(selectedModel, forKey: "model") }
         if let pendingTurn, snapshot.turns.contains(where: { $0.id == pendingTurn }) { self.pendingTurn = nil }
         let turn = snapshot.turns.last { $0.conversationId == session.selectedId }
         isGenerating = turn?.running == true || pendingTurn != nil
@@ -277,10 +261,24 @@ final class ChatStore: ObservableObject {
             usage = turn.running ? ChatUsage(contextUsed: nil, contextLimit: session.usage.contextLimit) : turn.usage
         } else { usage = session.usage }
     }
+    func selectModel(_ choice: LocalModel) async {
+        guard !isSelectingModel, !isChecking, !closing, modelChoices.contains(choice),
+              modelChoice != choice else { return }
+        isSelectingModel = true
+        defer { isSelectingModel = false }
+        await pending?.value
+        guard !closing else { return }
+        if await perform(["op": "selectModel", "model": choice.model,
+                          "route": ["provider": choice.route.provider, "host": choice.route.host]]),
+           let encoded = try? JSONEncoder().encode(choice) {
+            defaults.set(encoded, forKey: "preferredModel")
+        }
+    }
+
     func send() {
-        guard !closing, canSend, agent.reserveSubmission(allowActive: canSteerActive) else { return }
+        guard !closing, !isSelectingModel, canSend, agent.reserveSubmission(allowActive: canSteerActive) else { return }
         let conversation = library.selectedID, request = UUID(), text = draft, model = selectedModel
-        let workspace=agentWorkspace, effort=thinkingEffort.rawValue, contextWindow=contextOverride ?? contextTarget
+        let workspace=agentWorkspace, effort=thinkingEffort.rawValue, contextWindow=contextTarget
         let continueTaskID = continuation?.conversation == conversation ? continuation?.task : nil
         let preceding = pending
         pending = Task { [weak self] in

@@ -97,50 +97,242 @@ impl Core {
     }
 
     pub(super) async fn refresh(&self, session: &str) -> Result<Value> {
-        let host = self.host(session)?;
-        let engine = self.engine(session)?;
-        let outcome = provider::model_list(&self.client, engine, &host).await;
+        use provider::Engine::{LlamaCpp, Ollama};
+        let auto = self
+            .state
+            .lock()
+            .unwrap()
+            .clients
+            .get(session)
+            .ok_or("Session expired; reconnect to lorca.")?
+            .auto;
+        if auto {
+            let routes = [
+                ModelRoute {
+                    provider: Ollama,
+                    host: Ollama.default_host().into(),
+                },
+                ModelRoute {
+                    provider: LlamaCpp,
+                    host: LlamaCpp.default_host().into(),
+                },
+                ModelRoute {
+                    provider: LlamaCpp,
+                    host: "http://127.0.0.1:8080".into(),
+                },
+            ];
+            return self.refresh_local_catalogs(session, &routes).await;
+        }
+        let route = self.model_route(session)?;
+        let outcome = provider::model_list(&self.client, route.provider, &route.host).await;
         let mut s = self.state.lock().unwrap();
         let i = Self::session_index(&s, session)?;
         match outcome {
-            Ok((models, loaded)) => {
-                s.view.sessions[i].models = models;
-                if let Some(loaded) = loaded {
-                    s.view.sessions[i].active_model = Some(loaded.clone());
-                    s.view.sessions[i].models_to_release = vec![loaded.clone()];
+            Ok(catalog) => {
+                if let Some(loaded) = catalog.loaded {
+                    Self::update_allocation(&mut s, i, session, &route, &loaded, true);
+                    s.view.sessions[i].active_model = Some(loaded);
                 }
-                let selected_available = s.view.sessions[i]
+                let view = &mut s.view.sessions[i];
+                view.models = catalog.models;
+                if !view
                     .models
                     .iter()
-                    .any(|name| provider::same_model(name, &s.view.sessions[i].model));
-                if !selected_available
-                    && let Some(model) = s.view.sessions[i]
-                        .active_model
-                        .clone()
-                        .or_else(|| s.view.sessions[i].models.first().cloned())
+                    .any(|name| provider::same_model(name, &view.model))
+                    && let Some(model) = view.models.first()
                 {
-                    s.view.sessions[i].model = model;
+                    view.model = model.clone();
                 }
-                s.view.sessions[i].is_connected = true;
-                s.view.sessions[i].error = None;
+                view.is_connected = true;
+                view.error = None;
             }
             Err(e) => {
-                s.view.sessions[i].is_connected = false;
-                s.view.sessions[i].error = Some(e);
+                let view = &mut s.view.sessions[i];
+                view.models.clear();
+                view.is_connected = false;
+                view.error = Some(e);
             }
         }
         self.publish(&mut s);
         Ok(json!(s.view))
     }
-    pub(super) fn held_by_other(s: &State, session: &str, model: &str, host: &str) -> bool {
-        s.view.sessions.iter().any(|v| {
-            v.id != session
-                && s.clients.get(&v.id).is_some_and(|c| c.host == host)
-                && v.models_to_release
-                    .iter()
-                    .any(|m| provider::same_model(m, model))
+
+    async fn refresh_local_catalogs(&self, session: &str, routes: &[ModelRoute]) -> Result<Value> {
+        let catalogs = futures_util::future::join_all(
+            routes
+                .iter()
+                .map(|route| provider::model_list(&self.client, route.provider, &route.host)),
+        )
+        .await;
+        let reachable = catalogs.iter().any(|catalog| catalog.is_ok());
+        let mut choices = vec![];
+        for (route, catalog) in routes.iter().zip(catalogs) {
+            if let Ok(catalog) = catalog {
+                for model in catalog.models {
+                    choices.push(ModelChoice {
+                        route: route.clone(),
+                        model,
+                        managed: catalog.managed,
+                    });
+                }
+            }
+        }
+        let mut s = self.state.lock().unwrap();
+        let i = Self::session_index(&s, session)?;
+        let busy = self.model_route_busy(&s, session);
+        let saved_preference = s.clients[session].preferred.clone();
+        let view = &mut s.view.sessions[i];
+        view.models = choices.iter().map(|choice| choice.model.clone()).collect();
+        view.model_choices = choices;
+        let preferred = view.model_choice.as_ref().or(saved_preference.as_ref());
+        let exact = preferred.and_then(|wanted| {
+            view.model_choices
+                .iter()
+                .find(|choice| choice.route == wanted.route && choice.model == wanted.model)
+        });
+        let next = if busy {
+            exact
+        } else {
+            exact
+                .or_else(|| {
+                    view.model_choices
+                        .iter()
+                        .find(|choice| provider::same_model(&choice.model, &view.model))
+                })
+                .or_else(|| view.model_choices.first())
+        }
+        .cloned();
+        view.is_connected = next.is_some();
+        if !busy {
+            if let Some(choice) = next {
+                Self::apply_model_choice(&mut s, i, session, choice);
+            } else {
+                view.model_choice = None;
+                view.active_model = None;
+                view.allocated_context = None;
+                view.usage = Usage::default();
+            }
+            s.view.sessions[i].error = if s.view.sessions[i].is_connected {
+                None
+            } else if reachable {
+                Some("A local server is running, but it has no models available. Add a model in Ollama or llama.cpp, then refresh.".into())
+            } else {
+                Some("No local model server found. Start Ollama or llama.cpp, then refresh.".into())
+            };
+        }
+        self.publish(&mut s);
+        Ok(json!(s.view))
+    }
+
+    fn model_route_busy(&self, s: &State, session: &str) -> bool {
+        s.loads.contains_key(session)
+            || s.view
+                .turns
+                .iter()
+                .any(|turn| turn.session_id == session && turn.running)
+            || self
+                .agent
+                .snapshot()
+                .is_some_and(|task| task.owner == session && task.status.active())
+    }
+
+    fn apply_model_choice(s: &mut State, i: usize, session: &str, choice: ModelChoice) {
+        let client = s
+            .clients
+            .get_mut(session)
+            .expect("session index has a client");
+        let view = &mut s.view.sessions[i];
+        if client.engine != choice.route.provider || client.host != choice.route.host {
+            view.active_model = None;
+        }
+        if view.model_choice.as_ref() != Some(&choice) {
+            view.allocated_context = None;
+            view.usage = Usage::default();
+        }
+        client.engine = choice.route.provider;
+        client.host.clone_from(&choice.route.host);
+        view.provider = client.engine.label().into();
+        view.model.clone_from(&choice.model);
+        view.model_choice = Some(choice);
+    }
+
+    pub(super) fn select_model(&self, session: &str, v: &Value) -> Result<Value> {
+        let model = text(v, "model")?;
+        if model.is_empty() || model.len() > 500 || model.chars().any(char::is_control) {
+            return Err("Invalid model name".into());
+        }
+        let mut s = self.state.lock().unwrap();
+        let i = Self::session_index(&s, session)?;
+        if self.model_route_busy(&s, session) {
+            return Err("Finish or stop the current reply before switching models.".into());
+        }
+        if s.clients[session].auto {
+            let route: ModelRoute = serde_json::from_value(v["route"].clone())
+                .map_err(|_| "Select a model from the available list.")?;
+            let choice = s.view.sessions[i]
+                .model_choices
+                .iter()
+                .find(|choice| choice.route == route && choice.model == model)
+                .cloned()
+                .ok_or("That model is no longer available. Refresh models.")?;
+            s.clients.get_mut(session).unwrap().preferred = Some(choice.clone());
+            Self::apply_model_choice(&mut s, i, session, choice);
+            s.view.sessions[i].is_connected = true;
+            s.view.sessions[i].error = None;
+        } else {
+            s.view.sessions[i].model = model.into();
+            s.view.sessions[i].allocated_context = None;
+            s.view.sessions[i].usage = Usage::default();
+        }
+        self.publish(&mut s);
+        Ok(json!(s.view))
+    }
+
+    fn model_route(&self, session: &str) -> Result<ModelRoute> {
+        let s = self.state.lock().unwrap();
+        let c = s
+            .clients
+            .get(session)
+            .ok_or("Session expired; reconnect to lorca.")?;
+        Ok(ModelRoute {
+            provider: c.engine,
+            host: c.host.clone(),
         })
     }
+
+    fn held_by_other(s: &State, session: &str, model: &str, route: &ModelRoute) -> bool {
+        s.clients.iter().any(|(id, client)| {
+            id != session
+                && client.allocations.get(route).is_some_and(|models| {
+                    models.iter().any(|name| provider::same_model(name, model))
+                })
+        })
+    }
+
+    fn update_allocation(
+        s: &mut State,
+        i: usize,
+        session: &str,
+        route: &ModelRoute,
+        model: &str,
+        held: bool,
+    ) {
+        let allocations = &mut s
+            .clients
+            .get_mut(session)
+            .expect("session index has a client")
+            .allocations;
+        let models = allocations.entry(route.clone()).or_default();
+        models.retain(|name| !provider::same_model(name, model));
+        if held {
+            models.push(model.into());
+        }
+        if models.is_empty() {
+            allocations.remove(route);
+        }
+        s.view.sessions[i].models_to_release = allocations.values().flatten().cloned().collect();
+    }
+
     pub(super) async fn prepare(
         &self,
         session: &str,
@@ -151,13 +343,21 @@ impl Core {
             return Err("Invalid model name".into());
         }
         let _guard = self.lifecycle.lock().await;
-        let host = self.host(session)?;
-        let engine = self.engine(session)?;
         let (load_cancel, mut load_rx) = watch::channel(false);
-        let previous = {
+        let (route, previous, managed) = {
             let mut s = self.state.lock().unwrap();
             let i = Self::session_index(&s, session)?;
-            if s.view.sessions[i]
+            let client = &s.clients[session];
+            let route = ModelRoute {
+                provider: client.engine,
+                host: client.host.clone(),
+            };
+            let view = &s.view.sessions[i];
+            let managed = view
+                .model_choice
+                .as_ref()
+                .is_none_or(|choice| choice.managed);
+            if view
                 .active_model
                 .as_deref()
                 .is_some_and(|m| provider::same_model(m, model))
@@ -166,35 +366,34 @@ impl Core {
                 self.publish(&mut s);
                 return Ok(json!(s.view));
             }
+            let previous = view.active_model.clone();
             s.loads.insert(session.into(), load_cancel);
             s.view.sessions[i].loading_model = Some(model.into());
             s.view.sessions[i].error = None;
-            let previous = s.view.sessions[i].active_model.clone();
-            if !s.view.sessions[i]
-                .models_to_release
-                .iter()
-                .any(|m| provider::same_model(m, model))
-            {
-                s.view.sessions[i].models_to_release.push(model.into());
+            if managed {
+                Self::update_allocation(&mut s, i, session, &route, model, true);
             }
             self.publish(&mut s);
-            previous
+            (route, previous, managed)
         };
+        let host = &route.host;
+        let engine = route.provider;
         let mut released = false;
         let operation = async {
-            if unload_previous && let Some(old) = &previous {
+            if managed
+                && unload_previous
+                && let Some(old) = &previous
+            {
                 let shared = {
                     let s = self.state.lock().unwrap();
-                    Self::held_by_other(&s, session, old, &host)
+                    Self::held_by_other(&s, session, old, &route)
                 };
                 if !shared {
-                    provider::manage(&self.client, engine, &host, old, false).await?;
+                    provider::manage(&self.client, engine, host, old, false).await?;
                     released = true;
                     let mut s = self.state.lock().unwrap();
                     let i = Self::session_index(&s, session)?;
-                    s.view.sessions[i]
-                        .models_to_release
-                        .retain(|m| !provider::same_model(m, old));
+                    Self::update_allocation(&mut s, i, session, &route, old, false);
                     s.view.sessions[i].active_model = None;
                 }
             }
@@ -203,40 +402,42 @@ impl Core {
                 let s = self.state.lock().unwrap();
                 s.view.sessions.iter().any(|v| {
                     v.id != session
-                        && s.clients.get(&v.id).is_some_and(|c| c.host == host)
+                        && s.clients
+                            .get(&v.id)
+                            .is_some_and(|c| c.host == *host && c.engine == engine)
                         && v.active_model
                             .as_deref()
                             .is_some_and(|m| provider::same_model(m, model))
                 })
             };
-            if !shared {
-                provider::manage(&self.client, engine, &host, model, true).await?;
+            if managed && !shared {
+                provider::manage(&self.client, engine, host, model, true).await?;
             }
             Ok::<_, String>(())
         };
         let result = tokio::select! { result=operation=>result, _=load_rx.changed()=>Err("Model loading cancelled.".into()) };
-        self.state.lock().unwrap().loads.remove(session);
         if result.is_err()
             && !matches!(&result,Err(message) if message=="Model loading cancelled.")
             && released
             && let Some(old) = &previous
         {
-            let _ = provider::manage(&self.client, engine, &host, old, true)
+            let _ = provider::manage(&self.client, engine, host, old, true)
                 .await
                 .map(|()| {
                     let mut s = self.state.lock().unwrap();
                     if let Ok(i) = Self::session_index(&s, session) {
                         s.view.sessions[i].active_model = Some(old.clone());
-                        s.view.sessions[i].models_to_release.push(old.clone());
+                        Self::update_allocation(&mut s, i, session, &route, old, true);
                     }
                 });
         }
         let limit = if result.is_ok() {
-            self.context_limit_for(engine, &host, model).await
+            self.context_limit_for(engine, host, model).await
         } else {
             None
         };
         let mut s = self.state.lock().unwrap();
+        s.loads.remove(session);
         let i = Self::session_index(&s, session)?;
         s.view.sessions[i].loading_model = None;
         match result {
@@ -333,43 +534,55 @@ impl Core {
             .filter(|n| *n > 0)
     }
     pub(super) async fn release(&self, session: &str, model: &str) -> Result<()> {
+        let route = self.model_route(session)?;
+        self.release_from(session, model, &route).await
+    }
+
+    async fn release_from(&self, session: &str, model: &str, route: &ModelRoute) -> Result<()> {
         let _guard = self.lifecycle.lock().await;
-        let host = self.host(session)?;
-        let engine = self.engine(session)?;
         {
             let s = self.state.lock().unwrap();
-            if Self::held_by_other(&s, session, model, &host) {
+            let i = Self::session_index(&s, session)?;
+            if s.view.sessions[i]
+                .model_choice
+                .as_ref()
+                .is_some_and(|choice| choice.route == *route && !choice.managed)
+            {
+                return Err("This model is managed by its llama.cpp server.".into());
+            }
+            if Self::held_by_other(&s, session, model, route) {
                 return Err(format!(
                     "{model} is still used by another lorca session; kept loaded."
                 ));
             }
         }
-        provider::manage(&self.client, engine, &host, model, false).await?;
+        provider::manage(&self.client, route.provider, &route.host, model, false).await?;
         let mut s = self.state.lock().unwrap();
         let i = Self::session_index(&s, session)?;
-        s.view.sessions[i]
-            .models_to_release
-            .retain(|m| !provider::same_model(m, model));
-        if s.view.sessions[i]
-            .active_model
-            .as_deref()
-            .is_some_and(|m| provider::same_model(m, model))
+        Self::update_allocation(&mut s, i, session, route, model, false);
+        if s.clients[session].engine == route.provider
+            && s.clients[session].host == route.host
+            && s.view.sessions[i]
+                .active_model
+                .as_deref()
+                .is_some_and(|m| provider::same_model(m, model))
         {
             s.view.sessions[i].active_model = None;
         }
         self.publish(&mut s);
         Ok(())
     }
+
     pub(super) async fn close(&self, session: &str, unload: bool) -> Result<Value> {
         self.agent.cancel_owner(session);
         let names = {
             let mut s = self.state.lock().unwrap();
-            let i = Self::session_index(&s, session)?;
+            Self::session_index(&s, session)?;
             Self::cancel_session(&mut s, session);
             if let Some(cancel) = s.loads.get(session) {
                 cancel.send_replace(true);
             }
-            s.view.sessions[i].models_to_release.clone()
+            s.clients[session].allocations.clone()
         };
         for _ in 0..200 {
             if self
@@ -388,12 +601,18 @@ impl Core {
             // Give all retirements one shared budget, then release this session
             // even when the provider or another allocation is unresponsive.
             let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
-            for model in names {
-                if !matches!(
-                    tokio::time::timeout_at(deadline, self.release(session, &model)).await,
-                    Ok(Ok(()))
-                ) {
-                    failed.push(model);
+            for (route, models) in names {
+                for model in models {
+                    if !matches!(
+                        tokio::time::timeout_at(
+                            deadline,
+                            self.release_from(session, &model, &route)
+                        )
+                        .await,
+                        Ok(Ok(()))
+                    ) {
+                        failed.push(model);
+                    }
                 }
             }
         }
@@ -426,3 +645,6 @@ impl Core {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
