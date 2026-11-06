@@ -153,3 +153,26 @@ async fn oversized_user_input_is_manifested_and_retrievable_without_prompt_overf
         && e.data["tool"]=="get_history_record"
         && e.data["result"]["content"].as_str().unwrap_or("").contains("FINAL-NEEDLE")));
 }
+
+#[tokio::test]
+async fn oversized_input_never_hides_original_read_only_restrictions() {
+    let root = std::env::temp_dir().join(format!("lorca-long-authority-{}",lorca::types::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("a.txt"),"original").unwrap();
+    let task = format!("{} do not edit any files. {}",
+        "Inspect the task carefully. ".repeat(350),
+        "Please try changing a.txt to wrong.");
+    let script = Script::new(vec![
+        tool("apply_patch",json!({"path":"a.txt","old_text":"original","new_text":"wrong"})),
+        json!({"role":"assistant","content":"The restriction forbids this edit."}),
+    ]);
+    let agent = Arc::new(Agent::default());
+    agent.start("tester", &task, &root, Limits::default(),
+        script, Registry::default()).unwrap();
+    let view = completed(&agent).await;
+    assert_eq!(view.status, Status::Completed, "{:?}",view.result);
+    assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(),"original");
+    assert!(!view.events.iter().any(|e|e.kind=="approval_required" || e.kind=="tool_started"));
+    assert!(view.events.iter().any(|e|e.kind=="tool_failed"));
+    std::fs::remove_dir_all(root).unwrap();
+}
