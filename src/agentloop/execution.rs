@@ -169,7 +169,8 @@ impl Agent {
         } else {
             super::context::working_notes(&resume_evidence)
         };
-        let mut checkpoint_turns = 0;
+        let mut repeated_checkpoint_turns = 0;
+        let mut last_checkpoint_signature = String::new();
         let mut invalid_turns = 0;
         let mut reply_recovery_used = false;
         let mut recover_public_reply = false;
@@ -207,7 +208,11 @@ impl Agent {
             operational["unresolved"] = json!(unresolved.keys().collect::<Vec<_>>());
             operational["denied"] = json!(denied);
             let schemas = registry.active_schemas();
-            operational["activeInstructions"] = json!(self.instruction_history());
+            let mut active_instructions = Vec::new();
+            for instruction in self.instruction_history() {
+                active_instructions.push(registry.virtualize_user_input(&instruction)?);
+            }
+            operational["activeInstructions"] = json!(active_instructions);
             operational["unavailableTools"] = json!(registry.unavailable());
             let budget = crate::context::GenerationBudget::new(
                 capacity,
@@ -444,9 +449,19 @@ impl Agent {
                     .iter()
                     .all(|call| matches!(call.name.as_str(), "update_plan" | "tool_search"));
             if checkpoint_only {
-                checkpoint_turns += 1;
-                if checkpoint_turns > inference.effort().checkpoint_turns() {
-                    return Err("Task incomplete: Working checkpoints did not advance to an action or answer within the continuation allowance. Saved work is preserved.".into());
+                // Planning and memory updates are legitimate model decisions.
+                // Only repeated *identical* plans without progress are blocked.
+                let signature = turn.calls.iter()
+                    .map(|call| format!("{}:{}",call.name,call.arguments))
+                    .collect::<Vec<_>>().join("|");
+                if signature == last_checkpoint_signature {
+                    repeated_checkpoint_turns += 1;
+                } else {
+                    repeated_checkpoint_turns = 0;
+                    last_checkpoint_signature = signature;
+                }
+                if repeated_checkpoint_turns >= 2 {
+                    return Err("Task incomplete: The model repeated an identical working checkpoint without progress. Saved notes and original history remain available.".into());
                 }
             }
             let calls = turn.calls;
@@ -621,7 +636,8 @@ impl Agent {
                 {
                     unsuccessful_actions = 0;
                     truncation_retries = 0;
-                    checkpoint_turns = 0;
+                    repeated_checkpoint_turns = 0;
+                    last_checkpoint_signature.clear();
                 }
                 if ok {
                     unresolved.remove(&operation_key(&call, w));
