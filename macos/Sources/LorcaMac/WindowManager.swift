@@ -21,6 +21,8 @@ final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolb
     private var miniChat: MiniPanel!
     private var miniAnimationID = UUID()
     private var zoomObservation: AnyCancellable?
+    private weak var sidebarButton: NSButton?
+    private var sidebarCollapsePreview = false
 
     init(store: ChatStore) { self.store = store }
 
@@ -200,7 +202,23 @@ final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolb
         if miniExpanded { positionMiniChat(preserveSide: true) }
     }
 
-    @objc private func toggleSidebar() { sidebarVisible.toggle() }
+    func setSidebarVisible(_ visible: Bool) {
+        sidebarVisible = visible
+        sidebarCollapsePreview = false
+        updateSidebarIcon()
+    }
+
+    func setSidebarCollapsePreview(_ willCollapse: Bool) {
+        guard sidebarCollapsePreview != willCollapse else { return }
+        sidebarCollapsePreview = willCollapse
+        updateSidebarIcon()
+    }
+
+    private func updateSidebarIcon() {
+        sidebarButton?.contentTintColor = sidebarVisible && !sidebarCollapsePreview ? .systemBlue : nil
+    }
+
+    @objc private func toggleSidebar() { setSidebarVisible(!sidebarVisible) }
     @objc func newChat() { store.newChat(); page = .chats }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -218,7 +236,10 @@ final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolb
         case "lorca.sidebar":
             item.label = "Toggle Sidebar"
             item.isNavigational = true
-            item.view = toolbarButton("sidebar.left", label: item.label, action: #selector(toggleSidebar))
+            let button = toolbarButton("sidebar.left", label: item.label, action: #selector(toggleSidebar))
+            item.view = button
+            sidebarButton = button
+            updateSidebarIcon()
         case "lorca.newChat":
             item.label = "New Chat"
             item.isNavigational = true

@@ -39,6 +39,8 @@ struct MemoryMetrics {
 }
 
 struct MemoryPressureView: View {
+    var isVisible = true
+
     private enum Pressure: Int {
         case normal = 1, warning = 2, critical = 4
         var label: String { switch self { case .normal: "Normal"; case .warning: "Elevated"; case .critical: "High" } }
@@ -123,7 +125,8 @@ struct MemoryPressureView: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Memory pressure: \(current?.label ?? "Unavailable")")
         .help("Live macOS VM counters, sampled every 0.5 seconds. The graph shows RAM usage over four minutes; its color is the OS memory-pressure state. Used = app + wired + compressed. Values may differ from Activity Monitor due to sampling and accounting; this is not its pressure-curve algorithm.")
-        .task {
+        .task(id: isVisible) {
+            guard isVisible else { return }
             while !Task.isCancelled {
                 if let metrics = MemoryMetrics.read() {
                     available = true
