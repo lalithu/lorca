@@ -8,7 +8,7 @@ struct AgentApprovalView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Label(pending ? "Approval required" : "Requested action", systemImage: "hand.raised")
-                .font(.system(size: 12, weight: .semibold)).foregroundStyle(Color.lorcaBlue)
+                .font(.system(size: 12, weight: .semibold)).foregroundStyle(ChatAccent.approval)
             if let diff = approval.action["diff"].string {
                 HStack {Text(approval.action["path"].string ?? "File change").textSelection(.enabled);Spacer();if let kind=approval.action["changeKind"].string {Text(kind).foregroundStyle(.secondary)}}.font(.system(size: 11, design: .monospaced))
                 AgentDiffView(diff: diff).equatable()
@@ -37,7 +37,7 @@ struct AgentApprovalView: View {
                 Text("This approval is no longer pending.").font(.caption).foregroundStyle(.secondary)
             }
         }
-        .padding(12).background(Color.lorcaBlue.opacity(0.055), in: RoundedRectangle(cornerRadius: 12))
+        .padding(12).chatInlineAccent(ChatAccent.approval)
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.lorcaBlue.opacity(pending ? 0.35 : 0.12)))
     }
     private func decide(_ decision: String) { Task { await store.decide(task: task, approval: approval, decision: decision) } }

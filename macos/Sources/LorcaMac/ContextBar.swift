@@ -31,7 +31,7 @@ struct ContextBar: View {
         }
         .font(.system(size: compact ? 9 : 11, design: .monospaced))
         .monospacedDigit()
-        .foregroundStyle(blue.opacity(0.85))
+        .foregroundStyle(.secondary)
         .help("Confirmed prompt and reply tokens from the most recent model turn, including tool execution. During generation these are the last confirmed measurements; compaction clears them. — means the local server hasn’t reported a value yet.")
     }
 }

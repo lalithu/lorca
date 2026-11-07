@@ -55,7 +55,7 @@ struct ChatComposer: View {
                 if store.isImportingImages { ProgressView().controlSize(.mini).accessibilityLabel("Importing images") }
                 AgentComposerControls(store: store)
                 Spacer(minLength: 0)
-                ModelPicker(store: store, compact: compact)
+                ModelPicker(store: store, compact: compact, embeddedInComposer: true)
                 if store.isGenerating || store.currentAgentActive {
                     Button { store.stop() } label: {
                         Image(systemName: "stop.fill").font(.system(size: 12, weight: .semibold))
@@ -67,9 +67,9 @@ struct ChatComposer: View {
                 if !(store.isGenerating || store.currentAgentActive) || store.canSteerActive {
                     Button { send() } label: {
                         Image(systemName: "arrow.up").font(.system(size: 17, weight: .semibold))
-                            .foregroundStyle(canSend ? .white : .secondary.opacity(0.55))
+                            .foregroundStyle(canSend ? Color.lorcaBlue : Color.secondary.opacity(0.65))
                             .frame(width: 32, height: 32)
-                            .background(canSend ? Color.lorcaBlue : Color.primary.opacity(0.10), in: Circle())
+                            .background(canSend ? Color.lorcaBlue.opacity(0.17) : Color.primary.opacity(0.06), in: Circle())
                     }
                     .disabled(!canSend).keyboardShortcut(.return, modifiers: .command)
                     .help("Send (⌘Return)").accessibilityLabel("Send message")
@@ -77,9 +77,13 @@ struct ChatComposer: View {
             }
         }
         .buttonStyle(.plain).padding(compact ? 14 : 18)
-        .background(.primary.opacity(0.075), in: RoundedRectangle(cornerRadius: compact ? 20 : 26))
-        .overlay(RoundedRectangle(cornerRadius: compact ? 20 : 26)
-            .strokeBorder(dropTarget ? Color.lorcaBlue : Color.primary.opacity(0.10)))
+        .chatGlass(radius: compact ? 20 : 26)
+        .overlay {
+            if dropTarget {
+                RoundedRectangle(cornerRadius: compact ? 20 : 26)
+                    .strokeBorder(Color.lorcaBlue).allowsHitTesting(false)
+            }
+        }
         .onDrop(of: [UTType.fileURL, .image], isTargeted: $dropTarget) { providers in
             guard !store.isImportingImages else { return false }
             store.attachProviders(providers)

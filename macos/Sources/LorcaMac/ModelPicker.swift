@@ -3,6 +3,7 @@ import SwiftUI
 struct ModelPicker: View {
     @ObservedObject var store: ChatStore
     var compact = false
+    var embeddedInComposer = false
     @State private var confirmingReload = false
     @State private var confirmingUnload = false
     @State private var showingAdvisor = false
@@ -47,7 +48,7 @@ struct ModelPicker: View {
             .font(.system(size: compact ? 11 : 12, weight: .medium))
             .foregroundStyle(.secondary)
             .padding(.horizontal, 9).padding(.vertical, 5)
-            .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 7))
+            .background(Color.primary.opacity(embeddedInComposer ? 0 : 0.05), in: RoundedRectangle(cornerRadius: 7))
         }
         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize(horizontal: true, vertical: true)
         .frame(maxWidth: compact ? 180 : 250, alignment: .trailing)

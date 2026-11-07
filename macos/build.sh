@@ -26,7 +26,12 @@ else
     configuration="${1:-release}"
     (cd .. && cargo build --release --locked)
 fi
-xcrun swift build -c "$configuration"
+# SwiftPM's build service can stamp the deployment target as the linked SDK.
+# AppKit uses the linked SDK to opt into the current system appearance.
+sdk_version="$(xcrun --sdk "${SDKROOT:-macosx}" --show-sdk-version)"
+deployment_target="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' Info.plist)"
+xcrun swift build -c "$configuration" \
+    -Xlinker -platform_version -Xlinker macos -Xlinker "$deployment_target" -Xlinker "$sdk_version"
 bin_dir="$(xcrun swift build -c "$configuration" --show-bin-path)"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 # Replace Mach-O files with new inodes. Overwriting an executable in place can

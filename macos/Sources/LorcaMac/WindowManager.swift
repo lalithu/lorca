@@ -6,7 +6,7 @@ import SwiftUI
 @MainActor
 final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolbarDelegate {
     @Published var page: SidebarPage = .chats {
-        didSet { toolbarTitle.stringValue = "lorca · \(page.rawValue)" }
+        didSet { dashboard?.subtitle = page.rawValue }
     }
     @Published private(set) var sidebarVisible = true
     @Published private(set) var isFullScreen = false
@@ -21,7 +21,6 @@ final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolb
     private var miniChat: MiniPanel!
     private var miniAnimationID = UUID()
     private var zoomObservation: AnyCancellable?
-    private let toolbarTitle = NSTextField(labelWithString: "lorca · Chats")
 
     init(store: ChatStore) { self.store = store }
 
@@ -30,7 +29,7 @@ final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolb
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered, defer: false)
         dashboard.title = "lorca"
-        dashboard.titleVisibility = .hidden
+        dashboard.subtitle = page.rawValue
         dashboard.isOpaque = false
         dashboard.backgroundColor = .windowBackgroundColor
         dashboard.isReleasedWhenClosed = false
@@ -205,7 +204,7 @@ final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolb
     @objc func newChat() { store.newChat(); page = .chats }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.init("lorca.sidebar"), .init("lorca.newChat"), .init("lorca.title"), .flexibleSpace]
+        [.init("lorca.sidebar"), .init("lorca.newChat"), .flexibleSpace]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -218,25 +217,12 @@ final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolb
         switch identifier.rawValue {
         case "lorca.sidebar":
             item.label = "Toggle Sidebar"
+            item.isNavigational = true
             item.view = toolbarButton("sidebar.left", label: item.label, action: #selector(toggleSidebar))
         case "lorca.newChat":
             item.label = "New Chat"
+            item.isNavigational = true
             item.view = toolbarButton("square.and.pencil", label: item.label, action: #selector(newChat))
-        case "lorca.title":
-            let separator = NSBox()
-            separator.boxType = .separator
-            separator.widthAnchor.constraint(equalToConstant: 1).isActive = true
-            separator.heightAnchor.constraint(equalToConstant: 18).isActive = true
-            toolbarTitle.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
-            toolbarTitle.textColor = .secondaryLabelColor
-            let title = NSStackView(views: [separator, toolbarTitle])
-            title.orientation = .horizontal
-            title.alignment = .centerY
-            title.heightAnchor.constraint(equalToConstant: 28).isActive = true
-            title.spacing = 14
-            title.edgeInsets = NSEdgeInsets(top: 0, left: 6, bottom: 0, right: 0)
-            item.view = title
-            item.label = "lorca"
         default: return nil
         }
         item.toolTip = item.label

@@ -43,17 +43,18 @@ struct MarkdownBlock: Identifiable {
 }
 
 struct MarkdownText: View, Equatable {
-    static func ==(lhs:Self,rhs:Self)->Bool {lhs.text==rhs.text && lhs.size==rhs.size && lhs.showsCopyButton==rhs.showsCopyButton && lhs.userMessage==rhs.userMessage}
+    static func ==(lhs:Self,rhs:Self)->Bool {lhs.text==rhs.text && lhs.size==rhs.size && lhs.showsCopyButton==rhs.showsCopyButton && lhs.userMessage==rhs.userMessage && lhs.editorial==rhs.editorial}
     let text: String
     let size: CGFloat
     var showsCopyButton = true
     var userMessage = false
+    var editorial = false
 
     var body: some View {
         VStack(alignment:.leading,spacing:6) {
         if showsCopyButton && !userMessage {HStack {Spacer();Button("Copy message") {NativeClipboard.copy(text)}.buttonStyle(.borderless).font(.system(size:10)).foregroundStyle(.secondary)}}
-        Text(displayText)
-            .font(.system(size: size))
+        Text(Self.rendered(text, size: size, editorial: editorial))
+            .font(editorial ? ShellTypography.serif(size) : .system(size: size))
             .lineSpacing(4)
             .textSelection(.enabled)
             .fixedSize(horizontal: false, vertical: true)
@@ -64,11 +65,6 @@ struct MarkdownText: View, Equatable {
             }}
         }
         }
-    }
-    private var displayText: AttributedString {
-        var value = Self.rendered(text, size: size)
-        if userMessage { value.foregroundColor = .white }
-        return value
     }
     static func codeBlocks(_ source:String)->[String] {
         var blocks:[String]=[],current:[String]=[];var inside=false
@@ -81,7 +77,7 @@ struct MarkdownText: View, Equatable {
 
     // One Text keeps selection continuous across Markdown elements and leaves
     // wrapping/height entirely to SwiftUI, including while streaming/resizing.
-    static func rendered(_ source: String, size: CGFloat) -> AttributedString {
+    static func rendered(_ source: String, size: CGFloat, editorial: Bool = false) -> AttributedString {
         let blocks = MarkdownBlock.parse(source)
         var result = AttributedString()
         for (index, block) in blocks.enumerated() {
@@ -110,7 +106,9 @@ struct MarkdownText: View, Equatable {
                 content.font = .system(size: max(10, size - 1), design: .monospaced)
                 content.backgroundColor = .primary.opacity(0.045)
             } else if let level = block.heading {
-                content.font = .system(size: size + CGFloat(max(1, 7 - level)) * 1.5, weight: .semibold)
+                let headingSize = size + CGFloat(max(1, 7 - level)) * 1.5
+                content.font = editorial ? ShellTypography.serif(headingSize).weight(.semibold)
+                    : .system(size: headingSize, weight: .semibold)
             } else if block.isTableHeader {
                 content.font = .system(size: size, weight: .semibold)
             }

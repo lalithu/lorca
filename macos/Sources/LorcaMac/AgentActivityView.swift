@@ -36,7 +36,8 @@ struct AgentActivityView: View {
                     switch row.content {
                     case .text(let text):
                         let visible = AgentPresentation.visibleText(text, question: question)
-                        if !visible.isEmpty { MarkdownText(text: visible, size: textSize, showsCopyButton: false).equatable().textSelection(.enabled) }
+                        if !visible.isEmpty { MarkdownText(text: visible, size: textSize, showsCopyButton: false, editorial: true)
+                            .equatable().textSelection(.enabled).chatResponseSurface() }
                     case .thinking(let block):
                         ThinkingPanel(block: block, selection: Binding(
                             get: { store.thinkingExpanded(taskID: taskID, block: block) },
@@ -53,7 +54,9 @@ struct AgentActivityView: View {
                     Button("Continue task", action: resume).buttonStyle(.bordered).controlSize(.small)
                 }
                 if let clarification {
-                    MarkdownText(text: question ?? "Your answer is needed", size: textSize, showsCopyButton: false)
+                    MarkdownText(text: question ?? "Your answer is needed", size: textSize, showsCopyButton: false, editorial: true)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .chatInlineAccent(ChatAccent.approval)
                     if clarification["needsWorkspace"].boolean == true, let chooseWorkspace = onChooseWorkspace {
                         Button("Choose folder…", action: chooseWorkspace).buttonStyle(.bordered).controlSize(.small)
                     } else if let choose = onChoose {
@@ -78,7 +81,8 @@ struct AgentActivityView: View {
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
         } else if let message = savedMessage {
-            MarkdownText(text: message.content, size: textSize).equatable().textSelection(.enabled)
+            MarkdownText(text: message.content, size: textSize, editorial: true)
+                .equatable().textSelection(.enabled).chatResponseSurface()
         }
     }
 }
@@ -130,15 +134,15 @@ private struct AgentActivityGroup: View {
             Button { expanded.toggle() } label: {
                 HStack(spacing: 7) {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.system(size: 9))
-                    Image(systemName: "terminal").font(.system(size: 11))
+                    Image(systemName: "terminal").font(.system(size: 11)).foregroundStyle(ChatAccent.activity)
                     Text(AgentActivity.summary(items)).multilineTextAlignment(.leading)
-                    if pending { Text("· Awaiting approval").foregroundStyle(Color.lorcaBlue) }
+                    if pending { Text("· Awaiting approval").foregroundStyle(ChatAccent.approval) }
                 }.font(.system(size: 12)).foregroundStyle(.secondary).contentShape(Rectangle())
             }.buttonStyle(.plain).accessibilityLabel("Tool activity: \(AgentActivity.summary(items))")
             if expanded {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(items) { item in AgentToolRow(store: store, task: task, item: item, initiallyExpanded: initiallyExpanded) }
-                }.padding(12).background(.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
+                }.padding(12).chatInlineAccent(ChatAccent.activity)
             } else if pending, let approval = task.approval {
                 // Keep the actual approval actionable even while details are collapsed.
                 AgentApprovalView(store: store, task: task, approval: approval)
@@ -159,10 +163,10 @@ private struct AgentToolRow: View {
                 HStack(spacing: 8) {
                     Image(systemName: expanded || pending ? "chevron.down" : "chevron.right").font(.system(size: 8, weight: .semibold)).frame(width: 9)
                     if item.running && task.status.active { ProgressView().controlSize(.mini) }
-                    else { Image(systemName: item.failed ? "exclamationmark.circle" : item.completed ? "checkmark" : "circle").font(.system(size: 10)).foregroundStyle(item.failed ? Color.red : Color.secondary) }
+                    else { Image(systemName: item.failed ? "exclamationmark.circle" : item.completed ? "checkmark" : "circle").font(.system(size: 10)).foregroundStyle(item.failed ? ChatAccent.error : Color.secondary) }
                     Text(item.title).font(.system(size: 12)).lineLimit(1).truncationMode(.middle)
                     Spacer(minLength: 0)
-                    Text(pending ? "Waiting for approval" : item.statusLabel).font(.system(size:10)).foregroundStyle(item.failed ? Color.red : Color.secondary)
+                    Text(pending ? "Waiting for approval" : item.statusLabel).font(.system(size:10)).foregroundStyle(item.failed ? ChatAccent.error : Color.secondary)
                 }.contentShape(Rectangle())
             }.buttonStyle(.plain)
             if expanded || pending {
@@ -172,7 +176,7 @@ private struct AgentToolRow: View {
                     if ["run_command","exec_command","write_stdin"].contains(item.tool ?? "") {
                         if let code = item.result["exitCode"].int {
                             Text("Exit \(code)").font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(code == 0 ? Color.green : Color.red)
+                                .foregroundStyle(code == 0 ? ChatAccent.success : ChatAccent.error)
                         }
                         if let output = item.result["output"].string { AgentOutputView(text: output) }
                         else if !item.output.isEmpty { AgentOutputView(text: item.output) }

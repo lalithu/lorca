@@ -17,7 +17,7 @@ struct ThinkingPanel: View {
                 HStack(spacing: 7) {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.system(size: 9))
                     if block.active { ProgressView().controlSize(.mini) }
-                    else { Image(systemName: "brain").font(.system(size: 12)) }
+                    else { Image(systemName: "brain").font(.system(size: 12)).foregroundStyle(ChatAccent.reasoning) }
                     Text(block.active ? "Reasoning…" : "Reasoning").font(.system(size: 12, weight: .medium))
                     Spacer()
 
@@ -39,11 +39,11 @@ struct ThinkingPanel: View {
 struct ReasoningText: View {
     let text: String
     var body: some View {
-        MarkdownText(text: text, size: 12, showsCopyButton: false)
+        MarkdownText(text: text, size: 12, showsCopyButton: false, editorial: true)
             .textSelection(.enabled).foregroundStyle(.secondary)
             .padding(.leading, 14).padding(.vertical, 4)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .overlay(alignment: .leading) { Rectangle().fill(.primary.opacity(0.12)).frame(width: 1) }
+            .chatInlineAccent(ChatAccent.reasoning)
             .accessibilityLabel("Model reasoning")
     }
 }

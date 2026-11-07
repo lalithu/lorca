@@ -43,8 +43,7 @@ struct ChatView: View {
                             withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo("conversation-bottom", anchor: .bottom) }
                         } label: {
                             Image(systemName: "arrow.down").font(.system(size: 13, weight: .medium))
-                                .frame(width: 32, height: 32).background(.regularMaterial, in: Circle())
-                                .overlay(Circle().strokeBorder(.primary.opacity(0.12)))
+                                .frame(width: 32, height: 32).chatGlass(radius: 16)
                         }.buttonStyle(.plain).help("Jump to latest and follow response")
                             .accessibilityLabel("Jump to latest response").padding(.bottom, 8)
                     }
@@ -114,9 +113,9 @@ struct ChatView: View {
         VStack(spacing: compact ? 9 : 16) {
             if !compact { Text(LorcaAsset.emoji).font(.system(size: 50)).padding(.bottom, 4) }
             Text(compact ? "Here for you, Lalith." : "Hey Lalith.")
-                .font(.system(size: compact ? 17 : 23, weight: .medium))
+                .font(ShellTypography.serif(compact ? 17 : 23).weight(.medium))
             Text(compact ? "What’s on your mind?" : "What are we working on today?")
-                .font(.system(size: compact ? 11 : 13)).foregroundStyle(.secondary)
+                .font(ShellTypography.serif(compact ? 11 : 13)).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -141,7 +140,7 @@ struct ChatView: View {
             if compact {
                 Text(message.role == .user ? "YOU" : "LORCA")
                     .font(.system(size: 9, weight: .bold)).tracking(1.2)
-                    .foregroundStyle(message.role == .user ? Color.white.opacity(0.8) : .lorcaBlue)
+                    .foregroundStyle(message.role == .user ? Color.secondary : .lorcaBlue)
             }
             if !message.attachments.isEmpty {
                 AttachmentStrip(attachments: message.attachments, storage: store.imageStore, compact: compact)
@@ -152,7 +151,9 @@ struct ChatView: View {
                     Text("Generating response…").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
             } else {
-                MarkdownText(text: message.content, size: textSize, showsCopyButton: false, userMessage: message.role == .user).equatable().textSelection(.enabled)
+                MarkdownText(text: message.content, size: textSize, showsCopyButton: false, userMessage: message.role == .user, editorial: true)
+                    .equatable().textSelection(.enabled)
+                    .modifier(AssistantMessageSurface(enabled: message.role == .assistant))
             }
             if message.role == .assistant {
                 ResponseDetails(usage: message.agentTaskId.flatMap { store.agent.runs[$0]?.usage } ?? message.agentUsage,
@@ -174,7 +175,16 @@ struct ChatView: View {
                 .buttonStyle(.plain).help("Dismiss error")
         }
         .padding(11)
-        .background(.orange.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
+        .chatInlineAccent(ChatAccent.error)
+    }
+}
+
+private struct AssistantMessageSurface: ViewModifier {
+    let enabled: Bool
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if enabled { content.chatResponseSurface() }
+        else { content }
     }
 }
 
@@ -216,11 +226,9 @@ struct UserMessageBubble<Content: View>: View {
             Spacer(minLength: 28)
             UserMessageLayout {
                 content.padding(.horizontal, 14).padding(.vertical, 11)
-                    .background {
-                        RoundedRectangle(cornerRadius: 16).fill(Color(nsColor: .systemBlue))
-                            .contextMenu { Button("Copy message") { NativeClipboard.copy(text) } }
-                    }
-                    .foregroundStyle(.white)
+                    .chatGlass(radius: 17, tint: Color.lorcaBlue.opacity(0.14))
+                    .foregroundStyle(.primary)
+                    .contextMenu { Button("Copy message") { NativeClipboard.copy(text) } }
             }
         }.frame(maxWidth: .infinity, alignment: .trailing)
     }
