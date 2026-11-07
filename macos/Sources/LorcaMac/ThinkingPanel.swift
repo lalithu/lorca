@@ -16,11 +16,10 @@ struct ThinkingPanel: View {
             } label: {
                 HStack(spacing: 7) {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.system(size: 9))
+                    Image(systemName: "brain").font(.system(size: 12)).foregroundStyle(ChatAccent.reasoning)
                     if block.active { ProgressView().controlSize(.mini) }
-                    else { Image(systemName: "brain").font(.system(size: 12)).foregroundStyle(ChatAccent.reasoning) }
                     Text(block.active ? "Reasoning…" : "Reasoning").font(.system(size: 12, weight: .medium))
-                    Spacer()
-
+                    Spacer(minLength: 0)
                 }.foregroundStyle(.secondary).contentShape(Rectangle())
             }.buttonStyle(.plain).accessibilityLabel(block.label).accessibilityIdentifier("thinking-disclosure-" + block.id)
             if expanded {
@@ -30,7 +29,6 @@ struct ThinkingPanel: View {
                 if block.truncated { Text("Thinking display reached its session limit.").font(.caption).foregroundStyle(.secondary) }
             }
         }
-
         .onAppear { if selection == nil { disclosure.appear(active: block.active, initiallyExpanded: initiallyExpanded) } }
         .onChange(of: block.state) { _, _ in if selection == nil { disclosure.update(active: block.active) } }
     }
@@ -43,7 +41,9 @@ struct ReasoningText: View {
             .textSelection(.enabled).foregroundStyle(.secondary)
             .padding(.leading, 14).padding(.vertical, 4)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .chatInlineAccent(ChatAccent.reasoning)
+            .overlay(alignment: .leading) {
+                Rectangle().fill(ChatAccent.reasoning.opacity(0.35)).frame(width: 1).allowsHitTesting(false)
+            }
             .accessibilityLabel("Model reasoning")
     }
 }

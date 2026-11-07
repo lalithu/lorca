@@ -9,6 +9,20 @@ final class AgentPresentationTests: XCTestCase {
             "elapsedMillis": .number(355_000), "clock": .string("mac_continuous")])
         return AgentEvent(id: "run:\(sequence)", sequence: sequence, taskId: "run", kind: kind, data: .object(data))
     }
+    func testApprovalSummaryUsesPreparedCommandAndKeepsArgumentBoundaries() {
+        let approval = AgentApproval(id: "approval", callId: "call", tool: "exec_command", action: .object([
+            "executable": .string("/opt/bin/cargo"),
+            "arguments": .array([.string("test"), .string("two words"), .string("")]),
+            "workingDirectory": .string("/workspace")
+        ]))
+        XCTAssertEqual(approval.preparedCommand, #"/opt/bin/cargo test "two words" """#)
+        XCTAssertEqual(approval.action["arguments"].strings, ["test", "two words", ""])
+        let invalid = AgentApproval(id: "approval", callId: "call", tool: "exec_command", action: .object([
+            "executable": .string("/opt/bin/cargo"), "arguments": .array([.string("test"), .bool(false)])
+        ]))
+        XCTAssertNil(invalid.preparedCommand)
+    }
+
     func testTimelinePreservesUnicodeStreamingAndRealCompactionOrder() {
         let first = "I’ll inspect 🫍.\n\n", last = "Done."
         let events = [
