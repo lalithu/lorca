@@ -51,9 +51,10 @@ is not evidence that reasoning survives a backend restart.
 
 Final UI fixes add `--selection` (use the same model/SDK and `--skip-build` options).
 This entry point uses a real NSApplication event loop, native mouse drags and Cmd+C
-in actual message/reasoning/output views. `selection-report.json` records copied
-ranges, multiline checks and the native Copy menu; do not infer success merely
-from the process finishing. `layout-report.json` measures wrapped reasoning at
+in actual message/reasoning/output views. The runner locates fixture text in
+the native test window and exits nonzero if any selection check fails.
+`selection-report.json` records copied ranges, multiline checks and the native
+Copy menu. `layout-report.json` measures wrapped reasoning at
 narrow/wide widths. Blue bubbles and green ON/neutral OFF/Next task labels are
 captured in both appearances. These fixtures do not run a model or touch production
 conversations. The runner restores original pasteboard representations afterward.

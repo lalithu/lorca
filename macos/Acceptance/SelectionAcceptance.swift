@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import Vision
 
 // A real NSApplication event loop is required for mouse tracking and key equivalents.
 enum LorcaAsset {
@@ -20,6 +21,7 @@ enum LorcaAsset {
     private var window: NSWindow!
     private var savedPasteboard: [[(NSPasteboard.PasteboardType, Data)]] = []
     private var results: [[String: Any]] = []
+    private var selectionFailed = false
     private let source = "Alpha bravo charlie delta.\n\nSecond paragraph for multiple line selection."
     private var root: URL { URL(fileURLWithPath: ProcessInfo.processInfo.environment["LORCA_ACCEPTANCE_ROOT"]!) }
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -77,62 +79,67 @@ enum LorcaAsset {
         try? await Task.sleep(for: .milliseconds(100))
         return NSPasteboard.general.string(forType: .string) ?? ""
     }
-    private func textFrame(_ object: Any, depth: Int = 0) -> NSRect? {
-        guard depth < 30, let node = object as? NSObject else { return nil }
-        if node.responds(to: NSSelectorFromString("accessibilityRole")),
-           node.value(forKey: "accessibilityRole") as? String == "AXStaticText" {
-            let value = node.responds(to: NSSelectorFromString("accessibilityValue")) ? node.value(forKey: "accessibilityValue") as? String : nil
-            let label = node.responds(to: NSSelectorFromString("accessibilityLabel")) ? node.value(forKey: "accessibilityLabel") as? String : nil
-            if (value ?? label ?? "").contains("Alpha bravo"), let frame = node.value(forKey: "accessibilityFrame") as? NSValue {
-                return frame.rectValue
+    private func selectionPoints() throws -> (start: NSPoint, firstEnd: NSPoint, secondEnd: NSPoint)? {
+        // A view snapshot can omit native glass. Capture the test window so
+        // the drag starts on text that is actually visible on screen.
+        let image = root.appendingPathComponent("selection-fixture.png")
+        let capture = Process()
+        capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        capture.arguments = ["-x", "-o", "-l", String(window.windowNumber), image.path]
+        try capture.run()
+        capture.waitUntilExit()
+        guard capture.terminationStatus == 0 else { return nil }
+        defer { try? FileManager.default.removeItem(at: image) }
+
+        let request = VNRecognizeTextRequest()
+        request.usesLanguageCorrection = false
+        try VNImageRequestHandler(url: image).perform([request])
+        let lines = (request.results ?? []).compactMap { $0.topCandidates(1).first }
+        func word(_ text: String) throws -> NSPoint? {
+            for line in lines {
+                if let range = line.string.range(of: text),
+                   let box = try line.boundingBox(for: range)?.boundingBox {
+                    return NSPoint(x: box.midX * window.frame.width, y: box.midY * window.frame.height)
+                }
             }
+            return nil
         }
-        if node.responds(to: NSSelectorFromString("accessibilityChildren")), let children = node.value(forKey: "accessibilityChildren") as? [Any] {
-            for child in children { if let frame = textFrame(child, depth: depth + 1) { return frame } }
-        }
-        return nil
+        guard let alpha = try word("Alpha"), let delta = try word("delta"),
+              let multiple = try word("multiple") else { return nil }
+        return (alpha, delta, multiple)
     }
-    private func isMultiline(_ text: String) -> Bool {
-        text.split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }.count >= 2
-    }
+
     private func selection(_ name: String) async {
         var copied = ""
-        var hit = NSPoint.zero
-        let accessible = window.contentView.flatMap { textFrame($0) }
-        if let frame = accessible {
-            hit = window.convertPoint(fromScreen: NSPoint(x: frame.minX + 6, y: frame.maxY - 8))
-            await drag(from: hit, to: NSPoint(x: hit.x + 120, y: hit.y))
-            copied = await copyKey()
-        }
-        search: for x in copied.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? [32.0, 100.0, 220.0, 320.0, 450.0] : [] {
-            for y in stride(from: 332.0, through: 232.0, by: -5) {
-                let start = NSPoint(x: x, y: y)
-                await drag(from: start, to: NSPoint(x: x + 160, y: y))
-                copied = await copyKey()
-                if !copied.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && source.contains(copied) { hit = start; break search }
-            }
-        }
-        capture(name + "-selected")
         var multiline = ""
-        if !copied.isEmpty {
-            if let frame = accessible {
-                let end = window.convertPoint(fromScreen: NSPoint(x: frame.minX + min(200, frame.width - 5), y: frame.minY + 8))
-                await drag(from: hit, to: end); multiline = await copyKey()
-            }
-            for distance in isMultiline(multiline) ? [] : [30.0, 40.0, 50.0, 60.0, 70.0, -30.0, -40.0, -50.0, -60.0, -70.0] {
-                await drag(from: hit, to: NSPoint(x: hit.x + 200, y: hit.y - distance))
+        var menuTitles: [String] = []
+        do {
+            if let points = try selectionPoints() {
+                await drag(from: points.start, to: points.firstEnd)
+                copied = await copyKey()
+                capture(name + "-selected")
+                await drag(from: points.start, to: points.secondEnd)
                 multiline = await copyKey()
-                if isMultiline(multiline) { break }
+                capture(name + "-multiline")
+                if let event = NSEvent.mouseEvent(with: .rightMouseDown, location: points.start, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                    context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
+                    menuTitles = (window.firstResponder as? NSView)?.menu(for: event)?.items.map(\.title) ?? []
+                }
+            } else {
+                print("NATIVE_SELECTION \(name) could not locate fixture text")
             }
-            capture(name + "-multiline")
+        } catch {
+            print("NATIVE_SELECTION \(name) could not read fixture text: \(error)")
         }
-        let menuEvent = NSEvent.mouseEvent(with: .rightMouseDown, location: hit, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-            windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
-        let menu = (window.firstResponder as? NSView)?.menu(for: menuEvent)
-        results.append(["name": name, "copied": copied, "selectedSubstring": !copied.isEmpty && source.contains(copied),
-            "multilineCopied": multiline, "multilineSelection": isMultiline(multiline),
-            "contextMenuTitles": menu?.items.map(\.title) ?? [], "responder": String(describing: type(of: window.firstResponder!))])
-        print("NATIVE_SELECTION \(name) selected=\(!copied.isEmpty && source.contains(copied)) multiline=\(isMultiline(multiline))")
+        let selected = source.contains(copied) && copied.contains("bravo charlie") && !copied.contains("\n")
+        let selectedAcrossLines = source.contains(multiline) && multiline != source
+            && multiline.contains("bravo charlie delta.\n\nSecond paragraph")
+        selectionFailed = selectionFailed || !selected || !selectedAcrossLines
+        results.append(["name": name, "copied": copied, "selectedSubstring": selected,
+            "multilineCopied": multiline, "multilineSelection": selectedAcrossLines,
+            "contextMenuTitles": menuTitles, "responder": String(describing: type(of: window.firstResponder as Any))])
+        print("NATIVE_SELECTION \(name) selected=\(selected) multiline=\(selectedAcrossLines)")
     }
     private func run() async {
         await scene(MarkdownText(text: source, size: 18, showsCopyButton: false)); await selection("assistant")
@@ -167,6 +174,6 @@ enum LorcaAsset {
         })
         try? JSONSerialization.data(withJSONObject: results, options: [.prettyPrinted, .sortedKeys]).write(to: root.appendingPathComponent("selection-report.json"))
         print("NATIVE_SELECTION_ACCEPTANCE_FINISHED")
-        NSApp.terminate(nil)
+        exit(selectionFailed ? EXIT_FAILURE : EXIT_SUCCESS)
     }
 }
