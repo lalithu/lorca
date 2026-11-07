@@ -50,7 +50,7 @@ struct ModelPicker: View {
             .padding(.horizontal, 9).padding(.vertical, 5)
             .background(Color.primary.opacity(embeddedInComposer ? 0 : 0.05), in: RoundedRectangle(cornerRadius: 7))
         }
-        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize(horizontal: true, vertical: true)
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize(horizontal: !embeddedInComposer, vertical: true)
         .frame(maxWidth: compact ? 180 : 250, alignment: .trailing)
         .disabled(!store.ready || store.isManagingModel || store.isGenerating || store.agent.busy || store.jobs.running || store.isChecking || store.isSelectingModel || store.modelSession.isLoading)
         .accessibilityLabel("Model").accessibilityValue(store.modelChoice.map { "\($0.model), \($0.route.label)" } ?? "No model selected")

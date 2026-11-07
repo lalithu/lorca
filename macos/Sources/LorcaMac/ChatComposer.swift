@@ -24,8 +24,8 @@ struct ChatComposer: View {
         VStack(alignment: .leading, spacing: 10) {
             if store.currentAgentActive {
                 HStack(spacing:12) {
-                    Button("Status",action:requestStatus).disabled(store.agent.submitting)
-                    Button("Correct task") {if !store.canSteerActive {store.draft="Correction: " + store.draft}}
+                    Button("Status",action:requestStatus).disabled(store.agent.submitting).fixedSize()
+                    Button("Correct task") {if !store.canSteerActive {store.draft="Correction: " + store.draft}}.fixedSize()
                     Spacer()
                     Text("Thinking changes apply to the next task").font(.system(size:10)).foregroundStyle(.secondary)
                 }.font(.system(size:11)).accessibilityIdentifier("active-task-controls")
@@ -56,6 +56,7 @@ struct ChatComposer: View {
                 AgentComposerControls(store: store)
                 Spacer(minLength: 0)
                 ModelPicker(store: store, compact: compact, embeddedInComposer: true)
+                    .layoutPriority(-1)
                 if store.isGenerating || store.currentAgentActive {
                     Button { store.stop() } label: {
                         Image(systemName: "stop.fill").font(.system(size: 12, weight: .semibold))

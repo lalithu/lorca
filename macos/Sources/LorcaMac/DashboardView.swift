@@ -33,28 +33,86 @@ struct DashboardView: View {
     @Environment(\.colorScheme) private var scheme
     @State private var hoveredPage: SidebarPage?
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage("dashboardSidebarWidth") private var preferredSidebarWidth = 190.0
+    @State private var sidebarDragStart: CGFloat?
+    @State private var sidebarDragWidth: CGFloat?
+    private let minimumSidebarWidth: CGFloat = 180
+
     var body: some View {
-        HStack(spacing: 0) {
-            if windows.sidebarVisible {
-                sidebarSurface.frame(width: 190)
+        GeometryReader { geometry in
+            let maximum = max(minimumSidebarWidth, min(320, geometry.size.width - 550))
+            let preferred = min(maximum, max(minimumSidebarWidth, preferredSidebarWidth))
+            let draggingOrHidden = sidebarDragStart != nil || !windows.sidebarVisible
+            let width = min(maximum, (draggingOrHidden ? sidebarDragWidth : nil) ?? preferred)
+
+            DashboardColumns(sidebarWidth: width, occupiedWidth: windows.sidebarVisible ? width : 0) {
+                sidebarSurface
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .overlay(alignment: .trailing) {
+                        SidebarResizeEdge(
+                            onStart: {
+                                sidebarDragStart = width
+                                sidebarDragWidth = width
+                            },
+                            onDrag: { distance in
+                                guard windows.sidebarVisible, let start = sidebarDragStart else { return }
+                                let proposed = start + distance / store.uiZoom.factor
+                                sidebarDragWidth = min(maximum, max(minimumSidebarWidth, proposed))
+                                windows.setSidebarCollapsePreview(proposed < minimumSidebarWidth)
+                            },
+                            onEnd: { distance in
+                                guard windows.sidebarVisible, let start = sidebarDragStart else { return }
+                                defer {
+                                    sidebarDragStart = nil
+                                    windows.setSidebarCollapsePreview(false)
+                                }
+
+                                let proposed = start + distance / store.uiZoom.factor
+                                if proposed < minimumSidebarWidth {
+                                    sidebarDragWidth = minimumSidebarWidth
+                                    windows.setSidebarVisible(false)
+                                } else {
+                                    let width = min(maximum, proposed)
+                                    sidebarDragWidth = width
+                                    preferredSidebarWidth = width
+                                }
+                            }
+                        )
+                        .frame(width: 8)
+                        .offset(x: 4)
+                        .accessibilityHidden(true)
+                    }
+                    .zIndex(1)
+                    .allowsHitTesting(windows.sidebarVisible)
+                    .accessibilityHidden(!windows.sidebarVisible)
+                mainPane
             }
-            VStack(spacing: 0) {
-                header
-                if windows.page == .chats {
-                    ChatView(store: store)
-                        .padding(.horizontal, 32).padding(.bottom, 24)
-                } else if windows.page == .tasks {
-                    JobAppsView(store: store.jobs, chat: store)
-                } else if windows.page == .settings {
-                    settings
-                } else {
-                    placeholder
-                }
+            .clipped()
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: windows.sidebarVisible)
+            .onChange(of: windows.sidebarVisible) { _, visible in
+                if !visible { sidebarDragStart = nil }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(scheme == .dark ? Color(nsColor: .windowBackgroundColor) : Color(nsColor: .textBackgroundColor))
         .tint(.lorcaBlue)
+    }
+
+    private var mainPane: some View {
+        VStack(spacing: 0) {
+            header
+            if windows.page == .chats {
+                ChatView(store: store)
+                    .padding(.horizontal, 32).padding(.bottom, 24)
+            } else if windows.page == .tasks {
+                JobAppsView(store: store.jobs, chat: store)
+            } else if windows.page == .settings {
+                settings
+            } else {
+                placeholder
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder private var sidebarSurface: some View {
@@ -81,7 +139,10 @@ struct DashboardView: View {
                 Text(LorcaAsset.emoji).font(.system(size: 27))
                 Text("lorca").font(ShellTypography.serif(24).weight(.semibold))
             }
-            .padding(.leading, 8).padding(.bottom, 14)
+            // Align the visible artwork rather than the glyphs' layout bounds.
+            .offset(x: -1.75)
+            .frame(maxWidth: .infinity)
+            .padding(.bottom, 14)
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(SidebarPage.allCases.filter { $0 != .settings }) { page in navigation(page) }
@@ -90,7 +151,7 @@ struct DashboardView: View {
             }
             .scrollIndicators(.hidden)
             Spacer(minLength: 12)
-            MemoryPressureView()
+            MemoryPressureView(isVisible: windows.sidebarVisible)
             navigation(.settings)
             Divider().padding(.vertical, 10)
             HStack(spacing: 6) {
