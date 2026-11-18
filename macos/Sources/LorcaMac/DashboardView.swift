@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum SidebarPage: String, CaseIterable, Identifiable {
-    case overview = "Overview", chats = "Chats", tasks = "Job Apps"
+    case overview = "Overview", chats = "Chats", tasks = "Job Apps", notes = "Notes"
     case settings = "Settings"
     var id: String { rawValue }
     var symbol: String {
@@ -9,6 +9,7 @@ enum SidebarPage: String, CaseIterable, Identifiable {
         case .overview: return "square.grid.2x2"
         case .chats: return "bubble.left.and.bubble.right"
         case .tasks: return "briefcase"
+        case .notes: return "note.text"
         case .settings: return "slider.horizontal.3"
         }
     }
@@ -100,6 +101,9 @@ struct DashboardView: View {
 
     private var mainPane: some View {
         VStack(spacing: 0) {
+            if windows.page == .notes {
+                NotesView(store: windows.notes)
+            } else {
             header
             if windows.page == .chats {
                 ChatView(store: store)
@@ -110,6 +114,7 @@ struct DashboardView: View {
                 settings
             } else {
                 placeholder
+            }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -147,6 +152,7 @@ struct DashboardView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(SidebarPage.allCases.filter { $0 != .settings }) { page in navigation(page) }
                     if windows.page == .chats { ConversationHistory(store: store) }
+                    if windows.page == .notes { NotesHistory(store: windows.notes) }
                 }
             }
             .scrollIndicators(.hidden)

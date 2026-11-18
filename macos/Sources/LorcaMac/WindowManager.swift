@@ -5,7 +5,7 @@ import SwiftUI
 
 @MainActor
 final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolbarDelegate {
-    @Published var page: SidebarPage = .chats {
+    @Published var page: SidebarPage = .notes {
         didSet { dashboard?.subtitle = page.rawValue }
     }
     @Published private(set) var sidebarVisible = true
@@ -15,6 +15,7 @@ final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolb
     @Published private(set) var miniExpanded = false
     @Published private(set) var miniChatBelowPet = false
 
+    let notes: NotesStore
     private let store: ChatStore
     private var dashboard: DashboardWindow!
     private var mini: MiniPanel!
@@ -24,7 +25,10 @@ final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolb
     private weak var sidebarButton: NSButton?
     private var sidebarCollapsePreview = false
 
-    init(store: ChatStore) { self.store = store }
+    init(store: ChatStore) {
+        self.store = store
+        self.notes = NotesStore(root: store.backend.root)
+    }
 
     func open() {
         dashboard = DashboardWindow(contentRect: NSRect(x: 0, y: 0, width: 880, height: 600),
