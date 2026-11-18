@@ -18,7 +18,7 @@ struct NotesProposalPreview: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }.frame(maxHeight: 260)
             HStack {
-                Text(proposal.kind == "breakdown" ? "Prepared outline · no external research" : "Review before applying")
+                Text("Review before adding to your note")
                     .font(.system(size: 10)).foregroundStyle(.secondary)
                 Spacer()
                 Button(proposal.kind == "breakdown" ? "Add to note" : "Use this", action: apply).controlSize(.small)

@@ -49,7 +49,10 @@ def execute(name,args):
                 elif line.startswith('URL:'):url=line[4:].strip()
                 elif highlight:summary.append(line)
                 if line.startswith(('Title:','URL:','Highlights:','Published:','Author:')):highlight=line.startswith('Highlights:')
-            if url:results.append({'url':url,'title':title,'description':' '.join(summary)})
+            if url:
+                try:public_url(url)
+                except ValueError:continue
+                results.append({'url':url,'title':title,'description':' '.join(summary)})
         return {'ok':True,'results':results[:limit],'source':'Exa free'}
     if name!='web_extract':raise ValueError('Research only allows web_search and web_extract')
     urls=args.get('urls',[])

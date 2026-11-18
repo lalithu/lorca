@@ -5,6 +5,7 @@ struct WorkspaceNote: Codable, Identifiable, Equatable {
     var id = UUID()
     var text = ""
     var richText: Data? = nil
+    var followingResults: [NotesSectionResult]? = nil
     var createdAt = Date()
     var updatedAt = Date()
     var selectionLocation = 0
@@ -81,11 +82,20 @@ final class NotesStore: ObservableObject {
     func updateText(_ text: String, selection: NSRange, richText: Data? = nil) {
         guard !isReadOnly, let index = notes.firstIndex(where: { $0.id == selectedID }) else { return }
         guard notes[index].text != text || notes[index].richText != richText else { return }
+        notes[index].followingResults = notes[index].followingResults?.filter { result in
+            NotesPassage.passages(in: text).contains { $0.source == result.source }
+        }
         notes[index].text = text
         notes[index].richText = richText
         notes[index].updatedAt = Date()
         notes[index].selectionLocation = selection.location
         notes[index].selectionLength = selection.length
+        save()
+    }
+
+    func setFollowingResults(_ results: [NotesSectionResult], for id: UUID) {
+        guard !isReadOnly, let index = notes.firstIndex(where: { $0.id == id }), notes[index].followingResults != results else { return }
+        notes[index].followingResults = results
         save()
     }
 

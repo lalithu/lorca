@@ -16,11 +16,11 @@ pub fn schema() -> Value {
                 "required":["headers","rows"]}},
         "required":["kind","source","title","payload"]});
     let text = json!({"type":"object","additionalProperties":false,
-        "properties":{"kind":{"enum":["structure","priorities","breakdown"]},"source":string,"title":string,
+        "properties":{"kind":{"enum":["structure","priorities","breakdown","research"]},"source":string,"title":string,
             "payload":{"type":"object","additionalProperties":false,"properties":{"text":string},"required":["text"]}},
         "required":["kind","source","title","payload"]});
     json!({"type":"object","additionalProperties":false,"properties":{
-        "suggestions":{"type":"array","maxItems":2,"items":{"anyOf":[table,text]}}},"required":["suggestions"]})
+        "suggestions":{"type":"array","maxItems":1,"items":{"anyOf":[table,text]}}},"required":["suggestions"]})
 }
 
 pub async fn generate(
@@ -30,8 +30,18 @@ pub async fn generate(
     model: &str,
     messages: &[Value],
     budget: GenerationBudget,
+    researched: bool,
 ) -> Result<String, String> {
-    let schema = schema();
+    let mut schema = schema();
+    if researched {
+        // A sourced answer is one annotation, never a replacement table that
+        // cannot carry its references, or a second search request.
+        let mut annotation = schema["properties"]["suggestions"]["items"]["anyOf"][1].clone();
+        annotation["properties"]["kind"] = json!({"const":"breakdown"});
+        annotation["properties"]["payload"]["properties"]["text"] =
+            json!({"type":"string","maxLength":2000});
+        schema["properties"]["suggestions"]["items"] = annotation;
+    }
     budget.check(
         crate::context::estimate(&json!(messages)) + crate::context::estimate(&schema) + 128,
     )?;

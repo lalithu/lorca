@@ -38,6 +38,44 @@ final class NotesWorkingCueTests: XCTestCase {
         wait(for: [cancelled], timeout: 2)
     }
 
+    func testInlineResultReservesSpaceWithoutChangingTextSelectionOrUndo() throws {
+        _ = NSApplication.shared
+        let editor = NotesNativeTextView(frame: NSRect(x: 0, y: 0, width: 650, height: 450))
+        editor.modelDriven = true
+        editor.allowsUndo = true
+        editor.textContainerInset = NSSize(width: 22, height: 0)
+        let first = "Resturants in Noda:"
+        editor.string = first + "\n\nStudy guide for NLP"
+        editor.setSelectedRange(NSRange(location: (editor.string as NSString).length, length: 0))
+        editor.format()
+        let text = editor.string, selection = editor.selectedRange()
+        let proposal = NotesProposal(kind: "breakdown", source: first, title: "Places for dinner", text: "- First restaurant\n- Second restaurant", headers: nil, rows: nil)
+        editor.showInline([NotesInlineState(source: first, label: "Thinking…", busy: true)])
+        editor.layout()
+        XCTAssertEqual(editor.subviews.compactMap { $0 as? NotesInlineActivity }.count, 1)
+        editor.showInline([NotesInlineState(source: first, label: proposal.title, unread: true, proposal: proposal)])
+        editor.layout()
+        XCTAssertEqual(editor.string, text)
+        XCTAssertEqual(editor.selectedRange(), selection)
+        XCTAssertFalse(editor.undoManager?.canUndo ?? false)
+        let card = try XCTUnwrap(editor.subviews.compactMap { $0 as? NotesInlineActivity }.first)
+        let manager = try XCTUnwrap(editor.layoutManager), container = try XCTUnwrap(editor.textContainer)
+        let next = (text as NSString).range(of: "Study guide")
+        let glyphs = manager.glyphRange(forCharacterRange: next, actualCharacterRange: nil)
+        let rect = manager.boundingRect(forGlyphRange: glyphs, in: container)
+        XCTAssertLessThanOrEqual(card.frame.maxY, rect.minY + editor.textContainerOrigin.y)
+        if let path = ProcessInfo.processInfo.environment["LORCA_NOTES_PREVIEW"] {
+            editor.appearance = NSAppearance(named: .darkAqua)
+            editor.displayIfNeeded()
+            if let bitmap = editor.bitmapImageRepForCachingDisplay(in: editor.bounds) {
+                editor.cacheDisplay(in: editor.bounds, to: bitmap)
+                try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+            }
+        }
+        editor.showInline([])
+        XCTAssertTrue(editor.subviews.compactMap { $0 as? NotesInlineActivity }.isEmpty)
+    }
+
     func testReducedMotionCueIsStaticAndNeverTakesInput() {
         let cue = NotesWorkingCue(reduceMotion: true)
         XCTAssertNil(cue.hitTest(NSPoint(x: 5, y: 5)))

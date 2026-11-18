@@ -65,11 +65,14 @@ struct NotesHistory: View {
         VStack(alignment: .leading, spacing: 2) {
             ForEach(store.notes) { note in
                 Button { store.select(note.id) } label: {
-                    Text(note.title)
+                    HStack(spacing: 0) {
+                        Text(note.title)
+                        Spacer(minLength: 0)
+                    }
                         .font(.system(size: 11)).lineLimit(1)
                         .foregroundStyle(note.id == store.selectedID ? .primary : .secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.leading, 30).padding(.trailing, 8).padding(.vertical, 7)
+                        .padding(.leading, 39).padding(.trailing, 10).padding(.vertical, 7)
                         .background(note.id == store.selectedID ? Color.primary.opacity(0.05) : .clear,
                                     in: RoundedRectangle(cornerRadius: 6))
                         .contentShape(Rectangle())
@@ -159,6 +162,9 @@ struct NotesTextEditor: NSViewRepresentable {
         editor.receive(following.proposals, document: following.proposalDocument)
         editor.showWorking(following.working && !store.previewsPaused,
             document: following.workingDocument, at: following.workingLocation)
+        editor.onSectionRead = { [weak following] source in following?.markRead(source: source) }
+        editor.onSectionRetry = { [weak following] in following?.refresh() }
+        editor.showInline(store.previewsPaused ? [] : following.inline)
         if changedNote && !editor.modelDriven { editor.queueSuggestion() }
     }
 
@@ -210,6 +216,11 @@ final class NotesNativeTextView: NSTextView {
     private var workingToken: UUID?
     private var workingDocument = ""
     private var workingLocation = 0
+    var onSectionRead: ((String) -> Void)?
+    var onSectionRetry: (() -> Void)?
+    private var inlineStates: [NotesInlineState] = []
+    private var inlineViews: [NotesInlineActivity] = []
+    private static let originalParagraph = NSAttributedString.Key("lorca.inline.originalParagraph")
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -221,6 +232,60 @@ final class NotesNativeTextView: NSTextView {
         super.layout()
         positionMarker()
         positionWorkingCue()
+        positionInline()
+    }
+
+    func showInline(_ states: [NotesInlineState]) {
+        guard states != inlineStates else { return }
+        inlineStates = states
+        inlineViews.forEach { $0.removeFromSuperview() }
+        inlineViews = states.map { state in
+            let view = NotesInlineActivity(state: state)
+            view.perform = { [weak self] in
+                guard let self else { return }
+                self.onSectionRead?(state.source)
+                if let proposal = state.proposal {
+                    // Revalidate against this document when the user opens it.
+                    self.receive([proposal], document: self.string)
+                    self.openModelPreview(proposal)
+                } else if !state.busy { self.onSectionRetry?() }
+            }
+            addSubview(view)
+            return view
+        }
+        format()
+        needsLayout = true
+    }
+
+    private func decorateInline() {
+        guard let storage = textStorage else { return }
+        for (state, view) in zip(inlineStates, inlineViews) {
+            guard let passage = NotesPassage.passages(in: string).first(where: { $0.source == state.source }),
+                  !intersectsTable(passage.range) else { view.isHidden = true; continue }
+            let paragraph = (string as NSString).paragraphRange(for: NSRange(location: NSMaxRange(passage.range) - 1, length: 1))
+            let original = storage.attribute(.paragraphStyle, at: paragraph.location, effectiveRange: nil) as? NSParagraphStyle ?? NSParagraphStyle.default
+            let style = original.mutableCopy() as! NSMutableParagraphStyle
+            style.paragraphSpacing += view.cardHeight + 10
+            storage.addAttribute(Self.originalParagraph, value: original, range: paragraph)
+            storage.addAttribute(.paragraphStyle, value: style, range: paragraph)
+            view.isHidden = false
+        }
+    }
+
+    private func positionInline() {
+        guard let manager = layoutManager, let container = textContainer else { return }
+        manager.ensureLayout(for: container)
+        var bottom = manager.usedRect(for: container).maxY + textContainerOrigin.y
+        for (state, view) in zip(inlineStates, inlineViews) where !view.isHidden {
+            guard let passage = NotesPassage.passages(in: string).first(where: { $0.source == state.source }) else { view.isHidden = true; continue }
+            let glyphs = manager.glyphRange(forCharacterRange: NSRange(location: NSMaxRange(passage.range) - 1, length: 1), actualCharacterRange: nil)
+            let rect = manager.boundingRect(forGlyphRange: glyphs, in: container)
+            view.frame = NSRect(x: textContainerOrigin.x, y: rect.maxY + textContainerOrigin.y + 4,
+                width: max(80, bounds.width - textContainerOrigin.x * 2), height: view.cardHeight)
+            bottom = max(bottom, view.frame.maxY)
+        }
+        let height = max(enclosingScrollView?.contentSize.height ?? bounds.height, bottom + 20)
+        if abs(frame.height - height) > 1 { setFrameSize(NSSize(width: frame.width, height: height)) }
     }
 
     func resetSuggestions() {
@@ -441,7 +506,12 @@ final class NotesNativeTextView: NSTextView {
 
     func richDocument() throws -> Data? {
         guard let storage = textStorage, intersectsTable(NSRange(location: 0, length: storage.length)) else { return nil }
-        return try storage.data(from: NSRange(location: 0, length: storage.length), documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf])
+        let clean = NSMutableAttributedString(attributedString: storage)
+        storage.enumerateAttribute(Self.originalParagraph, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+            if let style = value as? NSParagraphStyle { clean.addAttribute(.paragraphStyle, value: style, range: range) }
+        }
+        clean.removeAttribute(Self.originalParagraph, range: NSRange(location: 0, length: clean.length))
+        return try clean.data(from: NSRange(location: 0, length: clean.length), documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf])
     }
 
     func focusIfReady() {
@@ -469,6 +539,7 @@ final class NotesNativeTextView: NSTextView {
             storage.setAttributes([.paragraphStyle: paragraph, .font: NSFont.systemFont(ofSize: 15), .foregroundColor: NSColor.labelColor], range: range)
             for block in paragraph.textBlocks { block.setBorderColor(.separatorColor) }
         }
+        decorateInline()
         if recording { undoManager?.enableUndoRegistration() }
         selectedRanges = selection
         var typing = MarkdownNoteStyle.base(size: 15)
