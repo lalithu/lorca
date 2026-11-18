@@ -4,6 +4,7 @@ import Combine
 struct WorkspaceNote: Codable, Identifiable, Equatable {
     var id = UUID()
     var text = ""
+    var richText: Data? = nil
     var createdAt = Date()
     var updatedAt = Date()
     var selectionLocation = 0
@@ -32,6 +33,7 @@ final class NotesStore: ObservableObject {
     @Published private(set) var selectedID: UUID
     @Published private(set) var focusRequest = UUID()
     @Published private(set) var error: String?
+    @Published var previewsPaused = false
     private(set) var isReadOnly = false
     let file: URL
 
@@ -74,15 +76,18 @@ final class NotesStore: ObservableObject {
         save()
     }
 
-    func updateText(_ text: String, selection: NSRange) {
+    func updateText(_ text: String, selection: NSRange, richText: Data? = nil) {
         guard !isReadOnly, let index = notes.firstIndex(where: { $0.id == selectedID }) else { return }
-        guard notes[index].text != text else { return }
+        guard notes[index].text != text || notes[index].richText != richText else { return }
         notes[index].text = text
+        notes[index].richText = richText
         notes[index].updatedAt = Date()
         notes[index].selectionLocation = selection.location
         notes[index].selectionLength = selection.length
         save()
     }
+
+    func reportEditorError(_ message: String) { error = message }
 
     func updateSelection(_ selection: NSRange) {
         guard !isReadOnly, let index = notes.firstIndex(where: { $0.id == selectedID }) else { return }
