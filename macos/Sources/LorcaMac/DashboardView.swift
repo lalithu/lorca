@@ -102,7 +102,7 @@ struct DashboardView: View {
     private var mainPane: some View {
         VStack(spacing: 0) {
             if windows.page == .notes {
-                NotesView(store: windows.notes)
+                NotesView(store: windows.notes, following: windows.notesFollowing, chat: store)
             } else {
             header
             if windows.page == .chats {

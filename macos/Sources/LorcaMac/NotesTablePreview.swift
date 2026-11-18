@@ -5,6 +5,7 @@ struct NotesTablePreview: View {
     let suggestion: NotesTableSuggestion
     let insert: () -> Void
     let dismiss: () -> Void
+    var attribution = "Local preview · model not connected"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -32,7 +33,7 @@ struct NotesTablePreview: View {
             }
             .frame(maxHeight: 240)
             HStack {
-                Text("Local preview · model not connected")
+                Text(attribution)
                     .font(.system(size: 10)).foregroundStyle(.secondary)
                 Spacer()
                 Button("Use table", action: insert).controlSize(.small)

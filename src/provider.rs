@@ -1,3 +1,4 @@
+pub mod notes;
 pub mod agent;
 pub mod llama_cpp;
 use crate::types::Usage;

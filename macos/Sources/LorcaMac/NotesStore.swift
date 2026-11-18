@@ -27,13 +27,14 @@ final class NotesStore: ObservableObject {
         var version = 1
         var selectedID: UUID
         var notes: [WorkspaceNote]
+        var followingPaused: Bool? = nil
     }
 
     @Published private(set) var notes: [WorkspaceNote]
     @Published private(set) var selectedID: UUID
     @Published private(set) var focusRequest = UUID()
     @Published private(set) var error: String?
-    @Published var previewsPaused = false
+    @Published var previewsPaused = false { didSet { save() } }
     private(set) var isReadOnly = false
     let file: URL
 
@@ -50,6 +51,7 @@ final class NotesStore: ObservableObject {
                 throw CocoaError(.fileReadCorruptFile)
             }
             notes = data.notes
+            previewsPaused = data.followingPaused ?? false
             selectedID = notes.contains(where: { $0.id == data.selectedID }) ? data.selectedID : notes[0].id
         } catch {
             isReadOnly = true
@@ -101,7 +103,7 @@ final class NotesStore: ObservableObject {
         guard !isReadOnly else { return }
         do {
             try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let data = try JSONEncoder().encode(Document(selectedID: selectedID, notes: notes))
+            let data = try JSONEncoder().encode(Document(selectedID: selectedID, notes: notes, followingPaused: previewsPaused))
             try data.write(to: file, options: .atomic)
             error = nil
         } catch {

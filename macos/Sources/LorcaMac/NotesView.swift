@@ -3,6 +3,8 @@ import SwiftUI
 
 struct NotesView: View {
     @ObservedObject var store: NotesStore
+    @ObservedObject var following: NotesFollowing
+    @ObservedObject var chat: ChatStore
 
     var body: some View {
         VStack(spacing: 0) {
@@ -18,7 +20,7 @@ struct NotesView: View {
             }
             .padding(.top, 14).padding(.bottom, 28)
 
-            NotesTextEditor(store: store)
+            NotesTextEditor(store: store, following: following)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             if let error = store.error {
@@ -31,12 +33,19 @@ struct NotesView: View {
                     Button(store.previewsPaused ? "Resume suggestions" : "Pause suggestions") {
                         store.previewsPaused.toggle()
                     }
-                    Text("UI preview — no model connected")
+                    Text(following.status)
+                    if following.partialContext { Text("Following the passage near your cursor") }
+                    Menu("Model: \(chat.selectedModel)") {
+                        ForEach(chat.modelChoices, id: \.self) { choice in
+                            Button(choice.model) { Task { await chat.selectModel(choice) } }
+                        }
+                    }
+                    Button("Refresh suggestions") { following.refresh() }
                 } label: {
-                    Label(store.previewsPaused ? "Ems paused" : "Ems preview", systemImage: "sparkles")
+                    Label("Model following", systemImage: store.previewsPaused ? "pause.circle" : (following.working ? "circle.dotted" : "sparkles"))
                 }
                 .menuStyle(.borderlessButton).fixedSize()
-                .help("Local UI preview. No model is observing your note.")
+                .help(following.status)
                 Spacer()
                 Text("\(store.wordCount) \(store.wordCount == 1 ? "word" : "words")")
             }
@@ -44,6 +53,8 @@ struct NotesView: View {
             .padding(.top, 12).padding(.bottom, 18)
         }
         .padding(.horizontal, 32)
+        .onAppear { following.setVisible(true) }
+        .onDisappear { following.setVisible(false) }
     }
 }
 
@@ -73,11 +84,13 @@ struct NotesHistory: View {
 
 struct NotesTextEditor: NSViewRepresentable {
     @ObservedObject var store: NotesStore
+    @ObservedObject var following: NotesFollowing
 
     func makeCoordinator() -> Coordinator { Coordinator(store: store) }
 
     func makeNSView(context: Context) -> NSScrollView {
         let editor = NotesNativeTextView()
+        editor.modelDriven = true
         editor.isRichText = true
         editor.importsGraphics = false
         editor.allowsUndo = true
@@ -141,7 +154,10 @@ struct NotesTextEditor: NSViewRepresentable {
             editor.focusOnAttach = !store.isReadOnly
             editor.focusIfReady()
         }
-        if changedNote { editor.queueSuggestion() }
+        editor.modelLabel = following.model
+        editor.onProposalDismiss = { [weak following] proposal in following?.dismiss(proposal) }
+        editor.receive(following.proposals, document: following.proposalDocument)
+        if changedNote && !editor.modelDriven { editor.queueSuggestion() }
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -177,6 +193,10 @@ final class NotesNativeTextView: NSTextView {
     var focusOnAttach = false
     var documentID: UUID?
     var previewsPaused = false
+    var modelDriven = false
+    var modelLabel = ""
+    var onProposalDismiss: ((NotesProposal) -> Void)?
+    private var modelProposal: NotesProposal?
     private var pendingSuggestion: DispatchWorkItem?
     private var suggestion: NotesTableSuggestion?
     private var suggestionSnapshot = ""
@@ -203,10 +223,12 @@ final class NotesNativeTextView: NSTextView {
         marker?.removeFromSuperview()
         marker = nil
         suggestion = nil
+        modelProposal = nil
         dismissedText = nil
     }
 
     func queueSuggestion() {
+        if modelDriven { resetSuggestions(); return }
         pendingSuggestion?.cancel()
         preview?.close()
         marker?.isHidden = true
@@ -241,15 +263,17 @@ final class NotesNativeTextView: NSTextView {
     }
 
     private func positionMarker() {
-        guard let marker, !marker.isHidden, let suggestion,
-              suggestion.stillMatches(string), let manager = layoutManager, let container = textContainer else { return }
+        let anchor = modelProposal?.range(in: string) ?? suggestion.flatMap { $0.stillMatches(string) ? $0.sourceRange : nil }
+        guard let marker, !marker.isHidden, let anchor,
+              let manager = layoutManager, let container = textContainer else { return }
         manager.ensureLayout(for: container)
-        let glyphs = manager.glyphRange(forCharacterRange: NSRange(location: suggestion.sourceRange.location, length: 1), actualCharacterRange: nil)
+        let glyphs = manager.glyphRange(forCharacterRange: NSRange(location: anchor.location, length: 1), actualCharacterRange: nil)
         let rect = manager.boundingRect(forGlyphRange: glyphs, in: container)
         marker.frame = NSRect(x: 0, y: rect.minY + textContainerOrigin.y, width: 18, height: 20)
     }
 
     @objc private func openPreview() {
+        if let modelProposal { openModelPreview(modelProposal); return }
         guard let suggestion, let marker, suggestionSnapshot == string else { return }
         let popover = NSPopover()
         popover.behavior = .transient
@@ -266,19 +290,80 @@ final class NotesNativeTextView: NSTextView {
         popover.show(relativeTo: marker.bounds, of: marker, preferredEdge: .maxX)
     }
 
+    func receive(_ proposals: [NotesProposal], document: String) {
+        guard modelDriven, !previewsPaused, document == string,
+              let proposed = proposals.first(where: { proposal in
+                  guard let range = proposal.range(in: string) else { return false }
+                  return !intersectsTable(range)
+              }) else {
+            if modelProposal != nil { resetSuggestions() }
+            return
+        }
+        guard modelProposal != proposed || suggestionSnapshot != string else { return }
+        resetSuggestions()
+        modelProposal = proposed
+        suggestionSnapshot = string
+        let symbol = proposed.kind == "table" ? "tablecells" : proposed.kind == "priorities" ? "list.number" : proposed.kind == "structure" ? "textformat" : "text.alignleft"
+        let button = NSButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: proposed.title)!, target: self, action: #selector(openPreview))
+        button.isBordered = false
+        button.contentTintColor = .secondaryLabelColor
+        button.toolTip = proposed.title
+        button.setAccessibilityIdentifier("ems-model-proposal")
+        button.setAccessibilityLabel(proposed.title)
+        marker = button
+        addSubview(button)
+        positionMarker()
+    }
+
+    private func openModelPreview(_ proposal: NotesProposal) {
+        guard let marker, suggestionSnapshot == string else { return }
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.animates = false
+        let dismiss = { [weak self] in
+            guard let self else { return }
+            self.preview?.close()
+            self.onProposalDismiss?(proposal)
+            self.resetSuggestions()
+        }
+        if let table = proposal.table(in: string) {
+            popover.contentViewController = NSHostingController(rootView: NotesTablePreview(suggestion: table,
+                insert: { [weak self] in self?.applyModelProposal(proposal) }, dismiss: dismiss, attribution: modelLabel + " · suggestion"))
+        } else {
+            popover.contentViewController = NSHostingController(rootView: NotesProposalPreview(proposal: proposal,
+                apply: { [weak self] in self?.applyModelProposal(proposal) }, dismiss: dismiss))
+        }
+        preview = popover
+        popover.show(relativeTo: marker.bounds, of: marker, preferredEdge: .maxX)
+    }
+
+    func applyModelProposal(_ proposal: NotesProposal) {
+        guard isEditable, !previewsPaused, suggestionSnapshot == string,
+              let range = proposal.range(in: string), !intersectsTable(range) else { return }
+        onProposalDismiss?(proposal)
+        if let table = proposal.table(in: string) { applySuggestion(table); return }
+        guard let body = proposal.text else { return }
+        let target = proposal.kind == "breakdown" ? NSRange(location: NSMaxRange(range), length: 0) : range
+        let value = proposal.kind == "breakdown" ? "\n\n" + body + "\n" : body
+        replaceDocumentRange(target, with: NSAttributedString(string: value, attributes: MarkdownNoteStyle.base(size: 15)), action: "Apply " + proposal.title)
+    }
+
     func applySuggestion(_ suggestion: NotesTableSuggestion) {
         guard !previewsPaused, isEditable, suggestion.stillMatches(string), !intersectsTable(suggestion.sourceRange) else { return }
-        let table = NotesNativeTable.attributed(suggestion)
+        replaceDocumentRange(suggestion.sourceRange, with: NotesNativeTable.attributed(suggestion), action: "Insert table")
+    }
+
+    private func replaceDocumentRange(_ range: NSRange, with replacement: NSAttributedString, action: String) {
         let selection = selectedRange()
         let scrollOrigin = enclosingScrollView?.contentView.bounds.origin
         preview?.close()
-        insertText(table, replacementRange: suggestion.sourceRange)
-        undoManager?.setActionName("Insert table")
-        let delta = table.length - suggestion.sourceRange.length
+        insertText(replacement, replacementRange: range)
+        undoManager?.setActionName(action)
+        let delta = replacement.length - range.length
         let newStart: Int
-        if selection.location < suggestion.sourceRange.location { newStart = selection.location }
-        else if selection.location >= NSMaxRange(suggestion.sourceRange) { newStart = selection.location + delta }
-        else { newStart = suggestion.sourceRange.location + table.length }
+        if selection.location < range.location { newStart = selection.location }
+        else if selection.location >= NSMaxRange(range) { newStart = selection.location + delta }
+        else { newStart = range.location + replacement.length }
         setSelectedRange(NSRange(location: min(max(0, newStart), (string as NSString).length), length: 0))
         if let scrollOrigin, let scroll = enclosingScrollView {
             scroll.contentView.scroll(to: scrollOrigin)

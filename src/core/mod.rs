@@ -3,6 +3,7 @@ mod agent_chats;
 mod conversations;
 mod generation;
 mod models;
+mod notes;
 use crate::{
     provider::{self, Update},
     storage::Repository,
@@ -40,6 +41,9 @@ pub struct Core {
     changes: watch::Sender<Snapshot>,
     client: reqwest::Client,
     lifecycle: AsyncMutex<()>,
+    notes_flight: Mutex<Option<notes::NotesFlight>>,
+    notes_lane: AsyncMutex<()>,
+    notes_foreground: std::sync::atomic::AtomicUsize,
 }
 impl Core {
     pub fn new(repository: Repository) -> Result<Arc<Self>> {
@@ -74,6 +78,9 @@ impl Core {
                 .build()
                 .map_err(|e| e.to_string())?,
             lifecycle: AsyncMutex::new(()),
+            notes_flight: Mutex::new(None),
+            notes_lane: AsyncMutex::new(()),
+            notes_foreground: std::sync::atomic::AtomicUsize::new(0),
         }))
     }
     pub fn snapshot(&self) -> Snapshot {
@@ -108,6 +115,7 @@ impl Core {
             .collect();
         let changed = !stale.is_empty() || !s.dirty.is_empty();
         for id in stale {
+            self.cancel_notes(Some(&id), None);
             self.agent.cancel_owner(&id);
             Self::cancel_session(&mut s, &id);
             s.clients.remove(&id);
@@ -245,6 +253,28 @@ impl Core {
         let session = text(&v, "session")?;
         self.touch(session)?;
         self.save_agent_result();
+        if op == "notes_cancel" {
+            self.cancel_notes(Some(session), v["requestId"].as_str());
+            return Ok(json!({"cancelled": true}));
+        }
+        if op == "notes_follow" {
+            return self.notes_follow(v).await;
+        }
+        // Only drain background work here. Foreground operations must remain
+        // concurrent with cancelLoad and bounded shutdown of other clients.
+        let _foreground = if matches!(
+            op,
+            "send" | "agent_start" | "selectModel" | "prepare" | "release" | "close" | "cancelLoad"
+        ) {
+            let guard = self.notes_foreground_guard();
+            self.cancel_notes(None, None);
+            {
+                let _drain = self.notes_lane.lock().await;
+            }
+            Some(guard)
+        } else {
+            None
+        };
         if op.starts_with("agent_") {
             return self.agent_command(session, op, &v);
         }

@@ -16,6 +16,7 @@ final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolb
     @Published private(set) var miniChatBelowPet = false
 
     let notes: NotesStore
+    let notesFollowing: NotesFollowing
     private let store: ChatStore
     private var dashboard: DashboardWindow!
     private var mini: MiniPanel!
@@ -27,7 +28,9 @@ final class WindowManager: NSObject, ObservableObject, NSWindowDelegate, NSToolb
 
     init(store: ChatStore) {
         self.store = store
-        self.notes = NotesStore(root: store.backend.root)
+        let notes = NotesStore(root: store.backend.root)
+        self.notes = notes
+        self.notesFollowing = NotesFollowing(notes: notes, chat: store)
     }
 
     func open() {
