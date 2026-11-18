@@ -59,19 +59,20 @@ enum NotesNativeTable {
         let table = NSTextTable()
         table.numberOfColumns = suggestion.headers.count
         table.collapsesBorders = true
+        table.setContentWidth(CGFloat(max(1, suggestion.headers.count)) * 130, type: .absoluteValueType)
         let output = NSMutableAttributedString()
         for (row, cells) in ([suggestion.headers] + suggestion.rows).enumerated() {
             for (column, value) in cells.enumerated() {
                 let block = NSTextTableBlock(table: table, startingRow: row, rowSpan: 1, startingColumn: column, columnSpan: 1)
                 block.setWidth(0.5, type: .absoluteValueType, for: .border)
                 block.setBorderColor(.separatorColor)
-                block.setWidth(8, type: .absoluteValueType, for: .padding)
-                block.setContentWidth(100 / CGFloat(suggestion.headers.count), type: .percentageValueType)
+                block.setWidth(4, type: .absoluteValueType, for: .padding)
+                block.setContentWidth(130, type: .absoluteValueType)
                 let paragraph = NSMutableParagraphStyle()
                 paragraph.textBlocks = [block]
-                paragraph.lineSpacing = 3
+                paragraph.lineSpacing = 2
                 output.append(NSAttributedString(string: value + "\n", attributes: [
-                    .font: NSFont.systemFont(ofSize: 15, weight: row == 0 ? .medium : .regular),
+                    .font: NSFont.systemFont(ofSize: 14, weight: row == 0 ? .semibold : .regular),
                     .foregroundColor: NSColor.labelColor,
                     .paragraphStyle: paragraph
                 ]))

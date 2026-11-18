@@ -9,18 +9,24 @@ use std::time::Duration;
 pub fn schema() -> Value {
     let string = json!({"type":"string"});
     let table = json!({"type":"object","additionalProperties":false,
-        "properties":{"kind":{"const":"table"},"source":string,"title":string,
+        "properties":{"kind":{"const":"table"},"title":string,
             "payload":{"type":"object","additionalProperties":false,"properties":{
                 "headers":{"type":"array","minItems":1,"maxItems":6,"items":string},
                 "rows":{"type":"array","minItems":1,"maxItems":30,"items":{"type":"array","minItems":1,"maxItems":6,"items":string}}},
                 "required":["headers","rows"]}},
-        "required":["kind","source","title","payload"]});
+        "required":["kind","title","payload"]});
     let text = json!({"type":"object","additionalProperties":false,
-        "properties":{"kind":{"enum":["structure","priorities","breakdown","research"]},"source":string,"title":string,
+        "properties":{"kind":{"enum":["structure","priorities","breakdown","research"]},"title":string,
             "payload":{"type":"object","additionalProperties":false,"properties":{"text":string},"required":["text"]}},
-        "required":["kind","source","title","payload"]});
+        "required":["kind","title","payload"]});
     json!({"type":"object","additionalProperties":false,"properties":{
         "suggestions":{"type":"array","maxItems":1,"items":{"anyOf":[table,text]}}},"required":["suggestions"]})
+}
+
+pub enum ResponseMode {
+    Notes,
+    Research,
+    Image,
 }
 
 pub async fn generate(
@@ -30,10 +36,10 @@ pub async fn generate(
     model: &str,
     messages: &[Value],
     budget: GenerationBudget,
-    researched: bool,
+    mode: ResponseMode,
 ) -> Result<String, String> {
     let mut schema = schema();
-    if researched {
+    if matches!(mode, ResponseMode::Research) {
         // A sourced answer is one annotation, never a replacement table that
         // cannot carry its references, or a second search request.
         let mut annotation = schema["properties"]["suggestions"]["items"]["anyOf"][1].clone();
@@ -42,9 +48,36 @@ pub async fn generate(
             json!({"type":"string","maxLength":2000});
         schema["properties"]["suggestions"]["items"] = annotation;
     }
+    if matches!(mode, ResponseMode::Image) {
+        let string = json!({"type":"string"});
+        let optional_string = json!({"anyOf":[{"type":"string"},{"type":"null"}]});
+        schema["properties"]["suggestions"]["minItems"] = json!(1);
+        schema["properties"]["suggestions"]["items"] = json!({"type":"object","additionalProperties":false,
+            "properties":{"kind":{"const":"caption"},"title":string,"payload":{"type":"object","additionalProperties":false,
+                "properties":{"text":{"type":"string","maxLength":2000},"event":{"anyOf":[{"type":"null"},
+                    {"type":"object","additionalProperties":false,"properties":{"title":string,
+                        "dateIndex":{"anyOf":[{"type":"integer","minimum":0,"maximum":7},{"type":"null"}]},"location":optional_string},
+                        "required":["title","dateIndex","location"]}]}},"required":["text","event"]}},
+            "required":["kind","title","payload"]});
+    }
     budget.check(
         crate::context::estimate(&json!(messages)) + crate::context::estimate(&schema) + 128,
     )?;
+    let wire_messages: Vec<Value> = if matches!(engine, Engine::LlamaCpp) {
+        messages.iter().map(|message| {
+            let mut message = message.clone();
+            if let Some(images) = message["images"].as_array().filter(|a| !a.is_empty()) {
+                let mut content = vec![json!({"type":"text","text":message["content"].as_str().unwrap_or_default()})];
+                content.extend(images.iter().filter_map(Value::as_str).map(|image| json!({"type":"image_url","image_url":{"url":format!("data:image/jpeg;base64,{image}")}})));
+                message["content"] = json!(content);
+                message.as_object_mut().unwrap().remove("images");
+            }
+            message
+        }).collect()
+    } else {
+        messages.to_vec()
+    };
+    let messages = &wire_messages;
     let (path, body) = match engine {
         Engine::Ollama => (
             "/api/chat",

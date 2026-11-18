@@ -7,6 +7,8 @@ final class FollowingMockBackend: MockBackend {
     var followRequests: [[String: Any]] = []
     var cancellations: [String] = []
     var research = false
+    var kind = "breakdown"
+    var failSource: String?
     override func command(_ fields: [String: Any]) async throws -> Data {
         if fields["op"] as? String == "notes_cancel" {
             cancellations.append(fields["requestId"] as? String ?? "")
@@ -19,11 +21,15 @@ final class FollowingMockBackend: MockBackend {
         await withCheckedContinuation { continuation in
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { continuation.resume() }
         }
+        if failSource == fields["text"] as? String {
+            failSource = nil
+            throw BackendError(message: "A precise test failure")
+        }
         let proposal: [String: Any]
         if research && fields["researchQuery"] == nil {
             proposal = ["kind":"research", "source":fields["text"]!, "title":"Finding places in NoDa…", "text":"restaurants in NoDa Charlotte"]
         } else {
-            proposal = ["kind":"breakdown", "source":fields["text"]!, "title":"Next steps", "text":"An outline"]
+            proposal = ["kind":kind, "source":fields["text"]!, "title":"Next steps", "text":"An outline"]
         }
         return try JSONSerialization.data(withJSONObject: ["noteId":fields["noteId"]!, "revision":fields["revision"]!,
             "requestId":fields["requestId"]!, "model":model,
@@ -54,7 +60,7 @@ final class NotesFollowingTests: XCTestCase {
         XCTAssertTrue(editor.subviews.compactMap { $0 as? NSButton }.isEmpty)
     }
 
-    func testLatestRevisionWinsWithoutMutatingTheNote() async throws {
+    func testLatestRevisionWinsAndAddsOnlyItsResultToTheNote() async throws {
         let backend = FollowingMockBackend()
         let suite = "lorca.notes-following.\(UUID())"
         let defaults = UserDefaults(suiteName: suite)!
@@ -69,12 +75,14 @@ final class NotesFollowingTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(30))
         notes.updateText("Latest task needs a study guide", selection: NSRange(location: 0, length: 0))
         try await Task.sleep(for: .milliseconds(180))
-        XCTAssertEqual(following.proposals.first?.source, notes.current.text)
-        XCTAssertEqual(notes.current.text, "Latest task needs a study guide")
+        XCTAssertEqual(following.proposals.first?.source, "Latest task needs a study guide")
+        XCTAssertTrue(notes.current.text.hasPrefix("Latest task needs a study guide"))
+        XCTAssertTrue(notes.current.text.contains("An outline"))
+        XCTAssertEqual(notes.current.modelBlocks?.count, 1)
         XCTAssertFalse(backend.cancellations.isEmpty)
         XCTAssertEqual(backend.followRequests.count, 2)
         following.setVisible(false)
-        XCTAssertEqual(following.proposals.first?.source, notes.current.text)
+        XCTAssertEqual(following.proposals.first?.source, "Latest task needs a study guide")
     }
 
     func testPausedOrHiddenNotesDoNotSendWorkAndRapidEditsCoalesce() async throws {
@@ -136,6 +144,54 @@ final class NotesFollowingTests: XCTestCase {
         XCTAssertFalse(notes.current.followingResults!.first { $0.source == first }!.unread)
     }
 
+    func testRetryIsLocalAndDoesNotRegenerateCompletedPassages() async throws {
+        let backend = FollowingMockBackend()
+        let first = "Study guide on GNN architecture"
+        backend.failSource = first
+        let suite = "lorca.notes-retry.\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: backend.root) }
+        let chat = ChatStore(backend: backend, defaults: defaults)
+        defer { chat.stop() }
+        await chat.refreshConnection()
+        let notes = NotesStore(root: backend.root)
+        let following = NotesFollowing(notes: notes, chat: chat, delayNanoseconds: 5_000_000)
+        following.setVisible(true)
+        let text = first + "\n\nA second independent passage\n\n"
+        notes.updateText(text, selection: NSRange(location: (text as NSString).length, length: 0))
+        try await Task.sleep(for: .milliseconds(230))
+        XCTAssertEqual(following.inline.first { $0.source == first }?.detail, "A precise test failure")
+        XCTAssertEqual(backend.followRequests.count, 2)
+        following.retry(source: first)
+        try await Task.sleep(for: .milliseconds(130))
+        XCTAssertEqual(backend.followRequests.count, 3)
+        XCTAssertEqual(backend.followRequests.filter { ($0["text"] as? String) == "A second independent passage" }.count, 1)
+        XCTAssertEqual(notes.current.followingResults?.count, 2)
+        XCTAssertEqual(notes.current.passages.map(\.source), [first, "A second independent passage"])
+    }
+
+    func testUndoingAnAutomaticReplacementDoesNotTriggerItAgain() async throws {
+        _ = NSApplication.shared
+        let backend = FollowingMockBackend(); backend.kind = "priorities"
+        let suite = "lorca.notes-undo.\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: backend.root) }
+        let chat = ChatStore(backend: backend, defaults: defaults)
+        defer { chat.stop() }
+        await chat.refreshConnection()
+        let notes = NotesStore(root: backend.root)
+        let following = NotesFollowing(notes: notes, chat: chat, delayNanoseconds: 5_000_000)
+        following.setVisible(true)
+        let source = "Assignment A tomorrow\nAssignment B tonight"
+        notes.updateText(source, selection: NSRange(location: 0, length: 0))
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(notes.current.text, "An outline")
+        notes.document(for: notes.selectedID).editor.noteUndo.undo()
+        try await Task.sleep(for: .milliseconds(180))
+        XCTAssertEqual(notes.current.text, source)
+        XCTAssertEqual(backend.followRequests.count, 1, "Undo is the author's decision, not another prompt")
+    }
+
     func testResearchUsesModelActivityAndOnlyThenStartsSearch() async throws {
         let backend = FollowingMockBackend(); backend.research = true
         let suite = "lorca.notes-research.\(UUID())"
@@ -157,7 +213,8 @@ final class NotesFollowingTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(100))
         XCTAssertFalse(following.working)
         XCTAssertEqual(following.proposals.first?.kind, "breakdown")
-        XCTAssertEqual(notes.current.text, "Resturants in Noda:")
+        XCTAssertTrue(notes.current.text.hasPrefix("Resturants in Noda:"))
+        XCTAssertTrue(notes.current.text.contains("An outline"))
     }
 
     func testPassageBoundariesDoNotRequireCommandsAndPreserveUnicodeOffsets() {
@@ -167,6 +224,9 @@ final class NotesFollowingTests: XCTestCase {
         XCTAssertEqual(NotesPassage.passages(in: "Resturants in Noda:\nStudy guide for NLP:").count, 2)
         XCTAssertEqual(NotesPassage.passages(in: "# First heading\nSome details here\n# Second heading").count, 2)
         for passage in passages { XCTAssertEqual((text as NSString).substring(with: passage.range), passage.source) }
+        let withTopics = NotesPassage.passages(in: "Study guide for NLP:\n\n- tokenization\n- attention\n\nResturants in Noda:")
+        XCTAssertEqual(withTopics.count, 2)
+        XCTAssertTrue(withTopics[0].source.contains("- attention"))
         XCTAssertEqual(passages[1].source, "Study guide for NLP\n- attention\n- tokenization")
         XCTAssertTrue(NotesPassage.passages(in: "An ambiguous passage\n\nAn ambiguous passage").isEmpty)
     }

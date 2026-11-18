@@ -9,6 +9,7 @@ struct NotesProposal: Codable, Equatable, Identifiable {
     let text: String?
     let headers: [String]?
     let rows: [[String]]?
+    var event: NotesCalendarEvent? = nil
     var id: String { kind + ":" + source }
 
     func range(in document: String) -> NSRange? {
@@ -42,7 +43,12 @@ struct NotesFollowingResult: Decodable {
 struct NotesPassage: Equatable {
     let source: String
     let range: NSRange
-    static func passages(in text: String) -> [NotesPassage] {
+    static func passages(in text: String, excluding: [NSRange] = []) -> [NotesPassage] {
+        let masked = NSMutableString(string: text)
+        for range in excluding where range.location >= 0 && NSMaxRange(range) <= masked.length {
+            masked.replaceCharacters(in: range, with: String(repeating: " ", count: range.length))
+        }
+        let text = masked as String
         let value = text as NSString
         let separator = try! NSRegularExpression(pattern: #"\r?\n[ \t]*\r?\n+|\r?\n(?=#{1,6}[ \t]+|[^\s#*\-\d][^\r\n]{2,100}:[ \t]*(?:\r?\n|$))"#)
         let cuts = separator.matches(in: text, range: NSRange(location: 0, length: value.length))
@@ -50,10 +56,18 @@ struct NotesPassage: Equatable {
         var ranges: [NSRange] = []
         for cut in cuts { ranges.append(NSRange(location: start, length: cut.range.location - start)); start = NSMaxRange(cut.range) }
         ranges.append(NSRange(location: start, length: value.length - start))
-        let passages = ranges.compactMap { range -> NotesPassage? in
+        var grouped: [NSRange] = []
+        let list = try! NSRegularExpression(pattern: #"^\s*(?:[-*+] |\d+[.)] )"#)
+        for range in ranges {
+            let raw = value.substring(with: range)
+            if let previous = grouped.last, list.firstMatch(in: raw, range: NSRange(location: 0, length: (raw as NSString).length)) != nil {
+                grouped[grouped.count - 1] = NSRange(location: previous.location, length: NSMaxRange(range) - previous.location)
+            } else if !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { grouped.append(range) }
+        }
+        let passages = grouped.compactMap { range -> NotesPassage? in
             let raw = value.substring(with: range)
             let source = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard source.count >= 12, source.utf8.count <= 12_000 else { return nil }
+            guard (source.count >= 12 || source.contains("\u{fffc}")), source.utf8.count <= 12_000 else { return nil }
             let local = (raw as NSString).range(of: source)
             return NotesPassage(source: source, range: NSRange(location: range.location + local.location, length: local.length))
         }
@@ -63,6 +77,8 @@ struct NotesPassage: Equatable {
 }
 
 struct NotesSectionResult: Codable, Equatable {
+    static let currentVersion = 3
+    var version: Int? = nil
     let source: String
     let model: String
     var proposals: [NotesProposal]
@@ -75,6 +91,7 @@ struct NotesInlineState: Equatable {
     var unread = false
     var proposal: NotesProposal? = nil
     var busy = false
+    var detail: String? = nil
 }
 
 @MainActor
@@ -123,6 +140,12 @@ final class NotesFollowing: ObservableObject {
         notes.setFollowingResults([], for: notes.selectedID)
         reconsider()
     }
+    func retry(source: String) {
+        failures.removeValue(forKey: key(notes.selectedID, source))
+        let kept = (notes.current.followingResults ?? []).filter { $0.source != source }
+        notes.setFollowingResults(kept, for: notes.selectedID)
+        reconsider()
+    }
     func dismiss(_ proposal: NotesProposal) {
         var results = notes.current.followingResults ?? []
         for index in results.indices { results[index].proposals.removeAll { $0.id == proposal.id } }
@@ -152,12 +175,12 @@ final class NotesFollowing: ObservableObject {
         if visible { activated.insert(notes.selectedID) }
         model = chat.selectedModel
         let liveKeys = Set(notes.notes.filter { activated.contains($0.id) }.flatMap { note in
-            NotesPassage.passages(in: note.text).map { key(note.id, $0.source) }
+            note.passages.map { key(note.id, $0.source) }
         })
         changed = changed.filter { liveKeys.contains($0.key) }
         failures = failures.filter { liveKeys.contains($0.key) }
         if let active, notes.previewsPaused || busy || !chat.isConnected || model != active.model || route != active.route ||
-            !(notes.notes.first { $0.id == active.note }.map { NotesPassage.passages(in: $0.text).contains { $0.source == active.source } } ?? false) {
+            !(notes.notes.first { $0.id == active.note }.map { $0.passages.contains { $0.source == active.source } } ?? false) {
             cancel()
         }
         publish()
@@ -166,9 +189,9 @@ final class NotesFollowing: ObservableObject {
         var wait: TimeInterval?
         for note in notes.notes where activated.contains(note.id) {
             let results = note.followingResults ?? []
-            for passage in NotesPassage.passages(in: note.text) {
+            for passage in note.passages {
                 let identity = key(note.id, passage.source)
-                guard !results.contains(where: { $0.source == passage.source && $0.model == model }), failures[identity] == nil else { continue }
+                guard !results.contains(where: { $0.source == passage.source && $0.model == model && $0.version == NotesSectionResult.currentVersion }), failures[identity] == nil else { continue }
                 let firstSeen = changed[identity] ?? Date()
                 changed[identity] = firstSeen
                 let caretHere = visible && note.id == notes.selectedID && (passage.range.location...NSMaxRange(passage.range)).contains(note.selection.location)
@@ -188,22 +211,19 @@ final class NotesFollowing: ObservableObject {
     private func publish() {
         let note = notes.current
         proposalDocument = note.text
-        let valid = Set(NotesPassage.passages(in: note.text).map(\.source))
-        let results = (note.followingResults ?? []).filter { valid.contains($0.source) && $0.model == model }
-        proposals = results.flatMap(\.proposals).filter { $0.range(in: note.text) != nil }
-        inline = results.compactMap { result in
-            guard let proposal = result.proposals.first else { return nil }
-            return NotesInlineState(source: result.source, label: proposal.title, unread: result.unread, proposal: proposal)
-        }
-        for passage in NotesPassage.passages(in: note.text) {
+        let valid = Set(note.passages.map(\.source))
+        let results = (note.followingResults ?? []).filter { valid.contains($0.source) && $0.model == model && $0.version == NotesSectionResult.currentVersion }
+        proposals = results.flatMap(\.proposals).filter { valid.contains($0.source) }
+        inline = []
+        for passage in note.passages {
             if let error = failures[key(note.id, passage.source)] {
-                inline.append(NotesInlineState(source: passage.source, label: "Couldn’t finish · click to retry", proposal: nil))
+                inline.append(NotesInlineState(source: passage.source, label: "Couldn’t finish · click to retry", detail: error))
                 status = error
             }
         }
         working = active != nil
         workingDocument = ""; workingLocation = 0
-        if let active, active.note == note.id, let passage = NotesPassage.passages(in: note.text).first(where: { $0.source == active.source }) {
+        if let active, active.note == note.id, let passage = note.passages.first(where: { $0.source == active.source }) {
             workingDocument = note.text; workingLocation = passage.range.location
             inline.append(NotesInlineState(source: active.source, label: activity, busy: true))
         }
@@ -211,7 +231,7 @@ final class NotesFollowing: ObservableObject {
         else if !chat.ready || !chat.isConnected { status = "Connect a local model in Settings" }
         else if busy { status = "Waiting for foreground work" }
         else if working { status = activity }
-        else if !proposals.isEmpty { status = "Suggestions available" }
+        else if !proposals.isEmpty { status = "Following" }
         else if failures.isEmpty { status = "Following" }
     }
 
@@ -229,11 +249,27 @@ final class NotesFollowing: ObservableObject {
                 let clock = ISO8601DateFormatter(); clock.timeZone = .current
                 var fields: [String: Any] = ["op":"notes_follow", "requestId":id.uuidString,
                     "noteId":note.id.uuidString, "revision":rev, "text":passage.source,
-                    "localTime":clock.string(from: Date()) + " " + TimeZone.current.identifier,
-                    "context":String(Self.context(for: note).prefix(2000))]
+                    "localTime":clock.string(from: Date()) + " " + TimeZone.current.identifier]
+                let images = (note.images ?? []).filter { NSLocationInRange($0.location, passage.range) }
+                if !images.isEmpty {
+                    self.activity = "Reading image…"; self.publish()
+                    let directory = self.notes.mediaDirectory
+                    let reading = try await Task.detached(priority: .userInitiated) {
+                        try NotesImageReading.read(images, directory: directory, passage: passage.source)
+                    }.value
+                    try Task.checkCancellation()
+                    guard self.requestID == id else { return }
+                    fields["images"] = reading.images
+                    fields["imageObservations"] = reading.observations
+                    fields["dateCandidates"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(reading.dates))
+                    self.activity = "Captioning…"; self.publish()
+                }
                 var data = try await backend.command(fields)
                 try Task.checkCancellation()
                 var result = try JSONDecoder().decode(NotesFollowingResult.self, from: data)
+                guard result.noteId == note.id, result.revision == rev, result.requestId == id, result.model == selectedModel else {
+                    throw BackendError(message: "Model result did not match this passage. Retry this passage.")
+                }
                 if let research = result.suggestions.first(where: { $0.kind == "research" }), let query = research.text {
                     guard self.requestID == id else { return }
                     // Public task label, never hidden reasoning. Search now really starts.
@@ -243,16 +279,23 @@ final class NotesFollowing: ObservableObject {
                     data = try await backend.command(fields)
                     try Task.checkCancellation()
                     result = try JSONDecoder().decode(NotesFollowingResult.self, from: data)
+                    guard result.noteId == note.id, result.revision == rev, result.requestId == id, result.model == selectedModel else {
+                        throw BackendError(message: "Research result did not match this passage. Retry this passage.")
+                    }
                 }
                 guard self.requestID == id, !self.notes.previewsPaused, self.model == selectedModel,
                       result.noteId == note.id, result.revision == rev, result.requestId == id, result.model == selectedModel,
                       let current = self.notes.notes.first(where: { $0.id == note.id }),
-                      NotesPassage.passages(in: current.text).contains(where: { $0.source == passage.source }) else { return }
-                let proposals = result.suggestions.filter { $0.kind != "research" && $0.range(in: current.text) != nil }
+                      current.passages.contains(where: { $0.source == passage.source }) else { return }
+                let proposals = result.suggestions.filter { proposal in
+                    proposal.kind != "research" && current.passages.contains(where: { $0.source == proposal.source })
+                }
                 var saved = current.followingResults ?? []
                 saved.removeAll { $0.source == passage.source }
-                saved.append(NotesSectionResult(source: passage.source, model: selectedModel, proposals: proposals, unread: true))
+                saved.append(NotesSectionResult(version: NotesSectionResult.currentVersion, source: passage.source, model: selectedModel, proposals: proposals, unread: true))
                 self.notes.setFollowingResults(saved, for: note.id)
+                let document = self.notes.document(for: note.id)
+                for proposal in proposals { try document.add(proposal) }
                 self.active = nil; self.requestID = nil; self.pending = nil
                 self.reconsider()
             } catch is CancellationError { }

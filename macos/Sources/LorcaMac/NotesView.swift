@@ -30,7 +30,7 @@ struct NotesView: View {
             }
             HStack(spacing: 6) {
                 Menu {
-                    Button(store.previewsPaused ? "Resume suggestions" : "Pause suggestions") {
+                    Button(store.previewsPaused ? "Resume model following" : "Pause model following") {
                         store.previewsPaused.toggle()
                     }
                     Text(following.status)
@@ -40,7 +40,7 @@ struct NotesView: View {
                             Button(choice.model) { Task { await chat.selectModel(choice) } }
                         }
                     }
-                    Button("Refresh suggestions") { following.refresh() }
+                    Button("Refresh model work") { following.refresh() }
                 } label: {
                     Label("Model following", systemImage: store.previewsPaused ? "pause.circle" : (following.working ? "circle.dotted" : "sparkles"))
                 }
@@ -88,115 +88,47 @@ struct NotesHistory: View {
 struct NotesTextEditor: NSViewRepresentable {
     @ObservedObject var store: NotesStore
     @ObservedObject var following: NotesFollowing
-
-    func makeCoordinator() -> Coordinator { Coordinator(store: store) }
-
+    final class Coordinator { var displayedID: UUID?; var focusRequest: UUID? }
+    func makeCoordinator() -> Coordinator { Coordinator() }
     func makeNSView(context: Context) -> NSScrollView {
-        let editor = NotesNativeTextView()
-        editor.modelDriven = true
-        editor.isRichText = true
-        editor.importsGraphics = false
-        editor.allowsUndo = true
-        editor.drawsBackground = false
-        editor.isVerticallyResizable = true
-        editor.isHorizontallyResizable = false
-        editor.autoresizingMask = [.width]
-        editor.textContainer?.widthTracksTextView = true
-        editor.textContainer?.lineFragmentPadding = 0
-        editor.textContainerInset = NSSize(width: 22, height: 0)
-        editor.isAutomaticQuoteSubstitutionEnabled = false
-        editor.isAutomaticDashSubstitutionEnabled = false
-        editor.delegate = context.coordinator
-        editor.setAccessibilityIdentifier("workspace-notes-editor")
-        editor.setAccessibilityLabel("Note document")
         let scroll = NSScrollView()
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
-        scroll.documentView = editor
         return scroll
     }
-
     func updateNSView(_ scroll: NSScrollView, context: Context) {
-        guard let editor = scroll.documentView as? NotesNativeTextView else { return }
-        let coordinator = context.coordinator
-        coordinator.store = store
-        coordinator.applying = true
-        defer { coordinator.applying = false }
-        let note = store.current
-        let changedNote = coordinator.displayedID != note.id
-        let changedFocus = coordinator.focusRequest != store.focusRequest
-        if changedNote {
-            editor.undoManager?.removeAllActions()
+        let note = store.current, coordinator = context.coordinator
+        let document = store.document(for: note.id), editor = document.editor
+        let changed = coordinator.displayedID != note.id
+        if changed {
             coordinator.displayedID = note.id
-            editor.resetSuggestions()
-            editor.documentID = note.id
+            scroll.documentView = editor
+            editor.frame.size.width = scroll.contentSize.width
         }
-        if changedNote || editor.string != note.text {
-            if let data = note.richText,
-               let rich = try? NSAttributedString(data: data, options: [.documentType: NSAttributedString.DocumentType.rtf], documentAttributes: nil),
-               rich.string == note.text {
-                editor.textStorage?.setAttributedString(rich)
-            } else { editor.string = note.text }
-        }
-        if editor.previewsPaused != store.previewsPaused {
-            editor.previewsPaused = store.previewsPaused
-            if store.previewsPaused { editor.resetSuggestions() }
-            else { editor.queueSuggestion() }
-        }
+        document.synchronize(note)
         editor.isEditable = !store.isReadOnly
-        let selection = changedNote ? note.selection : editor.selectedRange()
-        if changedNote || editor.formattedText != note.text {
-            editor.format()
-            editor.setSelectedRange(selection)
-        }
-        if changedNote || changedFocus {
+        editor.previewsPaused = store.previewsPaused
+        if changed || coordinator.focusRequest != store.focusRequest {
             coordinator.focusRequest = store.focusRequest
             editor.setSelectedRange(note.selection)
             editor.scrollRangeToVisible(note.selection)
             editor.focusOnAttach = !store.isReadOnly
             editor.focusIfReady()
         }
-        editor.modelLabel = following.model
-        editor.onProposalDismiss = { [weak following] proposal in following?.dismiss(proposal) }
-        editor.receive(following.proposals, document: following.proposalDocument)
         editor.showWorking(following.working && !store.previewsPaused,
             document: following.workingDocument, at: following.workingLocation)
-        editor.onSectionRead = { [weak following] source in following?.markRead(source: source) }
-        editor.onSectionRetry = { [weak following] in following?.refresh() }
+        editor.onSectionRetry = { [weak following] source in following?.retry(source: source) }
         editor.showInline(store.previewsPaused ? [] : following.inline)
-        if changedNote && !editor.modelDriven { editor.queueSuggestion() }
-    }
-
-    final class Coordinator: NSObject, NSTextViewDelegate {
-        var store: NotesStore
-        var displayedID: UUID?
-        var focusRequest: UUID?
-        var applying = false
-        init(store: NotesStore) { self.store = store }
-
-        func textDidChange(_ notification: Notification) {
-            guard !applying, let editor = notification.object as? NotesNativeTextView,
-                  displayedID == store.selectedID else { return }
-            let text = editor.string, selection = editor.selectedRange()
-            editor.format()
-            do {
-                store.updateText(text, selection: selection, richText: try editor.richDocument())
-            } catch {
-                store.reportEditorError("This note could not be saved. Keep it open. \(error.localizedDescription)")
-            }
-            editor.queueSuggestion()
-        }
-
-        func textViewDidChangeSelection(_ notification: Notification) {
-            guard !applying, let editor = notification.object as? NotesNativeTextView,
-                  displayedID == store.selectedID, editor.string == store.current.text else { return }
-            store.updateSelection(editor.selectedRange())
-        }
     }
 }
 
 final class NotesNativeTextView: NSTextView {
+    let noteUndo = UndoManager()
+    override var undoManager: UndoManager? { noteUndo }
+    var modelMetadata: [UUID: NotesModelBlock] = [:]
+    var onImagesPasted: (([ImageInput]) -> Void)?
+    var onCalendarOpen: ((URL) -> Void)?
     var formattedText: String?
     var focusOnAttach = false
     var documentID: UUID?
@@ -217,10 +149,37 @@ final class NotesNativeTextView: NSTextView {
     private var workingDocument = ""
     private var workingLocation = 0
     var onSectionRead: ((String) -> Void)?
-    var onSectionRetry: (() -> Void)?
+    var onSectionRetry: ((String) -> Void)?
     private var inlineStates: [NotesInlineState] = []
     private var inlineViews: [NotesInlineActivity] = []
     private static let originalParagraph = NSAttributedString.Key("lorca.inline.originalParagraph")
+
+    override func mouseDown(with event: NSEvent) {
+        if let manager = layoutManager, let container = textContainer {
+            let point = convert(event.locationInWindow, from: nil)
+            let local = NSPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y)
+            let index = manager.characterIndex(for: local, in: container, fractionOfDistanceBetweenInsertionPoints: nil)
+            if index < (string as NSString).length,
+               let url = textStorage?.attribute(.link, at: index, effectiveRange: nil) as? URL, url.isFileURL, url.pathExtension == "ics" {
+                let glyphs = manager.glyphRange(forCharacterRange: NSRange(location: index, length: 1), actualCharacterRange: nil)
+                if manager.boundingRect(forGlyphRange: glyphs, in: container).contains(local) { onCalendarOpen?(url); return }
+            }
+        }
+        super.mouseDown(with: event)
+    }
+
+    override func paste(_ sender: Any?) {
+        let images = ClipboardImages.read(.general)
+        if images.isEmpty { super.paste(sender) } else { onImagesPasted?(images) }
+    }
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(paste(_:)), !ClipboardImages.read(.general).isEmpty { return isEditable }
+        return super.validateUserInterfaceItem(item)
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        drawModelBlocks(in: dirtyRect)
+        super.draw(dirtyRect)
+    }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -237,30 +196,46 @@ final class NotesNativeTextView: NSTextView {
 
     func showInline(_ states: [NotesInlineState]) {
         guard states != inlineStates else { return }
+        let scroll = enclosingScrollView
+        let origin = scroll?.contentView.bounds.origin
+        let writing = window?.firstResponder === self
+        let before = writing ? caretLineY().flatMap { y in
+            (visibleRect.minY...visibleRect.maxY).contains(y) ? y : nil
+        } : nil
         inlineStates = states
         inlineViews.forEach { $0.removeFromSuperview() }
         inlineViews = states.map { state in
             let view = NotesInlineActivity(state: state)
             view.perform = { [weak self] in
                 guard let self else { return }
-                self.onSectionRead?(state.source)
-                if let proposal = state.proposal {
-                    // Revalidate against this document when the user opens it.
-                    self.receive([proposal], document: self.string)
-                    self.openModelPreview(proposal)
-                } else if !state.busy { self.onSectionRetry?() }
+                if !state.busy { self.onSectionRetry?(state.source) }
             }
             addSubview(view)
             return view
         }
         format()
+        positionInline()
+        if let scroll, let origin, let before, let after = caretLineY(), writing {
+            // Keep the line being typed at the same visual position when an
+            // earlier result expands. Selection and focus never change.
+            scroll.contentView.scroll(to: NSPoint(x: origin.x, y: max(0, origin.y + after - before)))
+            scroll.reflectScrolledClipView(scroll.contentView)
+        }
         needsLayout = true
+    }
+
+    func caretLineY() -> CGFloat? {
+        guard !string.isEmpty, let manager = layoutManager, let container = textContainer else { return nil }
+        manager.ensureLayout(for: container)
+        let index = min(selectedRange().location, (string as NSString).length - 1)
+        let glyphs = manager.glyphRange(forCharacterRange: NSRange(location: index, length: 1), actualCharacterRange: nil)
+        return manager.boundingRect(forGlyphRange: glyphs, in: container).minY
     }
 
     private func decorateInline() {
         guard let storage = textStorage else { return }
         for (state, view) in zip(inlineStates, inlineViews) {
-            guard let passage = NotesPassage.passages(in: string).first(where: { $0.source == state.source }),
+            guard let passage = authoredPassages.first(where: { $0.source == state.source }),
                   !intersectsTable(passage.range) else { view.isHidden = true; continue }
             let paragraph = (string as NSString).paragraphRange(for: NSRange(location: NSMaxRange(passage.range) - 1, length: 1))
             let original = storage.attribute(.paragraphStyle, at: paragraph.location, effectiveRange: nil) as? NSParagraphStyle ?? NSParagraphStyle.default
@@ -277,7 +252,7 @@ final class NotesNativeTextView: NSTextView {
         manager.ensureLayout(for: container)
         var bottom = manager.usedRect(for: container).maxY + textContainerOrigin.y
         for (state, view) in zip(inlineStates, inlineViews) where !view.isHidden {
-            guard let passage = NotesPassage.passages(in: string).first(where: { $0.source == state.source }) else { view.isHidden = true; continue }
+            guard let passage = authoredPassages.first(where: { $0.source == state.source }) else { view.isHidden = true; continue }
             let glyphs = manager.glyphRange(forCharacterRange: NSRange(location: NSMaxRange(passage.range) - 1, length: 1), actualCharacterRange: nil)
             let rect = manager.boundingRect(forGlyphRange: glyphs, in: container)
             view.frame = NSRect(x: textContainerOrigin.x, y: rect.maxY + textContainerOrigin.y + 4,
@@ -475,7 +450,7 @@ final class NotesNativeTextView: NSTextView {
         replaceDocumentRange(suggestion.sourceRange, with: NotesNativeTable.attributed(suggestion), action: "Insert table")
     }
 
-    private func replaceDocumentRange(_ range: NSRange, with replacement: NSAttributedString, action: String) {
+    func replaceDocumentRange(_ range: NSRange, with replacement: NSAttributedString, action: String) {
         let selection = selectedRange()
         let scrollOrigin = enclosingScrollView?.contentView.bounds.origin
         preview?.close()
@@ -491,11 +466,11 @@ final class NotesNativeTextView: NSTextView {
             scroll.contentView.scroll(to: scrollOrigin)
             scroll.reflectScrolledClipView(scroll.contentView)
         }
-        window?.makeFirstResponder(self)
+        // Background document edits never take focus from another note or app.
         marker?.isHidden = true
     }
 
-    private func intersectsTable(_ range: NSRange) -> Bool {
+    func intersectsTable(_ range: NSRange) -> Bool {
         guard let storage = textStorage, NSMaxRange(range) <= storage.length else { return false }
         var found = false
         storage.enumerateAttribute(.paragraphStyle, in: range) { value, _, _ in
@@ -505,11 +480,15 @@ final class NotesNativeTextView: NSTextView {
     }
 
     func richDocument() throws -> Data? {
-        guard let storage = textStorage, intersectsTable(NSRange(location: 0, length: storage.length)) else { return nil }
+        guard let storage = textStorage,
+              intersectsTable(NSRange(location: 0, length: storage.length)) || !imageReferences().isEmpty || !modelRanges().isEmpty else { return nil }
         let clean = NSMutableAttributedString(attributedString: storage)
         storage.enumerateAttribute(Self.originalParagraph, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
             if let style = value as? NSParagraphStyle { clean.addAttribute(.paragraphStyle, value: style, range: range) }
         }
+        clean.removeAttribute(.attachment, range: NSRange(location: 0, length: clean.length))
+        clean.removeAttribute(.notesImageID, range: NSRange(location: 0, length: clean.length))
+        clean.removeAttribute(.notesModelBlock, range: NSRange(location: 0, length: clean.length))
         clean.removeAttribute(Self.originalParagraph, range: NSRange(location: 0, length: clean.length))
         return try clean.data(from: NSRange(location: 0, length: clean.length), documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf])
     }
@@ -526,6 +505,18 @@ final class NotesNativeTextView: NSTextView {
     func format() {
         guard let storage = textStorage else { return }
         let selection = selectedRanges
+        var preserved: [(NSAttributedString.Key, Any, NSRange)] = []
+        for key in [NSAttributedString.Key.attachment, .notesImageID, .notesModelBlock, .link] {
+            storage.enumerateAttribute(key, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+                if let value {
+                    if key == .link {
+                        let url = (value as? URL) ?? (value as? String).flatMap(URL.init(string:))
+                        guard url?.isFileURL == true, url?.pathExtension == "ics" else { return }
+                    }
+                    preserved.append((key, value, range))
+                }
+            }
+        }
         var tables: [(NSRange, NSParagraphStyle)] = []
         storage.enumerateAttribute(.paragraphStyle, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
             if let paragraph = value as? NSParagraphStyle, !paragraph.textBlocks.isEmpty {
@@ -539,10 +530,13 @@ final class NotesNativeTextView: NSTextView {
             storage.setAttributes([.paragraphStyle: paragraph, .font: NSFont.systemFont(ofSize: 15), .foregroundColor: NSColor.labelColor], range: range)
             for block in paragraph.textBlocks { block.setBorderColor(.separatorColor) }
         }
+        for (key, value, range) in preserved { storage.addAttribute(key, value: value, range: range) }
+        NotesTypography.apply(to: storage, authored: NotesPassage.passages(in: string, excluding: modelRanges().map(\.range)))
         decorateInline()
         if recording { undoManager?.enableUndoRegistration() }
         selectedRanges = selection
-        var typing = MarkdownNoteStyle.base(size: 15)
+        var typing = MarkdownNoteStyle.base(size: 16)
+        typing[.font] = ShellTypography.nativeSerif(16)
         if storage.length > 0 {
             let index = min(selectedRange().location, storage.length - 1)
             if let paragraph = storage.attribute(.paragraphStyle, at: index, effectiveRange: nil) as? NSParagraphStyle,

@@ -18,6 +18,8 @@ struct Fake {
     requests: AtomicUsize,
     started: Notify,
     slow_first: bool,
+    vision: std::sync::atomic::AtomicBool,
+    image_count: AtomicUsize,
 }
 async fn chat(State(fake): State<Arc<Fake>>, Json(body): Json<Value>) -> String {
     assert!(body.get("tools").is_none());
@@ -31,6 +33,19 @@ async fn chat(State(fake): State<Arc<Fake>>, Json(body): Json<Value>) -> String 
     }
     let context: Value =
         serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
+    let images = body["messages"][1]["images"].as_array().map_or(0, Vec::len);
+    fake.image_count.fetch_add(images, Ordering::SeqCst);
+    if context["imageObservations"]
+        .as_str()
+        .is_some_and(|s| !s.is_empty())
+    {
+        assert_eq!(
+            body["format"]["properties"]["suggestions"]["items"]["properties"]["kind"]["const"],
+            "caption"
+        );
+        let content = json!({"suggestions":[{"kind":"caption","title":"Study night","payload":{"text":"NLP study night, November 21, 2026 at 7pm. Free entry.","event":{"title":"NLP Study Night","dateIndex":0,"location":"NoDa Community Room"}}}]}).to_string();
+        return json!({"message":{"role":"assistant","content":content},"done":true,"done_reason":"stop"}).to_string();
+    }
     let content = json!({"suggestions":[{"kind":"priorities","source":context["note"],"title":"Tonight first","payload":{"text":"- B tonight\n- A tomorrow"}}]}).to_string();
     json!({"message":{"role":"assistant","content":content},"done":true,"done_reason":"stop"})
         .to_string()
@@ -49,9 +64,14 @@ async fn fixture(
         requests: AtomicUsize::new(0),
         started: Notify::new(),
         slow_first,
+        vision: std::sync::atomic::AtomicBool::new(true),
+        image_count: AtomicUsize::new(0),
     });
     let app = Router::new()
         .route("/api/chat", post(chat))
+        .route("/api/show", post(|State(fake): State<Arc<Fake>>| async move {
+            Json(json!({"capabilities":if fake.vision.load(Ordering::SeqCst) { vec!["completion","vision"] } else { vec!["completion"] }}))
+        }))
         .route(
             "/api/generate",
             post(|| async { Json(json!({"done":true,"done_reason":"load"})) }),
@@ -147,6 +167,66 @@ async fn foreign_cancel_is_ignored_and_foreground_preparation_preempts_following
         .await
         .unwrap();
     assert!(old.await.unwrap().unwrap_err().contains("cancelled"));
+    server.abort();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+fn image_request(session: &str) -> Value {
+    use base64::Engine as _;
+    let mut jpeg = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(2, 2)
+        .write_to(&mut jpeg, image::ImageFormat::Jpeg)
+        .unwrap();
+    let mut req = request(session, 4);
+    req["text"] = json!("Pasted image 1\n\u{fffc}");
+    req["images"] = json!([base64::engine::general_purpose::STANDARD.encode(jpeg.into_inner())]);
+    req["imageObservations"] = json!("NLP study night. November 21, 2026 at 7pm. Free entry.");
+    req["dateCandidates"] = json!([{"id":0,"start":"2026-11-22T00:00:00Z","end":null,"timeZone":"America/New_York","display":"Nov 21, 2026 at 7pm"}]);
+    req
+}
+
+#[tokio::test]
+async fn image_caption_uses_vision_and_only_os_detected_calendar_dates() {
+    let (core, session, fake, server, root) = fixture(false).await;
+    let req = image_request(&session);
+    let result = core.command(req.clone()).await.unwrap();
+    assert_eq!(result["suggestions"][0]["kind"], "caption");
+    assert_eq!(result["suggestions"][0]["source"], req["text"]);
+    assert_eq!(
+        result["suggestions"][0]["event"]["start"],
+        "2026-11-22T00:00:00Z"
+    );
+    assert_eq!(result["suggestions"][0]["event"]["end"], Value::Null);
+    assert_eq!(fake.image_count.load(Ordering::SeqCst), 1);
+    server.abort();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn text_only_models_get_ocr_without_unsupported_image_inputs() {
+    let (core, session, fake, server, root) = fixture(false).await;
+    fake.vision.store(false, Ordering::SeqCst);
+    let result = core.command(image_request(&session)).await.unwrap();
+    assert_eq!(result["suggestions"][0]["kind"], "caption");
+    assert_eq!(fake.image_count.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        result["suggestions"][0]["event"]["start"],
+        "2026-11-22T00:00:00Z"
+    );
+    server.abort();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn invalid_images_and_date_candidate_ids_are_rejected_before_inference() {
+    let (core, session, fake, server, root) = fixture(false).await;
+    let mut req = image_request(&session);
+    req["images"] = json!(["not-an-image"]);
+    assert!(core.command(req).await.is_err());
+    let mut req = image_request(&session);
+    req["dateCandidates"][0]["id"] = json!(7);
+    assert!(core.command(req).await.is_err());
+    assert_eq!(fake.requests.load(Ordering::SeqCst), 0);
     server.abort();
     let _ = std::fs::remove_dir_all(root);
 }

@@ -38,7 +38,7 @@ final class NotesWorkingCueTests: XCTestCase {
         wait(for: [cancelled], timeout: 2)
     }
 
-    func testInlineResultReservesSpaceWithoutChangingTextSelectionOrUndo() throws {
+    func testInlineActivityReservesSpaceWithoutChangingTextSelectionOrUndo() throws {
         _ = NSApplication.shared
         let editor = NotesNativeTextView(frame: NSRect(x: 0, y: 0, width: 650, height: 450))
         editor.modelDriven = true
@@ -49,11 +49,10 @@ final class NotesWorkingCueTests: XCTestCase {
         editor.setSelectedRange(NSRange(location: (editor.string as NSString).length, length: 0))
         editor.format()
         let text = editor.string, selection = editor.selectedRange()
-        let proposal = NotesProposal(kind: "breakdown", source: first, title: "Places for dinner", text: "- First restaurant\n- Second restaurant", headers: nil, rows: nil)
         editor.showInline([NotesInlineState(source: first, label: "Thinking…", busy: true)])
         editor.layout()
         XCTAssertEqual(editor.subviews.compactMap { $0 as? NotesInlineActivity }.count, 1)
-        editor.showInline([NotesInlineState(source: first, label: proposal.title, unread: true, proposal: proposal)])
+        editor.showInline([NotesInlineState(source: first, label: "Finding places…", busy: true)])
         editor.layout()
         XCTAssertEqual(editor.string, text)
         XCTAssertEqual(editor.selectedRange(), selection)
@@ -74,6 +73,39 @@ final class NotesWorkingCueTests: XCTestCase {
         }
         editor.showInline([])
         XCTAssertTrue(editor.subviews.compactMap { $0 as? NotesInlineActivity }.isEmpty)
+    }
+
+    func testResultAboveCaretPreservesItsVisualPositionWhileWriting() throws {
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 300), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
+        let editor = NotesNativeTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 1800))
+        editor.isVerticallyResizable = true
+        editor.textContainer?.widthTracksTextView = true
+        editor.textContainerInset = NSSize(width: 22, height: 0)
+        let source = "Study guide on GNN architecture"
+        editor.string = source + "\n\n" + String(repeating: "More draft text while another passage is running.\n", count: 60)
+        editor.format()
+        let caret = NSRange(location: (source as NSString).length + 2 + 49 * 35, length: 0)
+        editor.setSelectedRange(caret)
+        scroll.documentView = editor
+        window.contentView = scroll
+        window.makeFirstResponder(editor)
+        editor.scrollRangeToVisible(caret)
+        let manager = try XCTUnwrap(editor.layoutManager), container = try XCTUnwrap(editor.textContainer)
+        func visualY() -> CGFloat {
+            manager.ensureLayout(for: container)
+            let glyphs = manager.glyphRange(forCharacterRange: NSRange(location: caret.location, length: 1), actualCharacterRange: nil)
+            return manager.boundingRect(forGlyphRange: glyphs, in: container).minY - scroll.contentView.bounds.minY
+        }
+        let before = visualY()
+        let proposal = NotesProposal(kind: "breakdown", source: source, title: "GNN study guide", text: "- Message passing\n- Aggregation", headers: nil, rows: nil)
+        editor.showInline([NotesInlineState(source: source, label: proposal.title, unread: true, proposal: proposal)])
+        XCTAssertEqual(visualY(), before, accuracy: 1)
+        XCTAssertEqual(editor.selectedRange(), caret)
+        XCTAssertTrue(window.firstResponder === editor)
     }
 
     func testReducedMotionCueIsStaticAndNeverTakesInput() {

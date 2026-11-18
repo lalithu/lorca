@@ -1,35 +1,45 @@
-# Notes: embedded model following
+# Embedded model notes
 
-Notes uses one small background queue on the existing model session. Passages
-are separated by blank lines or new headings; their meaning is interpreted by
-the model, without a command vocabulary. A completed passage becomes eligible
-when the caret leaves it. The passage being edited gets a short local delay.
-Editing elsewhere or leaving Notes does not cancel its work. Editing that
-passage, pausing, changing models, or foreground model work cancels its request.
-Only passages visited in Notes are scheduled, and one inference runs at a time.
+Each note keeps one native text document and undo history, including offscreen.
+The model follows independent passages on the existing local model session.
+Moving to another passage starts settled work without waiting for all typing to
+stop. Edits elsewhere and leaving Notes do not cancel it. Editing its own input,
+pausing, changing models, or foreground model work cancels that request.
 
-Each request carries the exact passage and a bounded surrounding-context
-snapshot. Results are fenced by request, note, source and model identity. The
-backend still owns model preparation, foreground priority and cancellation.
-This is document-aware scheduling, not continuous model perception or new model
-weights/memory. Large passages over 12 KB and ambiguous duplicate anchors are
-left alone rather than edited unsafely.
+The app owns source anchors and fences responses by request, note, passage and
+model. Unrelated passages are excluded from each task. Completed work is inserted
+as full, editable text or a compact native table, with a faint blue background.
+There is no response card or expand/apply step. Contributions use the same text
+storage, caret, selection and undo system as typing. Generated ranges are tracked
+separately so model output does not recursively prompt itself. Undo is respected;
+untouched adjacent contributions can refresh, while edited content is preserved.
+A bounded completion history prevents immediate reinsertion after undo.
 
-The model may propose a table, structure, priorities, a breakdown, or one web
-search. Search reuses the bundled `jobapps/web.py` Exa transport with a bounded
-query and five results. Only the search query goes to Exa. Retrieved text is
-untrusted evidence, never tool authority. The follow-up response is constrained
-to one concise annotation; actual source links are attached by the backend.
-Failures stay visible beside the passage and require a retry or source edit.
-There are no email, booking, arbitrary shell or other external-action tools.
+Search uses the existing bundled Exa transport: a bounded query, up to five
+sources, one concise result. The backend attaches actual source links. Retrieved
+text is evidence, never tool authority. No messaging, booking or arbitrary shell
+actions are exposed to the model.
 
-Quiet inline activity and result excerpts are native document decorations.
-They do not become authored text, move focus, or enter undo history. Existing
-margin cues and the Model following menu remain. Results persist separately
-with the note and are blue until opened. Opening a result offers the existing
-review/apply flow; applying remains one undoable document edit. Work continues
-across tabs while the app runs; this is not a daemon that works after quitting.
+Image paste reuses the existing image importer. Optimized files live separately
+from the small note/RTF document, so typing does not rewrite image bytes. Native
+OCR supplies readable text; a vision-capable selected model also receives the
+actual image. Text-only models can summarize readable flyers, but cannot describe
+unseen photo details. Captions and flyer breakdowns become editable note text.
 
-Acceptance uses disposable data roots and a separately identified Lorca Preview
-bundle built from the same Swift/Rust binaries, SDK, target and resources as the
-main app. Tests never edit saved personal notes.
+For event flyers, the model selects from dates detected by macOS, requiring an
+explicit year and time. It cannot supply an invented calendar timestamp. A valid
+event adds a normal inline Add to Calendar link and the parsed local time. The
+link opens a generated .ics file in the system calendar importer; no calendar
+account is read or silently written. Missing details remain visible. Calendar
+files use stable image-based UIDs, UTC times, escaped fields and UTF-8 line folding.
+
+Typography reuses Lorca's Iowan/serif, system sans and monospaced palette. The
+Model following footer and quiet margin cue remain. Work continues while the app
+runs, rather than through an external daemon after quitting. Oversized passages
+and ambiguous duplicate anchors are left alone.
+
+Checks use disposable data roots and the normal Swift/macOS SDK and Rust build.
+Focused tests cover editable insertion, undo across notes, tables, image restore,
+calendar escaping/link activation, and cancellation. Opt-in live tests exercise
+vision captions and the OCR fallback with installed local models. Acceptance
+never edits saved personal notes or imports events into a real calendar.

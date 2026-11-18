@@ -5,11 +5,15 @@ struct WorkspaceNote: Codable, Identifiable, Equatable {
     var id = UUID()
     var text = ""
     var richText: Data? = nil
+    var images: [NotesImageReference]? = nil
+    var modelBlocks: [NotesModelBlock]? = nil
     var followingResults: [NotesSectionResult]? = nil
     var createdAt = Date()
     var updatedAt = Date()
     var selectionLocation = 0
     var selectionLength = 0
+
+    var passages: [NotesPassage] { NotesPassage.passages(in: text, excluding: (modelBlocks ?? []).map(\.range)) }
 
     var title: String {
         text.split(whereSeparator: \.isNewline).first.map { String($0.prefix(60)) } ?? "New note"
@@ -37,7 +41,20 @@ final class NotesStore: ObservableObject {
     @Published private(set) var error: String?
     @Published var previewsPaused = false { didSet { save() } }
     private(set) var isReadOnly = false
+    private var documents: [UUID: NotesDocument] = [:]
     let file: URL
+    var mediaDirectory: URL { file.deletingLastPathComponent().appendingPathComponent("images") }
+
+    func document(for id: UUID) -> NotesDocument {
+        if let document = documents[id] {
+            if let note = notes.first(where: { $0.id == id }) { document.synchronize(note) }
+            return document
+        }
+        let note = notes.first { $0.id == id }!
+        let document = NotesDocument(note: note, store: self)
+        documents[id] = document
+        return document
+    }
 
     init(root: URL) {
         let initial = WorkspaceNote()
@@ -79,12 +96,13 @@ final class NotesStore: ObservableObject {
         save()
     }
 
-    func updateText(_ text: String, selection: NSRange, richText: Data? = nil) {
-        guard !isReadOnly, let index = notes.firstIndex(where: { $0.id == selectedID }) else { return }
-        guard notes[index].text != text || notes[index].richText != richText else { return }
-        notes[index].followingResults = notes[index].followingResults?.filter { result in
-            NotesPassage.passages(in: text).contains { $0.source == result.source }
-        }
+    func updateText(_ text: String, selection: NSRange, richText: Data? = nil, noteID: UUID? = nil, images: [NotesImageReference]? = nil, modelBlocks: [NotesModelBlock]? = nil) {
+        guard !isReadOnly, let index = notes.firstIndex(where: { $0.id == (noteID ?? selectedID) }) else { return }
+        guard notes[index].text != text || notes[index].richText != richText || notes[index].images != images || notes[index].modelBlocks != modelBlocks else { return }
+        notes[index].images = images
+        notes[index].modelBlocks = modelBlocks
+        // Keep bounded completion history across edits and undo. A dismissed
+        // or undone contribution must not immediately reinsert itself.
         notes[index].text = text
         notes[index].richText = richText
         notes[index].updatedAt = Date()
@@ -95,14 +113,14 @@ final class NotesStore: ObservableObject {
 
     func setFollowingResults(_ results: [NotesSectionResult], for id: UUID) {
         guard !isReadOnly, let index = notes.firstIndex(where: { $0.id == id }), notes[index].followingResults != results else { return }
-        notes[index].followingResults = results
+        notes[index].followingResults = Array(results.suffix(64))
         save()
     }
 
     func reportEditorError(_ message: String) { error = message }
 
-    func updateSelection(_ selection: NSRange) {
-        guard !isReadOnly, let index = notes.firstIndex(where: { $0.id == selectedID }) else { return }
+    func updateSelection(_ selection: NSRange, noteID: UUID? = nil) {
+        guard !isReadOnly, let index = notes.firstIndex(where: { $0.id == (noteID ?? selectedID) }) else { return }
         guard notes[index].selection != selection else { return }
         notes[index].selectionLocation = selection.location
         notes[index].selectionLength = selection.length

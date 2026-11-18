@@ -23,6 +23,10 @@ enum ShellTypography {
     private static let serifName = ["IowanOldStyle-Roman", "Palatino-Roman", "Georgia"]
         .first { NSFont(name: $0, size: 13) != nil }
 
+    static func nativeSerif(_ size: CGFloat) -> NSFont {
+        serifName.flatMap { NSFont(name: $0, size: size) } ?? NSFont.systemFont(ofSize: size)
+    }
+
     static func serif(_ size: CGFloat) -> Font {
         serifName.map { .custom($0, size: size) } ?? .system(size: size, design: .serif)
     }
