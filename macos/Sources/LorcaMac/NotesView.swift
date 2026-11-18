@@ -157,6 +157,8 @@ struct NotesTextEditor: NSViewRepresentable {
         editor.modelLabel = following.model
         editor.onProposalDismiss = { [weak following] proposal in following?.dismiss(proposal) }
         editor.receive(following.proposals, document: following.proposalDocument)
+        editor.showWorking(following.working && !store.previewsPaused,
+            document: following.workingDocument, at: following.workingLocation)
         if changedNote && !editor.modelDriven { editor.queueSuggestion() }
     }
 
@@ -203,6 +205,11 @@ final class NotesNativeTextView: NSTextView {
     private var dismissedText: String?
     private var marker: NSButton?
     private var preview: NSPopover?
+    private var workingCue: NotesWorkingCue?
+    private var pendingWorkingCue: DispatchWorkItem?
+    private var workingToken: UUID?
+    private var workingDocument = ""
+    private var workingLocation = 0
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -213,9 +220,11 @@ final class NotesNativeTextView: NSTextView {
     override func layout() {
         super.layout()
         positionMarker()
+        positionWorkingCue()
     }
 
     func resetSuggestions() {
+        removeWorkingCue()
         pendingSuggestion?.cancel()
         pendingSuggestion = nil
         preview?.close()
@@ -225,6 +234,54 @@ final class NotesNativeTextView: NSTextView {
         suggestion = nil
         modelProposal = nil
         dismissedText = nil
+    }
+
+    func showWorking(_ active: Bool, document: String, at location: Int) {
+        guard active, !previewsPaused, isEditable, !document.isEmpty, document == string else {
+            removeWorkingCue()
+            return
+        }
+        if workingDocument == document && workingLocation == location && workingToken != nil { return }
+        removeWorkingCue()
+        workingDocument = document
+        workingLocation = location
+        let token = UUID()
+        workingToken = token
+        let item = DispatchWorkItem { [weak self] in
+            guard let self, self.workingToken == token, self.string == document,
+                  !self.previewsPaused, self.window != nil else { return }
+            let cue = NotesWorkingCue()
+            self.workingCue = cue
+            self.addSubview(cue)
+            self.positionWorkingCue()
+        }
+        pendingWorkingCue = item
+        // Avoid blinking a busy state for very fast or cached responses.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: item)
+    }
+
+    private func removeWorkingCue() {
+        pendingWorkingCue?.cancel()
+        pendingWorkingCue = nil
+        workingToken = nil
+        workingDocument = ""
+        workingCue?.removeFromSuperview()
+        workingCue = nil
+    }
+
+    private func positionWorkingCue() {
+        guard let cue = workingCue, workingDocument == string,
+              let manager = layoutManager, let container = textContainer else { return }
+        let text = string as NSString
+        guard text.length > 0 else { return }
+        var paragraph = text.lineRange(for: NSRange(location: min(max(0, workingLocation), text.length - 1), length: 0))
+        while paragraph.location > 0 && text.substring(with: paragraph).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            paragraph = text.lineRange(for: NSRange(location: paragraph.location - 1, length: 0))
+        }
+        manager.ensureLayout(for: container)
+        let glyphs = manager.glyphRange(forCharacterRange: NSRange(location: paragraph.location, length: 1), actualCharacterRange: nil)
+        let rect = manager.boundingRect(forGlyphRange: glyphs, in: container)
+        cue.frame.origin = NSPoint(x: 0, y: rect.minY + textContainerOrigin.y)
     }
 
     func queueSuggestion() {

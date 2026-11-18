@@ -6,6 +6,8 @@ Embedded Model Interfaces (Ems) keep the author's document as the interaction su
 
 Write naturally. Following considers the note after a 1.5-second pause; no table keyword or special syntax is required. At most two proposals are returned, and the first applicable proposal appears as a quiet margin glyph. Click it to inspect a table, headings/lists, a reordered task list, or a prepared breakdown. Dismissal reveals any remaining proposal. No popover opens automatically.
 
+While inference is active, three small pulsing dots appear in the margin beside the passage being read. The cue waits 180 ms to avoid flashing on fast responses, never intercepts input or changes document layout, and uses static dots when reduced motion is enabled. Editing, cancellation, or completion removes it. The existing suggestion glyph and footer control remain separate.
+
 The footer is **Model following**. Its menu exposes pause/resume, the current model and available local model choices, request status, and explicit refresh. Pausing survives restarts. A failed request does not trigger an automatic retry loop.
 
 Applying a proposal is an explicit, undoable editor action. Tables use native text-table blocks; notes retain RTF alongside plain text. Breakdown content is added after its source; structure and priority proposals replace only their source passage. Cursor and scroll position are preserved where possible. Existing tables are protected from overlapping replacements in this iteration.

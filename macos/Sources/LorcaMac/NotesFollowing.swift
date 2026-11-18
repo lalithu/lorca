@@ -45,6 +45,8 @@ final class NotesFollowing: ObservableObject {
     @Published private(set) var model = ""
     @Published private(set) var partialContext = false
     private(set) var proposalDocument = ""
+    private(set) var workingDocument = ""
+    private(set) var workingLocation = 0
     private var lastNoteID: UUID?
     private var lastText = ""
     private(set) var visible = false
@@ -87,6 +89,7 @@ final class NotesFollowing: ObservableObject {
             Task { _ = try? await backend.command(["op":"notes_cancel", "requestId":id.uuidString]) }
         }
         requestID = nil
+        workingDocument = ""
         working = false
     }
 
@@ -123,6 +126,8 @@ final class NotesFollowing: ObservableObject {
                 guard self.revision == rev else { return }
                 let id = UUID()
                 self.requestID = id
+                self.workingDocument = fullText
+                self.workingLocation = note.selection.location
                 self.working = true
                 self.status = "Following"
                 let clock = ISO8601DateFormatter()
