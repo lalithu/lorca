@@ -1,6 +1,7 @@
 import AppKit
 
 extension NSAttributedString.Key {
+    static let notesUserEdit = NSAttributedString.Key("lorca.notes.userEdit")
     static let notesImageID = NSAttributedString.Key("lorca.notes.imageID")
     static let notesModelBlock = NSAttributedString.Key("lorca.notes.modelBlock")
 }
@@ -30,6 +31,7 @@ final class NotesDocument: NSObject, NSTextViewDelegate {
     private var loading = false
     private var adding = false
     private var pendingPastes: [UUID: NSRange] = [:]
+    private var pendingUserEdit: (UUID, NSRange)?
 
     init(note: WorkspaceNote, store: NotesStore) {
         id = note.id; self.store = store
@@ -51,6 +53,8 @@ final class NotesDocument: NSObject, NSTextViewDelegate {
         editor.delegate = self
         editor.setAccessibilityIdentifier("workspace-notes-editor")
         editor.setAccessibilityLabel("Note document")
+        editor.registerImageDrops()
+        editor.onImagePromises = { [weak self] receivers, range in self?.receive(receivers, at: range) }
         editor.onImagesPasted = { [weak self] in self?.paste($0) }
         editor.onCalendarOpen = { [weak store] url in
             guard let store, url.isFileURL, url.pathExtension == "ics",
@@ -82,19 +86,37 @@ final class NotesDocument: NSObject, NSTextViewDelegate {
             if data.isEmpty { store?.reportEditorError("A saved image is missing. Its reference has been preserved.") }
             editor.textStorage?.addAttributes([.attachment: Self.attachment(data, id: image.id), .notesImageID: image.id.uuidString], range: NSRange(location: image.location, length: 1))
         }
+        editor.userEditMetadata = Dictionary(uniqueKeysWithValues: (note.inlineEdits ?? []).map { ($0.id, $0) })
+        for edit in note.inlineEdits ?? [] where NSMaxRange(edit.range) <= (note.text as NSString).length {
+            editor.textStorage?.addAttribute(.notesUserEdit, value: edit.id.uuidString, range: edit.range)
+        }
+        let inferred = inferExistingUserEdits(note)
         editor.format()
         editor.setSelectedRange(note.selection)
         editor.noteUndo.removeAllActions()
+        if inferred {
+            loading = false
+            try? save()
+        }
     }
 
     func save() throws {
         guard !loading else { return }
         store?.updateText(editor.string, selection: editor.selectedRange(), richText: try editor.richDocument(), noteID: id,
-            images: editor.imageReferences(), modelBlocks: editor.modelRanges())
+            images: editor.imageReferences(), modelBlocks: editor.modelRanges(), inlineEdits: editor.userEdits())
     }
 
     func textDidChange(_ notification: Notification) {
         guard !loading else { return }
+        if let (owner, range) = pendingUserEdit, range.length > 0, let storage = editor.textStorage, NSMaxRange(range) <= storage.length {
+            let previous = max(0, range.location - 1)
+            let existing = storage.length > 0 ? (storage.attribute(.notesUserEdit, at: previous, effectiveRange: nil) as? String).flatMap(UUID.init(uuidString:)) : nil
+            let identity = existing.flatMap { editor.userEditMetadata[$0]?.owner == owner ? $0 : nil } ?? UUID()
+            editor.modelMetadata[owner]?.edited = true
+            editor.userEditMetadata[identity] = NotesUserEdit(id: identity, owner: owner, location: range.location, length: range.length)
+            storage.addAttribute(.notesUserEdit, value: identity.uuidString, range: range)
+        }
+        pendingUserEdit = nil
         editor.format()
         do { try save() } catch { store?.reportEditorError("This note could not be saved. Keep it open. \(error.localizedDescription)") }
         editor.queueSuggestion()
@@ -105,7 +127,13 @@ final class NotesDocument: NSObject, NSTextViewDelegate {
     }
     func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString: String?) -> Bool {
         guard !loading else { return true }
-        let delta = ((replacementString ?? "") as NSString).length - range.length
+        let inserted = ((replacementString ?? "") as NSString).length
+        pendingUserEdit = nil
+        if !adding, !editor.changingChecklist, !editor.noteUndo.isUndoing, !editor.noteUndo.isRedoing, inserted > 0,
+           let owner = editor.modelRanges().first(where: { $0.location <= range.location && range.location <= NSMaxRange($0.range) }) {
+            pendingUserEdit = (owner.id, NSRange(location: range.location, length: inserted))
+        }
+        let delta = inserted - range.length
         for (token, anchor) in pendingPastes {
             if NSMaxRange(range) <= anchor.location && range.location < anchor.location {
                 pendingPastes[token] = NSRange(location: max(0, anchor.location + delta), length: anchor.length)
@@ -113,7 +141,7 @@ final class NotesDocument: NSObject, NSTextViewDelegate {
                 pendingPastes[token] = NSRange(location: min(anchor.location, range.location), length: 0)
             }
         }
-        if !adding, let storage = editor.textStorage, storage.length > 0 {
+        if !adding, !editor.noteUndo.isUndoing, !editor.noteUndo.isRedoing, let storage = editor.textStorage, storage.length > 0 {
             let probe = NSRange(location: min(range.location, storage.length - 1), length: min(max(1, range.length), storage.length - min(range.location, storage.length - 1)))
             storage.enumerateAttribute(.notesModelBlock, in: probe) { value, _, _ in
                 if let text = value as? String, let id = UUID(uuidString: text) { editor.modelMetadata[id]?.edited = true }
@@ -129,7 +157,10 @@ final class NotesDocument: NSObject, NSTextViewDelegate {
             let table = NotesTableSuggestion(sourceRange: source, sourceText: proposal.source, headers: headers, rows: rows)
             body = NSMutableAttributedString(attributedString: NotesNativeTable.attributed(table))
         }
-        else { body = NSMutableAttributedString(string: proposal.text ?? "", attributes: MarkdownNoteStyle.base(size: 16)) }
+        else {
+            let text = ["checklist", "priorities"].contains(proposal.kind) ? NotesChecklist.render(proposal.text ?? "") : (proposal.text ?? "")
+            body = NSMutableAttributedString(string: text, attributes: MarkdownNoteStyle.base(size: 16))
+        }
         guard body.length > 0 else { return }
         if let event = proposal.event, let store {
             let calendarID = editor.imageReferences().first(where: { NSLocationInRange($0.location, source) })?.id ?? UUID()
@@ -147,7 +178,7 @@ final class NotesDocument: NSObject, NSTextViewDelegate {
         let identity = UUID()
         body.addAttribute(.notesModelBlock, value: identity.uuidString, range: NSRange(location: 0, length: body.length))
         editor.modelMetadata[identity] = NotesModelBlock(id: identity, source: proposal.source, location: 0, length: body.length)
-        let replaceSource = proposal.kind == "structure" || proposal.kind == "priorities"
+        let replaceSource = false // The author’s writing always stays in place.
         var target = replaceSource ? source : NSRange(location: NSMaxRange(source), length: 0)
         let value = NSMutableAttributedString()
         if !replaceSource {
@@ -188,10 +219,10 @@ final class NotesDocument: NSObject, NSTextViewDelegate {
         storage.fixAttributes(in: NSRange(location: 0, length: storage.length))
     }
 
-    func paste(_ inputs: [ImageInput]) {
+    func paste(_ inputs: [ImageInput], at range: NSRange? = nil) {
         guard let store, !store.isReadOnly else { return }
         let token = UUID(), directory = store.mediaDirectory
-        pendingPastes[token] = editor.selectedRange()
+        pendingPastes[token] = range ?? editor.selectedRange()
         Task { [weak self] in
             do {
                 let prepared = try await Task.detached(priority: .userInitiated) {
@@ -224,6 +255,43 @@ final class NotesDocument: NSObject, NSTextViewDelegate {
         }
     }
 
+    func undoManager(for view: NSTextView) -> UndoManager? { editor.noteUndo }
+
+    private func inferExistingUserEdits(_ note: WorkspaceNote) -> Bool {
+        guard note.inlineEdits == nil, let storage = editor.textStorage else { return false }
+        var inferred = false
+        for block in note.modelBlocks ?? [] where block.edited && NSMaxRange(block.range) <= storage.length {
+            guard let original = (note.followingResults ?? []).first(where: { $0.source == block.source })?.proposals.first?.text else { continue }
+            let old = Array(original.utf16), current = Array((storage.string as NSString).substring(with: block.range).utf16)
+            var prefix = 0, suffix = 0
+            while prefix < min(old.count, current.count) && old[prefix] == current[prefix] { prefix += 1 }
+            while suffix < min(old.count, current.count) - prefix && old[old.count - suffix - 1] == current[current.count - suffix - 1] { suffix += 1 }
+            let length = current.count - prefix - suffix
+            guard length > 0 else { continue }
+            let identity = UUID(), range = NSRange(location: block.location + prefix, length: length)
+            editor.userEditMetadata[identity] = NotesUserEdit(id: identity, owner: block.id, location: range.location, length: length)
+            storage.addAttribute(.notesUserEdit, value: identity.uuidString, range: range)
+            inferred = true
+        }
+        return inferred
+    }
+
+    func receive(_ receivers: [NSFilePromiseReceiver], at range: NSRange) {
+        for receiver in receivers.prefix(4) {
+            let token = UUID(), directory = FileManager.default.temporaryDirectory.appendingPathComponent("lorca-drop-" + UUID().uuidString)
+            pendingPastes[token] = range
+            do { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
+            catch { store?.reportEditorError(error.localizedDescription); continue }
+            receiver.receivePromisedFiles(atDestination: directory, options: [:], operationQueue: .main) { [weak self] url, error in
+                Task { @MainActor in
+                    guard let self, let anchor = self.pendingPastes.removeValue(forKey: token) else { return }
+                    if let error { self.store?.reportEditorError(error.localizedDescription) }
+                    else { self.paste([.file(url)], at: anchor) }
+                }
+            }
+        }
+    }
+
     private static func attachment(_ data: Data, id: UUID) -> NSTextAttachment {
         let attachment = NSTextAttachment()
         attachment.fileWrapper = FileWrapper(regularFileWithContents: data)
@@ -238,7 +306,7 @@ final class NotesDocument: NSObject, NSTextViewDelegate {
 }
 
 extension NotesNativeTextView {
-    var authoredPassages: [NotesPassage] { NotesPassage.passages(in: string, excluding: modelRanges().map(\.range)) }
+    var authoredPassages: [NotesPassage] { NotesPassage.combined(in: string, blocks: modelRanges(), edits: userEdits()) }
     func imageReferences() -> [NotesImageReference] {
         guard let storage = textStorage else { return [] }
         var images: [NotesImageReference] = []
@@ -263,7 +331,7 @@ extension NotesNativeTextView {
     func drawModelBlocks(in dirtyRect: NSRect) {
         guard let manager = layoutManager, let container = textContainer else { return }
         manager.ensureLayout(for: container)
-        for block in modelRanges() where block.length > 0 {
+        for block in modelRanges() where block.length > 0 && !block.edited {
             let glyphs = manager.glyphRange(forCharacterRange: block.range, actualCharacterRange: nil)
             let text = manager.boundingRect(forGlyphRange: glyphs, in: container)
             let firstStyle = textStorage?.attribute(.paragraphStyle, at: block.location, effectiveRange: nil) as? NSParagraphStyle

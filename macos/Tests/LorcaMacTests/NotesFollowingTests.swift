@@ -170,7 +170,7 @@ final class NotesFollowingTests: XCTestCase {
         XCTAssertEqual(notes.current.passages.map(\.source), [first, "A second independent passage"])
     }
 
-    func testUndoingAnAutomaticReplacementDoesNotTriggerItAgain() async throws {
+    func testUndoingAnAutomaticContributionDoesNotTriggerItAgain() async throws {
         _ = NSApplication.shared
         let backend = FollowingMockBackend(); backend.kind = "priorities"
         let suite = "lorca.notes-undo.\(UUID())"
@@ -185,7 +185,8 @@ final class NotesFollowingTests: XCTestCase {
         let source = "Assignment A tomorrow\nAssignment B tonight"
         notes.updateText(source, selection: NSRange(location: 0, length: 0))
         try await Task.sleep(for: .milliseconds(150))
-        XCTAssertEqual(notes.current.text, "An outline")
+        XCTAssertTrue(notes.current.text.hasPrefix(source))
+        XCTAssertTrue(notes.current.text.contains("An outline"))
         notes.document(for: notes.selectedID).editor.noteUndo.undo()
         try await Task.sleep(for: .milliseconds(180))
         XCTAssertEqual(notes.current.text, source)

@@ -43,6 +43,7 @@ struct NotesFollowingResult: Decodable {
 struct NotesPassage: Equatable {
     let source: String
     let range: NSRange
+    var context: String? = nil
     static func passages(in text: String, excluding: [NSRange] = []) -> [NotesPassage] {
         let masked = NSMutableString(string: text)
         for range in excluding where range.location >= 0 && NSMaxRange(range) <= masked.length {
@@ -264,6 +265,7 @@ final class NotesFollowing: ObservableObject {
                     fields["dateCandidates"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(reading.dates))
                     self.activity = "Captioning…"; self.publish()
                 }
+                if let context = passage.context { fields["localContext"] = context }
                 var data = try await backend.command(fields)
                 try Task.checkCancellation()
                 var result = try JSONDecoder().decode(NotesFollowingResult.self, from: data)

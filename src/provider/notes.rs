@@ -16,7 +16,7 @@ pub fn schema() -> Value {
                 "required":["headers","rows"]}},
         "required":["kind","title","payload"]});
     let text = json!({"type":"object","additionalProperties":false,
-        "properties":{"kind":{"enum":["structure","priorities","breakdown","research"]},"title":string,
+        "properties":{"kind":{"enum":["structure","priorities","breakdown","research","checklist"]},"title":string,
             "payload":{"type":"object","additionalProperties":false,"properties":{"text":string},"required":["text"]}},
         "required":["kind","title","payload"]});
     json!({"type":"object","additionalProperties":false,"properties":{
@@ -43,7 +43,7 @@ pub async fn generate(
         // A sourced answer is one annotation, never a replacement table that
         // cannot carry its references, or a second search request.
         let mut annotation = schema["properties"]["suggestions"]["items"]["anyOf"][1].clone();
-        annotation["properties"]["kind"] = json!({"const":"breakdown"});
+        annotation["properties"]["kind"] = json!({"enum":["breakdown","checklist"]});
         annotation["properties"]["payload"]["properties"]["text"] =
             json!({"type":"string","maxLength":2000});
         schema["properties"]["suggestions"]["items"] = annotation;

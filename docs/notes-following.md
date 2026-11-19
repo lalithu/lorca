@@ -43,3 +43,14 @@ Focused tests cover editable insertion, undo across notes, tables, image restore
 calendar escaping/link activation, and cancellation. Opt-in live tests exercise
 vision captions and the OCR fallback with installed local models. Acceptance
 never edits saved personal notes or imports events into a real calendar.
+
+The native responder handles Command-Z and Shift-Command-Z with the document’s
+own undo manager. Image drop accepts screenshot files, bitmap data and image
+file promises. Actionable lists become checklists beneath the original input;
+checking moves an item below the unchecked items and is one undoable edit.
+
+Human insertions inside a model contribution are tracked separately and shown
+in amber. The edited contribution loses its blue background. Only the edited
+paragraph and nearby section context become new model input; subsequent model
+text gets its own blue block. This allows local follow-ups without replaying
+the whole guide or recursively prompting from model-written text.

@@ -6,9 +6,10 @@ enum ClipboardImages {
     static func read(_ pasteboard: NSPasteboard) -> [ImageInput] {
         let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
         if !urls.isEmpty {
-            return urls.filter { url in
+            let images = urls.filter { url in
                 (try? url.resourceValues(forKeys: [.contentTypeKey]).contentType?.conforms(to: .image)) == true
             }.map(ImageInput.file)
+            if !images.isEmpty { return images }
         }
         return (pasteboard.pasteboardItems ?? []).compactMap { item in
             let types: [NSPasteboard.PasteboardType] = [.png, .init(UTType.jpeg.identifier), .tiff, .init(UTType.heic.identifier)]

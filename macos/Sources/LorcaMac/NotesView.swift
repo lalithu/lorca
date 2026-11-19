@@ -127,6 +127,9 @@ final class NotesNativeTextView: NSTextView {
     let noteUndo = UndoManager()
     override var undoManager: UndoManager? { noteUndo }
     var modelMetadata: [UUID: NotesModelBlock] = [:]
+    var userEditMetadata: [UUID: NotesUserEdit] = [:]
+    var changingChecklist = false
+    var onImagePromises: (([NSFilePromiseReceiver], NSRange) -> Void)?
     var onImagesPasted: (([ImageInput]) -> Void)?
     var onCalendarOpen: ((URL) -> Void)?
     var formattedText: String?
@@ -155,6 +158,7 @@ final class NotesNativeTextView: NSTextView {
     private static let originalParagraph = NSAttributedString.Key("lorca.inline.originalParagraph")
 
     override func mouseDown(with event: NSEvent) {
+        if toggleChecklist(at: convert(event.locationInWindow, from: nil)) { return }
         if let manager = layoutManager, let container = textContainer {
             let point = convert(event.locationInWindow, from: nil)
             let local = NSPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y)
@@ -168,11 +172,35 @@ final class NotesNativeTextView: NSTextView {
         super.mouseDown(with: event)
     }
 
+    @objc(undo:) func undoNote(_ sender: Any?) {
+        breakUndoCoalescing()
+        if noteUndo.canUndo { noteUndo.undo() }
+    }
+    @objc(redo:) func redoNote(_ sender: Any?) {
+        if noteUndo.canRedo { noteUndo.redo() }
+    }
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.contains(.command), !event.modifierFlags.contains(.option), !event.modifierFlags.contains(.control), event.charactersIgnoringModifiers?.lowercased() == "z" {
+            if event.modifierFlags.contains(.shift) { redoNote(nil) } else { undoNote(nil) }
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { acceptsImageDrop(sender.draggingPasteboard) ? .copy : super.draggingEntered(sender) }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { acceptsImageDrop(sender.draggingPasteboard) ? .copy : super.draggingUpdated(sender) }
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool { acceptsImageDrop(sender.draggingPasteboard) || super.prepareForDragOperation(sender) }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        acceptImageDrop(sender.draggingPasteboard, at: convert(sender.draggingLocation, from: nil)) || super.performDragOperation(sender)
+    }
+
     override func paste(_ sender: Any?) {
         let images = ClipboardImages.read(.general)
         if images.isEmpty { super.paste(sender) } else { onImagesPasted?(images) }
     }
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == NSSelectorFromString("undo:") { return noteUndo.canUndo }
+        if item.action == NSSelectorFromString("redo:") { return noteUndo.canRedo }
         if item.action == #selector(paste(_:)), !ClipboardImages.read(.general).isEmpty { return isEditable }
         return super.validateUserInterfaceItem(item)
     }
@@ -487,6 +515,7 @@ final class NotesNativeTextView: NSTextView {
             if let style = value as? NSParagraphStyle { clean.addAttribute(.paragraphStyle, value: style, range: range) }
         }
         clean.removeAttribute(.attachment, range: NSRange(location: 0, length: clean.length))
+        clean.removeAttribute(.notesUserEdit, range: NSRange(location: 0, length: clean.length))
         clean.removeAttribute(.notesImageID, range: NSRange(location: 0, length: clean.length))
         clean.removeAttribute(.notesModelBlock, range: NSRange(location: 0, length: clean.length))
         clean.removeAttribute(Self.originalParagraph, range: NSRange(location: 0, length: clean.length))
@@ -506,7 +535,7 @@ final class NotesNativeTextView: NSTextView {
         guard let storage = textStorage else { return }
         let selection = selectedRanges
         var preserved: [(NSAttributedString.Key, Any, NSRange)] = []
-        for key in [NSAttributedString.Key.attachment, .notesImageID, .notesModelBlock, .link] {
+        for key in [NSAttributedString.Key.attachment, .notesImageID, .notesModelBlock, .notesUserEdit, .link] {
             storage.enumerateAttribute(key, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
                 if let value {
                     if key == .link {
@@ -532,6 +561,7 @@ final class NotesNativeTextView: NSTextView {
         }
         for (key, value, range) in preserved { storage.addAttribute(key, value: value, range: range) }
         NotesTypography.apply(to: storage, authored: NotesPassage.passages(in: string, excluding: modelRanges().map(\.range)))
+        styleChecklistAndUserEdits()
         decorateInline()
         if recording { undoManager?.enableUndoRegistration() }
         selectedRanges = selection

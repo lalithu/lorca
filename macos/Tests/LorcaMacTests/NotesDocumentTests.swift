@@ -29,7 +29,7 @@ final class NotesDocumentTests: XCTestCase {
         XCTAssertTrue(store.current.text.contains("nearby nodes"))
         XCTAssertTrue(store.current.modelBlocks?.first?.edited == true)
         let bodyFont = document.editor.textStorage?.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont
-        XCTAssertEqual(bodyFont?.pointSize, 14)
+        XCTAssertEqual(bodyFont?.pointSize, 16)
         let authorFont = document.editor.textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
         XCTAssertEqual(authorFont?.fontName, ShellTypography.nativeSerif(18).fontName)
         let restored = NotesStore(root: root)

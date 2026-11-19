@@ -7,13 +7,14 @@ struct WorkspaceNote: Codable, Identifiable, Equatable {
     var richText: Data? = nil
     var images: [NotesImageReference]? = nil
     var modelBlocks: [NotesModelBlock]? = nil
+    var inlineEdits: [NotesUserEdit]? = nil
     var followingResults: [NotesSectionResult]? = nil
     var createdAt = Date()
     var updatedAt = Date()
     var selectionLocation = 0
     var selectionLength = 0
 
-    var passages: [NotesPassage] { NotesPassage.passages(in: text, excluding: (modelBlocks ?? []).map(\.range)) }
+    var passages: [NotesPassage] { NotesPassage.combined(in: text, blocks: modelBlocks ?? [], edits: inlineEdits ?? []) }
 
     var title: String {
         text.split(whereSeparator: \.isNewline).first.map { String($0.prefix(60)) } ?? "New note"
@@ -96,11 +97,12 @@ final class NotesStore: ObservableObject {
         save()
     }
 
-    func updateText(_ text: String, selection: NSRange, richText: Data? = nil, noteID: UUID? = nil, images: [NotesImageReference]? = nil, modelBlocks: [NotesModelBlock]? = nil) {
+    func updateText(_ text: String, selection: NSRange, richText: Data? = nil, noteID: UUID? = nil, images: [NotesImageReference]? = nil, modelBlocks: [NotesModelBlock]? = nil, inlineEdits: [NotesUserEdit]? = nil) {
         guard !isReadOnly, let index = notes.firstIndex(where: { $0.id == (noteID ?? selectedID) }) else { return }
-        guard notes[index].text != text || notes[index].richText != richText || notes[index].images != images || notes[index].modelBlocks != modelBlocks else { return }
+        guard notes[index].text != text || notes[index].richText != richText || notes[index].images != images || notes[index].modelBlocks != modelBlocks || notes[index].inlineEdits != inlineEdits else { return }
         notes[index].images = images
         notes[index].modelBlocks = modelBlocks
+        notes[index].inlineEdits = inlineEdits
         // Keep bounded completion history across edits and undo. A dismissed
         // or undone contribution must not immediately reinsert itself.
         notes[index].text = text
