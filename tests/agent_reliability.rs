@@ -755,10 +755,10 @@ async fn recovery_obeys_registered_discovery_approval_and_never_bypasses_denial(
     let agent = Arc::new(Agent::default());
     let mut registry = Registry::default();
     registry.add("list_directory", Arc::new(ApprovedDiscovery));
-    let script = Script::new(vec![tool(
-        "read_file",
-        json!({"path":"src/tools/agent/mod.rs"}),
-    )]);
+    let script = Script::new(vec![
+        tool("read_file", json!({"path":"src/tools/agent/mod.rs"})),
+        text("Folder discovery was declined."),
+    ]);
     let id = agent
         .start(
             "test",
@@ -786,7 +786,7 @@ async fn recovery_obeys_registered_discovery_approval_and_never_bypasses_denial(
     .await
     .unwrap();
     assert_eq!(view.status, Status::Denied, "{:?}", view.result);
-    assert_eq!(script.seen.lock().unwrap().len(), 1);
+    assert_eq!(script.seen.lock().unwrap().len(), 2);
     assert!(
         !view
             .events
@@ -924,7 +924,7 @@ async fn malformed_command_arguments_get_schema_feedback_then_one_approved_real_
         .filter(|e| e.kind == "tool_failed")
         .map(|e| &e.data["result"])
         .collect();
-    assert_eq!(errors.len(), 3);
+    assert_eq!(errors.len(), 3, "{errors:#?}");
     for e in &errors {
         assert_eq!(e["code"], "invalid_arguments");
         assert_eq!(e["executed"], false);
@@ -976,12 +976,13 @@ async fn corrected_arguments_still_require_approval_and_denial_stops_execution()
                 "exec_command",
                 json!({"executable":"cargo","arguments":["test"],"directory":"."}),
             ),
+            text("The command was declined."),
         ],
         Decision::Deny,
     )
     .await;
     assert_eq!(view.status, Status::Denied, "{:?}", view.result);
-    assert_eq!(script.seen.lock().unwrap().len(), 2);
+    assert_eq!(script.seen.lock().unwrap().len(), 3);
     assert_eq!(
         view.events
             .iter()
@@ -1015,7 +1016,7 @@ async fn essential_patch_format_error_keeps_exact_schema_and_preserves_valid_ret
         .unwrap();
     assert_eq!(error.data["result"]["code"], "invalid_arguments");
     assert!(
-        error.data["result"]["expectedSchema"]["required"]
+        error.data["result"]["expectedSchema"]["oneOf"][1]["required"]
             .as_array()
             .unwrap()
             .contains(&json!("path"))
@@ -1081,7 +1082,7 @@ async fn clear_empty_readme_discovers_patch_schema_and_requires_one_approval() {
         false
     );
     assert!(
-        patch["function"]["parameters"]["required"]
+        patch["function"]["parameters"]["oneOf"][1]["required"]
             .as_array()
             .unwrap()
             .contains(&json!("new_text"))

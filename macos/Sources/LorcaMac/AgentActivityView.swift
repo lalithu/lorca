@@ -10,7 +10,7 @@ struct AgentActivityView: View {
     @State private var clarificationAnswer = ""
     var expandTools = false
     var onContinue: (() -> Void)? = nil
-    var onChooseWorkspace: (() -> Void)? = nil
+    var onChooseWorkspace: ((Bool) -> Void)? = nil
     private var snapshot: AgentTaskSnapshot? {
         if let current = store.runs[taskID] { return current }
         guard let message = savedMessage,
@@ -58,7 +58,11 @@ struct AgentActivityView: View {
                         .padding(.horizontal, 10).padding(.vertical, 6)
                         .chatInlineAccent(ChatAccent.approval)
                     if clarification["needsWorkspace"].boolean == true, let chooseWorkspace = onChooseWorkspace {
-                        Button("Choose folder…", action: chooseWorkspace).buttonStyle(.bordered).controlSize(.small)
+                        if let directory = clarification["directory"].string {
+                            Text(verbatim: directory).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                            Button("Allow this folder") { chooseWorkspace(true) }.buttonStyle(.borderedProminent).controlSize(.small)
+                        }
+                        Button("Choose folder…") { chooseWorkspace(false) }.buttonStyle(.bordered).controlSize(.small)
                     } else if let choose = onChoose {
                         HStack {
                             TextField("Your answer", text: $clarificationAnswer).textFieldStyle(.roundedBorder).onSubmit {

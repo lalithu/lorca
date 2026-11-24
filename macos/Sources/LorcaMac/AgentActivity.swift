@@ -26,7 +26,10 @@ struct AgentActivity: Identifiable, Equatable {
         case "list_directory": return "List \(path)"
         case "read_file": return "Read \(path)"
         case "search_files": return "Search for \(arguments["query"].string ?? "")"
-        case "apply_patch": return "Edit \(path)"
+        case "apply_patch":
+            let files = action["paths"].strings
+            if files.count > 1 { return "Edit \(files.count) files" }
+            return "Edit \(files.first ?? path)"
         case "write_stdin": return arguments["chars"].string?.isEmpty == false ? "Send command input" : "Check command result"
         case "view_image": return "Inspect image \(path)"
         case "request_user_input": return "Question for you"
@@ -131,7 +134,12 @@ extension AgentActivity {
     static func summary(_ items: [Self]) -> String {
         var labels: [String] = []
         let edited = Set(items.filter { $0.tool == "apply_patch" && $0.completed && !$0.failed && !$0.superseded && !$0.cancelled }
-            .compactMap { $0.arguments["path"].string })
+            .flatMap { item -> [String] in
+                if case .array(let changes) = item.result["changes"] {
+                    return changes.compactMap { $0["path"].string }
+                }
+                return (item.result["path"].string ?? item.arguments["path"].string).map { [$0] } ?? []
+            })
         for item in items {
             let done = item.completed && !item.failed && !item.superseded && !item.cancelled && item.result["running"].boolean != true
             let label: String

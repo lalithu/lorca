@@ -17,16 +17,59 @@ pub async fn execute(
     if agent.revision_pending() {
         return Err("Task revised".into());
     }
-    authority.validate(call)?;
+    let mut checked_call = call.clone();
+    if let (Some(workspace), "apply_patch", Some(path)) =
+        (w, call.name.as_str(), call.arguments["path"].as_str())
+    {
+        checked_call.arguments["path"] = json!(workspace.relative(path)?);
+    }
+    authority.validate(&checked_call)?;
     if authority.scope.read_only
         && authority.scope.commands_forbidden
         && registry.may_mutate(&call.name)
     {
         return Err("Task restriction forbids tools with possible mutations".into());
     }
+    if call.name == "exec_command"
+        && call.arguments["read_only"] != true
+        && (!authority.scope.targets.is_empty() || !authority.scope.forbidden.is_empty())
+    {
+        return Err("Task restricts edit targets. Use apply_patch for those targets and read_only: true for commands.".into());
+    }
     let tool = registry.get(&call.name)?;
     let mut prepared = tool.prepare_optional(w, call.arguments.clone(), limits)?;
+    if authority.scope.read_only
+        && matches!(call.name.as_str(), "exec_command" | "run_command")
+        && call.arguments["read_only"] != true
+    {
+        use crate::tools::CommandSpec;
+        let workspace = w.ok_or("Choose a workspace for commands")?;
+        if call.arguments["network"] == true
+            || call.arguments["git_metadata"] == true
+            || forbids_network(&authority.instruction.to_lowercase())
+        {
+            return Err("Task scope is read-only. Use exec_command with read_only: true.".into());
+        }
+        let mut spec: CommandSpec = serde_json::from_value(prepared.payload["spec"].clone())
+            .map_err(|_| "Task scope requires a sandboxed read-only command")?;
+        CommandSpec::validate(
+            call.arguments["executable"].as_str().unwrap_or_default(),
+            &spec.args,
+            &spec.directory,
+            workspace,
+        )
+        .map_err(|_| "Task scope is read-only. Use exec_command with read_only: true.")?;
+        spec.allow_build_outputs();
+        prepared.action = spec.action(workspace, limits.command_seconds);
+        prepared.payload["spec"] = json!(spec);
+    }
     if call.name == "apply_patch" {
+        for change in prepared.payload["changes"].as_array().into_iter().flatten() {
+            let mut target = call.clone();
+            target.arguments["path"] = change["path"].clone();
+            authority.validate(&target)?;
+            authority.patch_requirements.validate_patch(change)?;
+        }
         authority
             .patch_requirements
             .validate_patch(&prepared.payload)?;
@@ -134,19 +177,9 @@ pub(super) fn validate(task: &str, call: &ToolCall) -> Result<()> {
         "apply_patch" => EDIT_RESTRICTIONS.iter().any(|s| text.contains(s)),
         "run_command" | "exec_command" | "write_stdin" => {
             COMMAND_RESTRICTIONS.iter().any(|s| text.contains(s))
+                || (call.arguments["network"] == true && forbids_network(&text))
         }
-        "fetch_url" | "web_search" => [
-            "do not browse",
-            "do not fetch",
-            "do not search the web",
-            "no internet",
-            "no network",
-            "do not access the internet",
-            "without browsing",
-            "offline only",
-        ]
-        .iter()
-        .any(|s| text.contains(s)),
+        "fetch_url" | "web_search" => forbids_network(&text),
         _ => false,
     };
     if blocked {
@@ -154,6 +187,21 @@ pub(super) fn validate(task: &str, call: &ToolCall) -> Result<()> {
     } else {
         Ok(())
     }
+}
+
+fn forbids_network(text: &str) -> bool {
+    [
+        "do not browse",
+        "do not fetch",
+        "do not search the web",
+        "no internet",
+        "no network",
+        "do not access the internet",
+        "without browsing",
+        "offline only",
+    ]
+    .iter()
+    .any(|s| text.contains(s))
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -513,6 +561,10 @@ impl Authority {
         if call.name == "apply_patch" {
             if self.scope.read_only {
                 return Err("Task scope is read-only".into());
+            }
+            if call.arguments.get("path").is_none() && call.arguments["patch"].is_string() {
+                // Structured proposals are checked again against every prepared path.
+                return Ok(());
             }
             let path = call.arguments["path"]
                 .as_str()

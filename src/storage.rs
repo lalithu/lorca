@@ -241,7 +241,15 @@ impl Repository {
             if message.content.is_empty() && message.attachments.is_empty() {
                 continue;
             }
-            let mut wire = json!({"role":message.role,"content":message.content});
+            let content = if message.role == "user"
+                && message.content.trim().is_empty()
+                && !message.attachments.is_empty()
+            {
+                "Describe the attached images."
+            } else {
+                &message.content
+            };
+            let mut wire = json!({"role":message.role,"content":content});
             if !message.attachments.is_empty() {
                 let mut images = vec![];
                 for a in &message.attachments {

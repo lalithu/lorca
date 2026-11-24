@@ -41,7 +41,22 @@ fn routes_turn(request: &Value) -> bool {
 }
 async fn chat(State(s): State<Arc<Server>>, Json(v): Json<Value>) -> Json<Value> {
     s.requests.lock().unwrap().push(v.clone());
-    let message = if routes_turn(&v) {
+    let messages = v["messages"].as_array().unwrap();
+    let asks_for_fixture = messages
+        .iter()
+        .any(|m| m["role"] == "user" && m["content"] == "Inspect the selected fixture, read only.");
+    let needs_folder = v["tools"].as_array().is_some_and(|tools| {
+        tools
+            .iter()
+            .any(|t| t["function"]["name"] == "request_workspace")
+    });
+    let message = if asks_for_fixture {
+        if needs_folder {
+            json!({"role":"assistant","tool_calls":[{"id":"workspace","function":{"name":"request_workspace","arguments":{}}}]})
+        } else {
+            json!({"role":"assistant","content":"The selected fixture is active."})
+        }
+    } else if routes_turn(&v) {
         let messages = v["messages"].as_array().unwrap();
         let input: Value =
             serde_json::from_str(messages.last().unwrap()["content"].as_str().unwrap()).unwrap();
@@ -531,4 +546,116 @@ fn incomplete_and_denied_saved_results_remain_terminal_on_restart() {
         );
         assert!(core.agent().snapshot().is_none());
     }
+}
+
+#[tokio::test]
+async fn first_message_sends_text_and_multiple_images_or_an_image_only_prompt() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    for (prompt, count) in [("What is in these images?", 2), ("", 1)] {
+        let (_store, _w, core, session, server, http) = setup(false).await;
+        let chat = core
+            .snapshot()
+            .sessions
+            .iter()
+            .find(|s| s.id == session)
+            .unwrap()
+            .selected_id
+            .clone();
+        for index in 0..count {
+            let mut data = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new(&mut data)
+                .encode(&[255, index * 120, 0], 1, 1, image::ExtendedColorType::Rgb8)
+                .unwrap();
+            core.command(json!({"op":"importImage","session":session,"conversationId":chat,"name":format!("{index}.jpg"),"data":STANDARD.encode(data)})).await.unwrap();
+        }
+        core.command(json!({"op":"agent_start","session":session,"conversationId":chat,"requestId":lorca::types::id(),"task":prompt})).await.unwrap();
+        assert_eq!(
+            wait(&core, |v| !v.status.active()).await.status,
+            Status::Completed
+        );
+        core.maintenance();
+        {
+            let requests = server.requests.lock().unwrap();
+            let messages = requests
+                .iter()
+                .find_map(|r| r["messages"].as_array())
+                .unwrap();
+            let users: Vec<_> = messages.iter().filter(|m| m["role"] == "user").collect();
+            assert_eq!(users.len(), 1);
+            assert_eq!(
+                users[0]["content"],
+                if prompt.is_empty() {
+                    "Describe the attached images."
+                } else {
+                    prompt
+                }
+            );
+            let images = users[0]["images"].as_array().unwrap();
+            assert_eq!(images.len(), usize::from(count));
+            for encoded in images {
+                let bytes = STANDARD.decode(encoded.as_str().unwrap()).unwrap();
+                assert!(image::load_from_memory(&bytes).is_ok());
+            }
+            if count == 2 {
+                assert_ne!(images[0], images[1]);
+            }
+        }
+        let snapshot = core.snapshot();
+        let message = &snapshot
+            .conversations
+            .iter()
+            .find(|c| c.id == chat)
+            .unwrap()
+            .messages[0];
+        assert_eq!(message.content, prompt);
+        assert_eq!(message.attachments.len(), usize::from(count));
+        http.abort();
+    }
+}
+
+#[tokio::test]
+async fn confirmed_workspace_resumes_the_original_objective_without_fake_user_content() {
+    let (_store, workspace, core, session, server, http) = setup(false).await;
+    let chat = core
+        .snapshot()
+        .sessions
+        .iter()
+        .find(|s| s.id == session)
+        .unwrap()
+        .selected_id
+        .clone();
+    let prompt = "Inspect the selected fixture, read only.";
+    let initial = core.command(json!({"op":"agent_start","session":session,"conversationId":chat,"requestId":lorca::types::id(),"task":prompt})).await.unwrap();
+    assert_eq!(
+        wait(&core, |v| !v.status.active()).await.status,
+        Status::WaitingForInput
+    );
+    core.maintenance();
+    let mut resume = json!({"op":"agent_start","session":session,"conversationId":chat,"requestId":lorca::types::id(),"task":"","workspace":workspace.0,"workspaceResume":true,"continueTaskId":"wrong-task"});
+    assert!(core.command(resume.clone()).await.is_err());
+    resume["continueTaskId"] = initial["taskId"].clone();
+    let accepted = core.command(resume.clone()).await.unwrap();
+    let resumed = wait(&core, |v| !v.status.active() && v.id != initial["taskId"]).await;
+    assert_eq!(resumed.status, Status::Completed);
+    core.maintenance();
+    assert_eq!(
+        core.command(resume).await.unwrap()["taskId"],
+        accepted["taskId"]
+    );
+    let requests = server.requests.lock().unwrap();
+    let last = requests
+        .iter()
+        .rev()
+        .find_map(|r| r["messages"].as_array())
+        .unwrap();
+    let users: Vec<_> = last.iter().filter(|m| m["role"] == "user").collect();
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0]["content"], prompt);
+    assert!(last.iter().filter(|m| m["role"] == "system").any(|m| {
+        m["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(workspace.0.canonicalize().unwrap().to_str().unwrap())
+    }));
+    http.abort();
 }

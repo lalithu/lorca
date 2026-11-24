@@ -332,11 +332,17 @@ impl Requirements {
             }
             match m["tool_name"].as_str() {
                 Some("apply_patch") if result["ok"] == true && result["verified"] == true => {
-                    if let Some(path) = result["path"].as_str() {
-                        patches.push(normalized_path(path));
-                        patch_bytes.insert(normalized_path(path), result["bytes"].as_u64());
-                        if !already_executed {
-                            last_edit = Some(index);
+                    let changes = result["changes"]
+                        .as_array()
+                        .map_or_else(|| std::slice::from_ref(&result), Vec::as_slice);
+                    for change in changes {
+                        if let Some(path) = change["path"].as_str() {
+                            let path = normalized_path(path);
+                            patch_bytes.insert(path.clone(), change["bytes"].as_u64());
+                            patches.push(path);
+                            if !already_executed {
+                                last_edit = Some(index);
+                            }
                         }
                     }
                 }

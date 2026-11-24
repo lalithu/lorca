@@ -3,17 +3,19 @@ pub struct ListDirectory;
 impl Tool for ListDirectory {
     fn schema(&self) -> Value {
         let (description, properties, required) = (
-            "List files and folders in a workspace or repository directory, including hidden names, bounded to 200 immediate entries. An empty untruncated result means this directory is empty. Paths are relative to the workspace; use . for its root.",
+            "List files and folders in a workspace or repository directory, including hidden names, bounded to 200 immediate entries. An empty untruncated result means this directory is empty. Paths may be relative or absolute within the workspace; use . for its root.",
             json!({"path":{"type":"string"}}),
             vec!["path"],
         );
         schema("list_directory", description, properties, required)
     }
-    fn prepare(&self, _w: &Workspace, arguments: Value, _limits: &Limits) -> Result<Prepared> {
+    fn prepare(&self, w: &Workspace, arguments: Value, _limits: &Limits) -> Result<Prepared> {
         check_size(&arguments)?;
         let action = arguments.clone();
-        let payload = arguments;
+        let mut payload = arguments;
         {
+            let a: PathArgs = parse(payload.clone())?;
+            payload["path"] = json!(w.relative(&a.path)?);
             let a: PathArgs = parse(payload.clone())?;
             Workspace::path(&a.path)?;
         }

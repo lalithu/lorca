@@ -181,7 +181,8 @@ impl Core {
                 return Err("The previous agent result could not be saved. Reconnect before starting another task.".into());
             }
         }
-        let effective_task = if task.is_empty() {
+        let workspace_resume = v["workspaceResume"].as_bool().unwrap_or(false);
+        let mut effective_task = if task.is_empty() {
             "Describe the attached images.".to_string()
         } else {
             task.to_string()
@@ -208,11 +209,6 @@ impl Core {
                                 Some("incomplete" | "failed" | "cancelled")
                             )))
                     && ((workspace.is_some()
-                        && m.extra
-                            .get("agentWorkspace")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .is_empty()
                         && m.extra.get("agentStatus") == Some(&json!("waiting_for_input"))
                         && m.extra
                             .get("agentContract")
@@ -298,14 +294,34 @@ impl Core {
         if v["continueTaskId"].as_str().is_some() && parent.as_ref() != v.get("continueTaskId") {
             return Err("That task cannot be continued here. Use the same chat and workspace; denied tasks remain denied.".into());
         }
+        if workspace_resume {
+            let previous = pending_task
+                .as_ref()
+                .filter(|p| {
+                    !p.completed
+                        && p.contract
+                            .as_ref()
+                            .is_some_and(|c| c["workspaceRequested"] == true)
+                })
+                .ok_or("No pending workspace request for this conversation")?;
+            if workspace.is_none()
+                || !task.is_empty()
+                || v["continueTaskId"].as_str() != Some(&previous.id)
+            {
+                return Err("Workspace selection must resume its original task".into());
+            }
+            effective_task.clone_from(&previous.objective);
+        }
         let mut submitted_chat = ci.map(|i| s.view.conversations[i].clone());
         let mut history = vec![];
         if let Some(chat) = &mut submitted_chat {
-            if task.is_empty() && chat.draft_images.is_empty() {
+            if !workspace_resume && task.is_empty() && chat.draft_images.is_empty() {
                 return Err("Write a message or attach an image.".into());
             }
             let mut message = Message::new("user", task.into());
-            message.attachments = std::mem::take(&mut chat.draft_images);
+            if !workspace_resume {
+                message.attachments = std::mem::take(&mut chat.draft_images);
+            }
             chat.messages.push(message);
             history = self.repository.wire_messages(chat)?;
         }
@@ -361,7 +377,14 @@ impl Core {
             message.extra.extend([
                 ("agentTaskId".into(), json!(id)),
                 ("agentRequestId".into(), json!(request)),
-                ("agentKind".into(), json!("request")),
+                (
+                    "agentKind".into(),
+                    json!(if workspace_resume {
+                        "workspace_resume"
+                    } else {
+                        "request"
+                    }),
+                ),
                 ("agentParent".into(), json!(parent)),
                 ("agentObjective".into(), json!(effective_task)),
                 (
@@ -372,7 +395,7 @@ impl Core {
             if chat.messages.len() == 1 && chat.title == "New chat" {
                 chat.title = task.chars().take(60).collect();
             }
-            if chat.draft.trim() == task {
+            if !workspace_resume && chat.draft.trim() == task {
                 chat.draft.clear();
             }
             chat.updated_at = now();

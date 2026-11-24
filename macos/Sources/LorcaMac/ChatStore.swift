@@ -23,7 +23,7 @@ final class ChatStore: ObservableObject {
     let jobs = JobAppsStore()
     var agentWorkspace: URL? { agent.workspaces[library.selectedID] }
     var currentAgentActive: Bool { agent.active?.conversationId == library.selectedID }
-    var messages: [ChatMessage] { library.current.messages }
+    var messages: [ChatMessage] { library.current.messages.filter { $0.agentKind != "workspace_resume" } }
     var draft: String { get { library.current.draft } set { if newValue != "Continue the unfinished task." { continuation = nil }; library.setDraft(newValue) } }
     var draftImages: [ChatAttachment] { library.current.draftImages }
     var imageStore: AttachmentStore { AttachmentStore(directory: backend.root.appendingPathComponent("attachments")) }
@@ -324,24 +324,47 @@ final class ChatStore: ObservableObject {
             _ = await self.perform(["op": "snapshot"])
         }
     }
-    func chooseWorkspaceForTask() {
+    func chooseWorkspaceForTask(useProposed: Bool = false) {
         guard !agent.busy, let id = messages.last?.agentTaskId, let task = agent.runs[id],
-              task.conversationId == library.selectedID,
-              task.status == .waitingForInput, task.workspace.isEmpty else { return }
+              task.conversationId == library.selectedID, task.status == .waitingForInput,
+              let clarification = AgentPresentation.clarification(task, events: task.events),
+              clarification["needsWorkspace"].boolean == true else { return }
+        let conversation = library.selectedID
+        if useProposed, let directory = clarification["directory"].string {
+            let url = URL(fileURLWithPath: directory, isDirectory: true)
+            if url.resolvingSymlinksInPath().path == url.standardizedFileURL.path {
+                resumeInWorkspace(url, task: id, conversation: conversation)
+                return
+            }
+        }
         let panel = NSOpenPanel()
         panel.title = "Choose a folder for this conversation"
         panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
-        let conversation = library.selectedID
         guard let window = NSApp.keyWindow else { return }
         panel.beginSheetModal(for: window) { response in
-            guard response == .OK, let url = panel.url,
-                  self.library.selectedID == conversation, self.messages.last?.agentTaskId == task.id,
-                  !self.agent.busy else { return }
-            self.agent.workspaces[conversation] = url
-            if self.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                self.draft = "Use the selected folder to continue the task."
+            if response == .OK, let url = panel.url {
+                self.resumeInWorkspace(url, task: id, conversation: conversation)
             }
-            self.send()
+        }
+    }
+
+    private func resumeInWorkspace(_ url: URL, task: String, conversation: UUID) {
+        guard library.selectedID == conversation, messages.last?.agentTaskId == task,
+              ready, isConnected, !closing, !isSelectingModel, !isManagingModel,
+              !modelSession.isLoading, !jobs.running, agent.reserveSubmission() else { return }
+        let model = selectedModel, effort = thinkingEffort.rawValue, contextWindow = selectedContextWindow
+        let configureContext = fixedContextWindow != nil
+        let preceding = pending
+        pending = Task { [weak self] in
+            await preceding?.value
+            guard let self, !self.closing, !Task.isCancelled else { return }
+            let accepted = await self.agent.submit(task: "", workspace: url, conversation: conversation,
+                request: UUID(), model: model, effort: effort, continueTaskID: task, contextWindow: contextWindow,
+                configureContext: configureContext, workspaceResume: true)
+            if accepted {
+                self.agent.workspaces[conversation] = url.resolvingSymlinksInPath()
+            }
+            _ = await self.perform(["op": "snapshot"])
         }
     }
     func sendChat() { send() }

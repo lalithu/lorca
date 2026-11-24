@@ -36,9 +36,3 @@ pub(super) fn dot() -> String {
 pub(super) fn parse<T: serde::de::DeserializeOwned>(v: Value) -> Result<T> {
     serde_json::from_value(v).map_err(|e| format!("Invalid arguments: {e}"))
 }
-pub(super) fn string(v: &Value, key: &str) -> Result<String> {
-    v[key]
-        .as_str()
-        .map(String::from)
-        .ok_or_else(|| format!("Missing {key}"))
-}

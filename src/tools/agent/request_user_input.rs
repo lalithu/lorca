@@ -74,12 +74,17 @@ impl Tool for RequestUserInput {
 
 /// A folder choice grants a capability on the next task; it never runs a file action.
 pub struct RequestWorkspace;
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceArgs {
+    directory: Option<String>,
+}
 impl Tool for RequestWorkspace {
     fn schema(&self) -> Value {
         schema(
             "request_workspace",
-            "Ask the user to choose a local folder when their task requires file or command tools. Pauses until they choose; do not invent a path.",
-            json!({}),
+            "Request access to a local directory. Supply the known absolute directory when possible; otherwise ask the user to choose. Pauses until confirmed.",
+            json!({"directory":{"type":"string","description":"Known absolute directory (use the parent for a file)."}}),
             vec![],
         )
     }
@@ -87,11 +92,23 @@ impl Tool for RequestWorkspace {
         self.prepare_optional(None, a, l)
     }
     fn prepare_optional(&self, _: Option<&Workspace>, a: Value, _: &Limits) -> Result<Prepared> {
-        if a.as_object().is_none_or(|o| !o.is_empty()) {
-            return Err("request_workspace takes no arguments".into());
+        let args: WorkspaceArgs = parse(a)?;
+        if let Some(path) = args.directory.as_deref() {
+            let path = std::path::Path::new(path);
+            if !path.is_absolute()
+                || path.parent().is_none()
+                || path.as_os_str().len() > 2048
+                || path.to_string_lossy().chars().any(char::is_control)
+                || path.components().any(|c| {
+                    matches!(c, std::path::Component::ParentDir) || c.as_os_str() == ".git"
+                })
+            {
+                return Err("Invalid arguments: provide an absolute directory without traversal or Git metadata".into());
+            }
         }
         prepared(
-            json!({"question":"Choose a folder so I can work with its files.","needsWorkspace":true}),
+            json!({"question":"Choose or confirm a folder so I can work with its files.",
+            "needsWorkspace":true,"directory":args.directory}),
             false,
         )
     }
@@ -118,7 +135,7 @@ impl Tool for RequestWorkspace {
                 return Err("Cancelled".into());
             }
             Ok(
-                json!({"ok":true,"needsUserInput":true,"needsWorkspace":true,"question":p.payload["question"]}),
+                json!({"ok":true,"needsUserInput":true,"needsWorkspace":true,"question":p.payload["question"],"directory":p.payload["directory"]}),
             )
         })
     }

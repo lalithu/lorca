@@ -13,6 +13,7 @@ pub use registry::{Authority, Category, Registry};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
+pub(crate) use terminal::command::CommandSpec;
 use tokio::sync::watch;
 pub use workspace::Workspace;
 pub struct Prepared {

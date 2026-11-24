@@ -153,6 +153,48 @@ impl Workspace {
         }
         Ok(p)
     }
+    pub(crate) fn relative(&self, path: &str) -> Result<String> {
+        let candidate = Path::new(path);
+        let relative = if candidate.is_absolute() {
+            candidate.strip_prefix(&self.root).map_err(
+                |_| "Path is outside the active workspace. Use request_workspace for access.",
+            )?
+        } else {
+            candidate
+        };
+        let relative = if relative.as_os_str().is_empty() && candidate.is_absolute() {
+            "."
+        } else {
+            relative.to_str().ok_or("Expected a UTF-8 path")?
+        };
+        let normalized: PathBuf = Self::path(relative)?
+            .components()
+            .filter(|component| *component != Component::CurDir)
+            .collect();
+        Ok(if normalized.as_os_str().is_empty() {
+            ".".into()
+        } else {
+            normalized.to_string_lossy().into_owned()
+        })
+    }
+    pub(super) fn command_directory(&self, path: &str) -> Result<PathBuf> {
+        let path = Self::path(path)?;
+        let canonical = self
+            .dir
+            .canonicalize(path)
+            .map_err(|e| format!("Working directory: {e}"))?;
+        self.dir
+            .open_dir(&canonical)
+            .map_err(|e| format!("Working directory: {e}"))?;
+        let absolute = self.root.join(canonical);
+        let current = absolute
+            .canonicalize()
+            .map_err(|_| "Workspace directory changed")?;
+        if current != absolute {
+            return Err("Workspace directory changed".into());
+        }
+        Ok(current)
+    }
     pub fn directory(&self, path: &str) -> Result<Dir> {
         self.dir
             .open_dir(Self::path(path)?)
@@ -311,7 +353,64 @@ impl Workspace {
         let (parent, name) = self.parent(path)?;
         Self::existing(&parent, &name)
     }
+    pub(super) fn patch_permissions(
+        &self,
+        path: &str,
+        expected: &Option<String>,
+    ) -> Result<Option<cap_std::fs::Permissions>> {
+        let (parent, name) = self.parent(path)?;
+        if Self::existing(&parent, &name)? != *expected {
+            return Err(format!(
+                "{path} changed since proposal; request a fresh patch and approval"
+            ));
+        }
+        expected
+            .as_ref()
+            .map(|_| {
+                parent
+                    .symlink_metadata(&name)
+                    .map(|m| m.permissions())
+                    .map_err(|e| e.to_string())
+            })
+            .transpose()
+    }
+
+    pub(super) fn write_patch(
+        &self,
+        path: &str,
+        expected: &Option<String>,
+        text: Option<&str>,
+        mode: Option<cap_std::fs::Permissions>,
+    ) -> Result<()> {
+        match text {
+            Some(text) => self.replace_with_permissions(path, expected, text, mode),
+            None => {
+                let (parent, name) = self.parent(path)?;
+                if expected.is_none() || Self::existing(&parent, &name)? != *expected {
+                    return Err(
+                        "File changed since proposal; request a fresh patch and approval".into(),
+                    );
+                }
+                parent.remove_file(&name).map_err(|e| e.to_string())?;
+                if Self::existing(&parent, &name)?.is_some() {
+                    return Err("Deletion verification failed".into());
+                }
+                Ok(())
+            }
+        }
+    }
+
     pub fn replace(&self, path: &str, expected: &Option<String>, text: &str) -> Result<()> {
+        self.replace_with_permissions(path, expected, text, None)
+    }
+
+    fn replace_with_permissions(
+        &self,
+        path: &str,
+        expected: &Option<String>,
+        text: &str,
+        mode: Option<cap_std::fs::Permissions>,
+    ) -> Result<()> {
         let (parent, name) = self.parent(path)?;
         if Self::existing(&parent, &name)? != *expected {
             return Err("File changed since proposal; request a fresh patch and approval".into());
@@ -321,9 +420,10 @@ impl Workspace {
             let mut opts = OpenOptions::new();
             opts.write(true).create_new(true);
             let mut file = parent.open_with(&tmp, &opts).map_err(|e| e.to_string())?;
-            if let Ok(old) = parent.metadata(&name) {
-                file.set_permissions(old.permissions())
-                    .map_err(|e| e.to_string())?;
+            if let Some(mode) =
+                mode.or_else(|| parent.symlink_metadata(&name).ok().map(|m| m.permissions()))
+            {
+                file.set_permissions(mode).map_err(|e| e.to_string())?;
             }
             file.write_all(text.as_bytes())
                 .and_then(|_| file.sync_all())

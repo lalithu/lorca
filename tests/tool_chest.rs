@@ -129,16 +129,16 @@ fn schemas_reject_unknown_arguments_and_invalid_plans() {
     let t = Temp::new();
     let w = Workspace::new(&t.0).unwrap();
     for name in ["run_command", "exec_command"] {
-        assert!(
-            r.get(name)
-                .unwrap()
-                .prepare(
-                    &w,
-                    json!({"executable":"sh","arguments":["-c","echo bad"]}),
-                    &l
-                )
-                .is_err()
+        let prepared = r.get(name).unwrap().prepare(
+            &w,
+            json!({"executable":"sh","arguments":["-c","echo hello"]}),
+            &l,
         );
+        if name == "exec_command" {
+            assert!(prepared.unwrap().approval);
+        } else {
+            assert!(prepared.is_err());
+        }
         assert!(
             r.get(name)
                 .unwrap()
@@ -380,8 +380,288 @@ fn registered_terminal_schema_does_not_coerce_malformed_arguments() {
         json!({"command":"cd /tmp && cargo test"}),
         json!({"arguments":"[\"cargo\",\"test\"]","directory":"."}),
         json!({"executable":"cargo","arguments":"[\"test\"]"}),
-        json!({"executable":"sh","arguments":["-c","cargo test"]}),
     ] {
         assert!(tool.prepare(&w, args, &Limits::default()).is_err());
     }
+}
+
+#[tokio::test]
+async fn multi_file_patch_reviews_and_verifies_multiple_hunks_creation_and_deletion() {
+    let t = Temp::new();
+    std::fs::write(t.0.join("a.txt"), "one\nkeep\nthree\n").unwrap();
+    std::fs::write(t.0.join("obsolete.txt"), "obsolete\n").unwrap();
+    let w = Workspace::new(&t.0).unwrap();
+    let tool = Registry::default().get("apply_patch").unwrap();
+    let patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-one\n+first\n@@\n-three\n+last\n*** Add File: new.txt\n+created\n*** Delete File: obsolete.txt\n*** End Patch";
+    let l = Limits::default();
+    let proposal = tool.prepare(&w, json!({"patch":patch}), &l).unwrap();
+    assert!(proposal.approval);
+    let preview = proposal.action["diff"].as_str().unwrap();
+    assert!(preview.contains("@@ -1,1 +1,1 @@\n-one\n+first"));
+    assert!(preview.contains("@@ -3,1 +3,1 @@\n-three\n+last"));
+    assert!(preview.contains("+++ /dev/null"));
+    assert!(!t.0.join("new.txt").exists());
+    let (_tx, c) = watch::channel(false);
+    let result = tool
+        .execute(&w, &proposal, &l, c, &mut |_| {})
+        .await
+        .unwrap();
+    assert_eq!(result["verified"], true);
+    assert_eq!(result["changes"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        std::fs::read_to_string(t.0.join("a.txt")).unwrap(),
+        "first\nkeep\nlast\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(t.0.join("new.txt")).unwrap(),
+        "created\n"
+    );
+    assert!(!t.0.join("obsolete.txt").exists());
+}
+
+#[tokio::test]
+async fn patch_rejects_ambiguous_context_and_rechecks_every_file_after_approval() {
+    let t = Temp::new();
+    std::fs::write(t.0.join("a.txt"), "same\nsame\n").unwrap();
+    std::fs::write(t.0.join("b.txt"), "before\n").unwrap();
+    let w = Workspace::new(&t.0).unwrap();
+    let tool = Registry::default().get("apply_patch").unwrap();
+    let l = Limits::default();
+    let ambiguous = "*** Begin Patch\n*** Update File: a.txt\n@@\n-same\n+changed\n*** End Patch";
+    assert!(
+        tool.prepare(&w, json!({"patch":ambiguous}), &l)
+            .err()
+            .unwrap()
+            .contains("ambiguous")
+    );
+    let patch = "*** Begin Patch\n*** Add File: new.txt\n+created\n*** Update File: b.txt\n@@\n-before\n+after\n*** End Patch";
+    let proposal = tool.prepare(&w, json!({"patch":patch}), &l).unwrap();
+    std::fs::write(t.0.join("b.txt"), "external edit\n").unwrap();
+    let (_tx, c) = watch::channel(false);
+    let error = tool
+        .execute(&w, &proposal, &l, c, &mut |_| {})
+        .await
+        .unwrap_err();
+    assert!(error.contains("changed since proposal"));
+    assert!(!t.0.join("new.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(t.0.join("b.txt")).unwrap(),
+        "external edit\n"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn patch_rolls_back_prior_files_after_a_late_write_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = Temp::new();
+    let locked = t.0.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    let w = Workspace::new(&t.0).unwrap();
+    let tool = Registry::default().get("apply_patch").unwrap();
+    let l = Limits::default();
+    let patch = "*** Begin Patch\n*** Delete File: a.txt\n*** Add File: locked/new.txt\n+created\n*** End Patch";
+    let proposal = tool.prepare(&w, json!({"patch":patch}), &l).unwrap();
+    let mode = std::fs::metadata(t.0.join("a.txt"))
+        .unwrap()
+        .permissions()
+        .mode();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let (_tx, c) = watch::channel(false);
+    let result = tool.execute(&w, &proposal, &l, c, &mut |_| {}).await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(result.unwrap_err().contains("locked/new.txt"));
+    assert_eq!(
+        std::fs::read_to_string(t.0.join("a.txt")).unwrap(),
+        "before"
+    );
+    assert_eq!(
+        std::fs::metadata(t.0.join("a.txt"))
+            .unwrap()
+            .permissions()
+            .mode(),
+        mode
+    );
+    assert!(!locked.join("new.txt").exists());
+}
+
+#[tokio::test]
+async fn explicit_paths_remain_inside_the_granted_workspace() {
+    let t = Temp::new();
+    let other = Temp::new();
+    let w = Workspace::new(&t.0).unwrap();
+    let tool = Registry::default().get("read_file").unwrap();
+    let l = Limits::default();
+    let proposal = tool
+        .prepare(&w, json!({"path":w.root.join("a.txt")}), &l)
+        .unwrap();
+    let (_tx, c) = watch::channel(false);
+    let result = tool
+        .execute(&w, &proposal, &l, c, &mut |_| {})
+        .await
+        .unwrap();
+    assert_eq!(result["content"], "before");
+    let error = tool
+        .prepare(
+            &w,
+            json!({"path":other.0.canonicalize().unwrap().join("a.txt")}),
+            &l,
+        )
+        .err()
+        .unwrap();
+    assert!(error.contains("request_workspace"));
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn general_command_runs_only_after_exact_approval_and_denial_cannot_run_a_batch() {
+    for decision in [Decision::AllowOnce, Decision::Deny] {
+        let t = Temp::new();
+        let agent = Arc::new(Agent::default());
+        let mock = Mock::new(vec![(
+            "exec_command",
+            json!({"executable":"sh","arguments":["-c","printf ok > command.txt"]}),
+        )]);
+        let final_turn = if matches!(decision, Decision::Deny) {
+            // Even if the model requests a different write during reconsideration,
+            // the denial follow-up must never dispatch a tool.
+            lorca::provider::agent::parse_turn(json!({"role":"assistant","tool_calls":[{"function":{"name":"apply_patch","arguments":{"path":"alternate.txt","old_text":"","new_text":"bad"}}}]})).unwrap()
+        } else {
+            lorca::provider::agent::parse_turn(
+                json!({"role":"assistant","content":"Command finished."}),
+            )
+            .unwrap()
+        };
+        mock.0.lock().unwrap().push_back(final_turn);
+        let id = agent
+            .start(
+                "test",
+                "Run the fixture command",
+                &t.0,
+                Limits::default(),
+                mock,
+                Registry::default(),
+            )
+            .unwrap();
+        let pending = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(approval) = agent.snapshot().and_then(|v| v.approval) {
+                    break approval;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!t.0.join("command.txt").exists());
+        assert_eq!(
+            pending.action["arguments"],
+            json!(["-c", "printf ok > command.txt"])
+        );
+        let denied = matches!(decision, Decision::Deny);
+        agent.decide("test", &id, &pending.id, decision).unwrap();
+        let outcome = settled(&agent).await;
+        if denied {
+            assert_eq!(outcome.status, Status::Denied);
+            assert!(!t.0.join("command.txt").exists());
+            assert!(!t.0.join("alternate.txt").exists());
+            assert!(
+                !outcome
+                    .events
+                    .iter()
+                    .any(|event| event.kind == "tool_started")
+            );
+        } else {
+            assert_eq!(outcome.status, Status::Completed);
+            assert_eq!(
+                std::fs::read_to_string(t.0.join("command.txt")).unwrap(),
+                "ok"
+            );
+            assert!(
+                outcome
+                    .events
+                    .iter()
+                    .any(|event| event.data["result"]["exitCode"] == 0)
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn git_diff_and_status_work_in_a_linked_worktree_with_scoped_metadata() {
+    use std::process::Command;
+    let base = Temp::new();
+    let repo = base.0.join("repo");
+    let linked = base.0.join("linked");
+    std::fs::create_dir(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("/usr/bin/git")
+            .current_dir(&repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    std::fs::write(repo.join("file.txt"), "base\n").unwrap();
+    git(&["add", "file.txt"]);
+    git(&[
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-qm",
+        "base",
+    ]);
+    git(&[
+        "worktree",
+        "add",
+        "-qb",
+        "fixture-linked",
+        linked.to_str().unwrap(),
+    ]);
+    std::fs::write(linked.join("file.txt"), "staged\n").unwrap();
+    git(&["-C", linked.to_str().unwrap(), "add", "file.txt"]);
+    std::fs::write(linked.join("file.txt"), "working\n").unwrap();
+
+    let workspace = Workspace::new(&linked).unwrap();
+    let registry = Registry::default();
+    let tool = registry.get("git_diff").unwrap();
+    let limits = Limits::default();
+    let (_tx, c) = watch::channel(false);
+    for (staged, expected) in [(false, "+working"), (true, "+staged")] {
+        let prepared = tool
+            .prepare(&workspace, json!({"staged":staged}), &limits)
+            .unwrap();
+        assert!(prepared.approval);
+        assert!(
+            prepared.action["scope"]
+                .as_str()
+                .unwrap()
+                .contains("/repo/.git")
+        );
+        let result = tool
+            .execute(&workspace, &prepared, &limits, c.clone(), &mut |_| {})
+            .await
+            .unwrap();
+        assert_eq!(result["exitCode"], 0, "{result}");
+        assert!(result["output"].as_str().unwrap().contains(expected));
+    }
+    let status = registry.get("exec_command").unwrap();
+    let prepared = status.prepare(&workspace,json!({"executable":"git","arguments":["status","--short"],"read_only":true,"git_metadata":true}),&limits).unwrap();
+    assert!(prepared.approval);
+    let result = status
+        .execute(&workspace, &prepared, &limits, c, &mut |_| {})
+        .await
+        .unwrap();
+    assert_eq!(result["exitCode"], 0, "{result}");
+    assert!(result["output"].as_str().unwrap().contains("MM file.txt"));
 }

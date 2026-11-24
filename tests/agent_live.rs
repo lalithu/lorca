@@ -62,9 +62,12 @@ async fn run(task: &str) -> (TaskView, Fixture) {
                     .unwrap();
                 let args = &request.data["arguments"];
                 let exact = a.tool == "apply_patch"
-                    && args["path"] == "README.md"
-                    && args["old_text"] == ""
-                    && args["new_text"] == "";
+                    && a.action["path"] == "README.md"
+                    && a.action["changeKind"] == "Created"
+                    && (args["new_text"] == ""
+                        || a.action["diff"]
+                            .as_str()
+                            .is_some_and(|diff| diff.lines().last() == Some("@@ -0,0 +0,0 @@")));
                 agent
                     .decide(
                         "live-test",
@@ -105,8 +108,10 @@ async fn run(task: &str) -> (TaskView, Fixture) {
 #[tokio::test]
 #[ignore = "Requires an installed Ollama model and explicitly permits disposable file writes"]
 async fn qwen_creates_empty_readme_without_cargo_or_clarification() {
-    let (view, root) =
-        run("Create an empty README.md; do not populate it or do anything else.").await;
+    let (view, root) = run(
+        "Use apply_patch to create an empty README.md; do not populate it or do anything else.",
+    )
+    .await;
     assert_eq!(view.status, Status::Completed, "{:?}", view.result);
     assert_eq!(
         std::fs::metadata(root.0.join("README.md")).unwrap().len(),

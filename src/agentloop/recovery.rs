@@ -27,8 +27,7 @@ pub(super) async fn read_file(
     cancel: watch::Receiver<bool>,
     authority: &authority::Authority,
 ) -> Result<Value> {
-    let path = path_key(call.arguments["path"].as_str().ok_or("Missing read path")?)
-        .ok_or("Recovery requires a relative workspace path")?;
+    let path = workspace.relative(call.arguments["path"].as_str().ok_or("Missing read path")?)?;
     let requested = std::path::Path::new(&path);
     let parent = requested
         .parent()

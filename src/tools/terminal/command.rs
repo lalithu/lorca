@@ -1,5 +1,6 @@
 use crate::agent_types::*;
 use crate::tools::Workspace;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -13,11 +14,18 @@ use tokio::{
 };
 
 pub const OUTPUT_LIMIT: usize = 16 * 1024;
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CommandSpec {
     pub executable: PathBuf,
     pub args: Vec<String>,
     pub directory: String,
+    working_directory: PathBuf,
+    binary_identity: Value,
+    pub read_only: bool,
+    pub network: bool,
+    pub git_metadata: bool,
+    build_only: bool,
+    linked_git: Option<GitLocation>,
 }
 impl CommandSpec {
     pub fn validate(
@@ -26,7 +34,6 @@ impl CommandSpec {
         directory: &str,
         workspace: &Workspace,
     ) -> Result<Self> {
-        workspace.directory(directory)?;
         // No shell, interpreter, user-supplied binary, cargo aliases, arbitrary config,
         // networking or destructive git commands. Project build scripts still run, hence
         // every invocation additionally requires approval AND an inherited OS sandbox.
@@ -69,20 +76,190 @@ impl CommandSpec {
                 );
             }
         };
-        if !binary.is_file() {
-            return Err("Approved executable is unavailable".into());
+        Self::new(binary, args, directory, workspace)
+    }
+    pub fn general(
+        executable: &str,
+        args: &[String],
+        directory: &str,
+        workspace: &Workspace,
+    ) -> Result<Self> {
+        if executable.is_empty()
+            || executable.chars().any(char::is_control)
+            || args.iter().any(|arg| arg.contains('\0'))
+        {
+            return Err("Supply an executable and separate JSON arguments".into());
         }
+        let directory = workspace.relative(directory)?;
+        let cwd = workspace.command_directory(&directory)?;
+        let name = Path::new(executable);
+        let binary = if name.is_absolute() {
+            if !executable_in_scope(name, workspace) {
+                return Err(
+                    "Executable is outside the workspace and supported system toolchain paths"
+                        .into(),
+                );
+            }
+            name.to_owned()
+        } else if executable.contains('/') {
+            cwd.join(Workspace::path(executable)?)
+        } else {
+            search_path().into_iter().map(|dir| dir.join(name))
+                .find(|path| binary_identity(path).is_ok())
+                .ok_or_else(|| format!("Executable {executable} was not found. Install it or supply its absolute path."))?
+        };
+        let target = binary
+            .canonicalize()
+            .map_err(|e| format!("Resolve executable: {e}"))?;
+        if !executable_in_scope(&target, workspace) {
+            return Err(
+                "Executable resolves outside the workspace and supported toolchain paths".into(),
+            );
+        }
+        Self::new(binary, args, &directory, workspace)
+    }
+    fn new(
+        executable: PathBuf,
+        args: &[String],
+        directory: &str,
+        workspace: &Workspace,
+    ) -> Result<Self> {
+        let working_directory = workspace.command_directory(directory)?;
+        let binary_identity = binary_identity(&executable)?;
         Ok(Self {
-            executable: binary,
+            executable,
             args: args.to_vec(),
             directory: directory.into(),
+            working_directory,
+            binary_identity,
+            read_only: false,
+            network: false,
+            git_metadata: false,
+            build_only: false,
+            linked_git: None,
         })
     }
-    pub fn action(&self, workspace: &Workspace, seconds: u64) -> Value {
-        json!({"executable":self.executable,"arguments":self.args,"workingDirectory":workspace.root.join(&self.directory),
-            "timeoutSeconds":seconds,"outputLimitBytes":OUTPUT_LIMIT,
-            "scope":"OS sandbox: workspace build outputs and private temp writes; toolchain/cache reads; loopback networking only. Project build scripts and tests execute."})
+    pub fn with_git_metadata(&mut self, workspace: &Workspace) -> Result<()> {
+        self.git_metadata = true;
+        if let Some(location) = git_location(workspace, &self.working_directory)?
+            && !location.common.starts_with(&workspace.root)
+        {
+            self.linked_git = Some(location);
+        }
+        Ok(())
     }
+    pub(crate) fn allow_build_outputs(&mut self) {
+        self.build_only = true;
+        self.read_only = true;
+    }
+    fn revalidate(&self, workspace: &Workspace) -> Result<()> {
+        if workspace.command_directory(&self.directory)? != self.working_directory
+            || binary_identity(&self.executable)? != self.binary_identity
+        {
+            return Err(
+                "Executable or working directory changed since approval; propose the command again"
+                    .into(),
+            );
+        }
+        if let Some(expected) = &self.linked_git
+            && (git_location(workspace, &self.working_directory)?.as_ref() != Some(expected)
+                || expected.directory.canonicalize().ok().as_ref() != Some(&expected.directory)
+                || git_link(&expected.directory.join("commondir"))? != "../.."
+                || expected
+                    .directory
+                    .join(git_link(&expected.directory.join("gitdir"))?)
+                    .canonicalize()
+                    .ok()
+                    .as_ref()
+                    != Some(&expected.root.join(".git")))
+        {
+            return Err("Linked Git metadata does not match the approved worktree".into());
+        }
+        Ok(())
+    }
+    pub fn action(&self, _workspace: &Workspace, seconds: u64) -> Value {
+        let files = if self.build_only {
+            "workspace read-only except a new Cargo.lock; Cargo output uses temporary storage"
+        } else if self.read_only {
+            "workspace read-only"
+        } else if self.git_metadata {
+            "workspace and approved Git metadata writable"
+        } else {
+            "workspace writable, Git metadata protected"
+        };
+        let network = if self.network {
+            "outbound networking allowed"
+        } else {
+            "outbound networking blocked"
+        };
+        let linked = self
+            .linked_git
+            .as_ref()
+            .map(|git| format!(" Linked Git metadata: {}.", git.common.display()))
+            .unwrap_or_default();
+        json!({"executable":self.executable,"arguments":self.args,"workingDirectory":self.working_directory,
+            "timeoutSeconds":seconds,"outputLimitBytes":OUTPUT_LIMIT,
+            "readOnly":self.read_only,"network":self.network,"gitMetadata":self.git_metadata,
+            "scope":format!("OS sandbox: {files}; {network}; private temporary home and toolchain reads. Scripts and build hooks can run.{linked}")})
+    }
+}
+
+fn executable_in_scope(path: &Path, workspace: &Workspace) -> bool {
+    path.starts_with(&workspace.root)
+        || [
+            "/opt/homebrew",
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/System",
+            "/Library/Developer",
+            "/Applications/Xcode.app",
+        ]
+        .iter()
+        .any(|root| path.starts_with(root))
+        || std::env::var_os("HOME").is_some_and(|home| {
+            let home = PathBuf::from(home);
+            path.starts_with(home.join(".cargo/bin")) || path.starts_with(home.join(".rustup"))
+        })
+}
+
+fn search_path() -> Vec<PathBuf> {
+    let mut paths = vec![
+        PathBuf::from("/opt/homebrew/bin"),
+        "/usr/local/bin".into(),
+        "/usr/bin".into(),
+        "/bin".into(),
+        "/usr/sbin".into(),
+        "/sbin".into(),
+    ];
+    if let Some(home) = std::env::var_os("HOME") {
+        paths.insert(0, PathBuf::from(home).join(".cargo/bin"));
+    }
+    paths
+}
+
+fn binary_identity(path: &Path) -> Result<Value> {
+    let meta =
+        std::fs::metadata(path).map_err(|e| format!("Executable {}: {e}", path.display()))?;
+    if !meta.is_file() {
+        return Err("Executable must be a regular file".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.mode() & 0o111 == 0 {
+            return Err("File is not executable".into());
+        }
+        Ok(json!([
+            meta.dev(),
+            meta.ino(),
+            meta.len(),
+            meta.ctime(),
+            meta.ctime_nsec()
+        ]))
+    }
+    #[cfg(not(unix))]
+    Ok(json!(meta.len()))
 }
 struct ProcessGroup(u32);
 impl Drop for ProcessGroup {
@@ -108,7 +285,7 @@ fn quote(path: &Path) -> Result<String> {
         s.replace('\\', "\\\\").replace('"', "\\\"")
     ))
 }
-fn sandbox(workspace: &Workspace, tmp: &Path, home: &Path, writable: bool) -> Result<String> {
+fn sandbox(workspace: &Workspace, tmp: &Path, home: &Path, spec: &CommandSpec) -> Result<String> {
     if !cfg!(target_os = "macos") || !Path::new("/usr/bin/sandbox-exec").is_file() {
         return Err(
             "Command execution requires the macOS OS sandbox; unavailable on this platform".into(),
@@ -131,11 +308,49 @@ fn sandbox(workspace: &Workspace, tmp: &Path, home: &Path, writable: bool) -> Re
     let bins = quote(&home.join(".cargo/bin"))?;
     let rustup = quote(&home.join(".rustup"))?;
     let git = quote(&workspace.root.join(".git"))?;
-    let write_root = if writable {
+    let write_root = if spec.build_only {
+        let lock = spec.working_directory.join("Cargo.lock");
+        let create_lock = if !lock.exists() {
+            format!("(literal {})", quote(&lock)?)
+        } else {
+            String::new()
+        };
+        if create_lock.is_empty() {
+            String::new()
+        } else {
+            format!("(allow file-write* {create_lock})")
+        }
+    } else if !spec.read_only {
         format!("(allow file-write* (subpath {root}))")
     } else {
         String::new()
     };
+    let git_protection = if spec.git_metadata && !spec.read_only {
+        String::new()
+    } else {
+        format!(r#"(deny file-write* (subpath {git}) (regex #"/\.git(/|$)"))"#)
+    };
+    let network = if spec.network {
+        "(allow network-outbound)"
+    } else if spec.build_only {
+        "(allow network* (local ip \"localhost:*\") (remote ip \"localhost:*\"))"
+    } else {
+        ""
+    };
+    let linked_git = spec
+        .linked_git
+        .as_ref()
+        .map(|git| -> Result<String> {
+            let path = quote(&git.common)?;
+            let mode = if spec.git_metadata && !spec.read_only {
+                "file-read* file-write*"
+            } else {
+                "file-read*"
+            };
+            Ok(format!("(allow {mode} (subpath {path}))"))
+        })
+        .transpose()?
+        .unwrap_or_default();
     Ok(format!(
         r#"(version 1)
 (deny default)
@@ -143,11 +358,12 @@ fn sandbox(workspace: &Workspace, tmp: &Path, home: &Path, writable: bool) -> Re
 (allow signal (target self) (target children) (target same-sandbox))
 (allow mach-lookup (global-name "com.apple.system.logger") (global-name "com.apple.system.opendirectoryd.libinfo") (global-name "com.apple.cfprefsd.daemon") (global-name "com.apple.cfprefsd.agent"))
 (allow file-read-metadata)
-(allow file-read* {ancestors} (subpath "/private/etc/ssl") (subpath "/System") (subpath "/usr") (subpath "/bin") (subpath "/sbin") (subpath "/Library/Developer") (subpath "/Applications/Xcode.app") (subpath "/private/var/db") (subpath "/dev") (subpath {root}) (subpath {tmp}) (subpath {cargo}) (subpath {cargo_git}) (subpath {bins}) (subpath {rustup}))
+(allow file-read* {ancestors} (subpath "/private/etc/ssl") (subpath "/System") (subpath "/usr") (subpath "/opt/homebrew") (subpath "/bin") (subpath "/sbin") (subpath "/Library/Developer") (subpath "/Applications/Xcode.app") (subpath "/private/var/db") (subpath "/dev") (subpath {root}) (subpath {tmp}) (subpath {cargo}) (subpath {cargo_git}) (subpath {bins}) (subpath {rustup}))
 {write_root}
 (allow file-write* (subpath {tmp}) (literal "/dev/null"))
-(deny file-write* (subpath {git}) (regex #"/\.git(/|$)"))
-(allow network* (local ip "localhost:*") (remote ip "localhost:*"))
+{git_protection}
+{network}
+{linked_git}
 "#
     ))
 }
@@ -178,8 +394,6 @@ pub async fn run(
     mut cancel: watch::Receiver<bool>,
     output: &mut (dyn FnMut(Value) + Send),
 ) -> Result<Value> {
-    // Revalidate both the command and directory immediately before spawning.
-    CommandSpec::validate("cargo", &spec.args, &spec.directory, workspace)?;
     run_sandboxed(spec, workspace, seconds, &mut cancel, None, output).await
 }
 pub async fn run_interactive(
@@ -190,39 +404,124 @@ pub async fn run_interactive(
     input: mpsc::Receiver<Option<String>>,
     output: &mut (dyn FnMut(Value) + Send),
 ) -> Result<Value> {
-    CommandSpec::validate("cargo", &spec.args, &spec.directory, workspace)?;
     run_sandboxed(spec, workspace, seconds, &mut cancel, Some(input), output).await
 }
-pub async fn git_diff(workspace: &Workspace, cancel: watch::Receiver<bool>) -> Result<Value> {
-    let git = workspace.root.join(".git");
-    let metadata = std::fs::symlink_metadata(&git)
-        .map_err(|_| "git_diff requires a .git directory inside the workspace")?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(
-            "External Git metadata (including worktrees) is not available to git_diff in v0.4A"
-                .into(),
-        );
-    }
-    let spec = CommandSpec {
-        executable: "/usr/bin/git".into(),
-        args: vec![
-            "-c".into(),
-            "core.fsmonitor=false".into(),
-            "-c".into(),
-            "core.hooksPath=/dev/null".into(),
-            format!("--git-dir={}", git.display()),
-            format!("--work-tree={}", workspace.root.display()),
-            "--no-pager".into(),
-            "diff".into(),
-            "--no-ext-diff".into(),
-            "--no-textconv".into(),
-            "--".into(),
-            ".".into(),
-        ],
-        directory: ".".into(),
-    };
-    run_sandboxed(&spec, workspace, 10, &mut cancel.clone(), None, &mut |_| {}).await
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct GitLocation {
+    root: PathBuf,
+    directory: PathBuf,
+    common: PathBuf,
 }
+
+fn git_location(workspace: &Workspace, cwd: &Path) -> Result<Option<GitLocation>> {
+    for root in cwd
+        .ancestors()
+        .take_while(|dir| dir.starts_with(&workspace.root))
+    {
+        let marker = root.join(".git");
+        let metadata = match std::fs::symlink_metadata(&marker) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(format!("Git metadata: {err}")),
+        };
+        if metadata.is_dir() {
+            return Ok(Some(GitLocation {
+                root: root.into(),
+                directory: marker.clone(),
+                common: marker,
+            }));
+        }
+        if !metadata.is_file() {
+            return Err("Unsupported .git marker; symlinks are not followed".into());
+        }
+        let link = git_link(&marker)?;
+        let target = link
+            .strip_prefix("gitdir: ")
+            .ok_or("Invalid .git worktree marker")?;
+        // The authorized workspace supplies the location. Inspect external metadata
+        // only after the resulting scope has been approved.
+        let mut directory = PathBuf::new();
+        for part in root.join(target).components() {
+            if part == std::path::Component::ParentDir {
+                if !directory.pop() {
+                    return Err("Invalid Git worktree path".into());
+                }
+            } else if part != std::path::Component::CurDir {
+                directory.push(part);
+            }
+        }
+        if cfg!(target_os = "macos")
+            && (directory.starts_with("/var") || directory.starts_with("/tmp"))
+        {
+            directory = Path::new("/private").join(directory.strip_prefix("/").unwrap());
+        }
+        let worktrees = directory
+            .parent()
+            .filter(|path| path.ends_with("worktrees"))
+            .ok_or("Expected standard Git worktree metadata")?;
+        let common = worktrees
+            .parent()
+            .filter(|path| path.ends_with(".git"))
+            .ok_or("Expected a standard Git common directory")?;
+        return Ok(Some(GitLocation {
+            root: root.into(),
+            common: common.into(),
+            directory,
+        }));
+    }
+    Ok(None)
+}
+
+fn git_link(path: &Path) -> Result<String> {
+    use std::io::Read;
+    let metadata = std::fs::symlink_metadata(path).map_err(|e| format!("Git metadata: {e}"))?;
+    if !metadata.is_file() || metadata.len() > 4096 {
+        return Err("Expected a bounded regular Git link file".into());
+    }
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(4097).read_to_string(&mut text))
+        .map_err(|e| format!("Read Git link: {e}"))?;
+    let value = text.trim_end_matches(['\r', '\n']);
+    if value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control) {
+        return Err("Invalid Git link path".into());
+    }
+    Ok(value.into())
+}
+
+pub fn prepare_git_diff(
+    workspace: &Workspace,
+    directory: &str,
+    staged: bool,
+) -> Result<(CommandSpec, bool)> {
+    let directory = workspace.relative(directory)?;
+    let cwd = workspace.command_directory(&directory)?;
+    let git = git_location(workspace, &cwd)?.ok_or("No Git repository in the active workspace")?;
+    let mut args = vec![
+        "-c".into(),
+        "core.fsmonitor=false".into(),
+        "-c".into(),
+        "core.hooksPath=/dev/null".into(),
+        format!("--git-dir={}", git.directory.display()),
+        format!("--work-tree={}", git.root.display()),
+        "--no-pager".into(),
+        "diff".into(),
+        "--no-ext-diff".into(),
+        "--no-textconv".into(),
+    ];
+    if staged {
+        args.push("--cached".into());
+    }
+    args.extend(["--".into(), ".".into()]);
+    let mut spec = CommandSpec::new("/usr/bin/git".into(), &args, &directory, workspace)?;
+    spec.read_only = true;
+    let approval = !git.common.starts_with(&workspace.root);
+    if approval {
+        spec.linked_git = Some(git);
+    }
+    Ok((spec, approval))
+}
+
 async fn run_sandboxed(
     spec: &CommandSpec,
     workspace: &Workspace,
@@ -234,7 +533,7 @@ async fn run_sandboxed(
     if *cancel.borrow() {
         return Err("Cancelled".into());
     }
-    workspace.directory(&spec.directory)?;
+    spec.revalidate(workspace)?;
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or("Missing HOME")?;
@@ -242,32 +541,29 @@ async fn run_sandboxed(
     std::fs::create_dir(&tmp.0).map_err(|e| e.to_string())?;
     tmp.0 = tmp.0.canonicalize().map_err(|e| e.to_string())?;
     std::fs::create_dir(tmp.0.join("home")).map_err(|e| e.to_string())?;
-    let profile = sandbox(
-        workspace,
-        &tmp.0,
-        &home,
-        spec.executable != Path::new("/usr/bin/git"),
-    )?;
+    let profile = sandbox(workspace, &tmp.0, &home, spec)?;
     let mut child = Command::new("/usr/bin/sandbox-exec");
     child
         .args(["-p", &profile])
         .arg(&spec.executable)
         .args(&spec.args)
-        .current_dir(workspace.root.join(&spec.directory))
+        .current_dir(&spec.working_directory)
         .env_clear()
         .env(
             "PATH",
-            format!(
-                "{}:/usr/bin:/bin:/usr/sbin:/sbin",
-                home.join(".cargo/bin").display()
-            ),
+            std::env::join_paths(search_path()).map_err(|e| e.to_string())?,
         )
         .env("HOME", tmp.0.join("home"))
         .env("TMPDIR", &tmp.0)
         .env("CARGO_HOME", home.join(".cargo"))
         .env("RUSTUP_HOME", home.join(".rustup"))
         .env("LORCA_COMMAND_SANDBOX", "1")
-        .env("CARGO_NET_OFFLINE", "true")
+        .env(
+            "CARGO_NET_OFFLINE",
+            if spec.network { "false" } else { "true" },
+        )
+        .env("GIT_OPTIONAL_LOCKS", if spec.read_only { "0" } else { "1" })
+        .env("GIT_TERMINAL_PROMPT", "0")
         .env("CARGO_TERM_COLOR", "never")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -279,6 +575,9 @@ async fn run_sandboxed(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    if spec.build_only {
+        child.env("CARGO_TARGET_DIR", tmp.0.join("target"));
+    }
     #[cfg(unix)]
     child.process_group(0);
     let mut child = child.spawn().map_err(|e| format!("Sandbox spawn: {e}"))?;
@@ -323,7 +622,7 @@ async fn run_sandboxed(
     let _ = stdout.await;
     let _ = stderr.await;
     Ok(
-        json!({"ok":code==Some(0),"exitCode":code,"output":bounded(&combined,OUTPUT_LIMIT),"truncated":total>=OUTPUT_LIMIT}),
+        json!({"ok":code==Some(0),"exitCode":code,"output":bounded(&combined,OUTPUT_LIMIT),"truncated":total>=OUTPUT_LIMIT,"executable":spec.executable,"arguments":spec.args,"workingDirectory":spec.working_directory}),
     )
 }
 
@@ -406,7 +705,15 @@ mod tests {
         .unwrap();
         let w = Workspace::new(&root.0).unwrap();
         let (_tx, rx) = watch::channel(false);
-        let value = git_diff(&w, rx).await.unwrap();
+        let value = run(
+            &prepare_git_diff(&w, ".", false).unwrap().0,
+            &w,
+            10,
+            rx,
+            &mut |_| {},
+        )
+        .await
+        .unwrap();
         assert_eq!(value["ok"], true, "{value}");
         assert!(value["output"].as_str().unwrap().contains("+after"));
         assert!(!root.0.join("hook-ran").exists());

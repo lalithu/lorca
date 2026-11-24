@@ -50,6 +50,12 @@ impl Default for Registry {
         super::terminal::register(&mut r);
         super::web::register(&mut r);
         super::agent::register(&mut r);
+        r.register(
+            "request_workspace",
+            Category::Agent,
+            Authority::TaskState,
+            Arc::new(super::agent::RequestWorkspace),
+        );
         r.unavailable.insert(
             "view_image".into(),
             "Available when an inference session is attached".into(),
@@ -272,14 +278,18 @@ impl Registry {
                 else {
                     continue;
                 };
-                self.reveal(name);
+                if name != "request_workspace" || !self.workspace_available {
+                    self.reveal(name);
+                }
                 if name == "tool_search" {
                     let result = message["content"]
                         .as_str()
                         .and_then(|s| serde_json::from_str::<Value>(s).ok());
                     if let Some(result) = result.filter(|r| r["ok"] == true) {
                         for tool in result["tools"].as_array().into_iter().flatten() {
-                            if let Some(name) = tool["name"].as_str() {
+                            if let Some(name) = tool["name"].as_str()
+                                && (name != "request_workspace" || !self.workspace_available)
+                            {
                                 self.reveal(name);
                             }
                         }

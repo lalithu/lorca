@@ -23,7 +23,7 @@ struct ChatView: View {
                                             if !message.attachments.isEmpty {
                                                 AttachmentStrip(attachments: message.attachments, storage: store.imageStore, compact: false)
                                             }
-                                            AgentActivityView(store: store.agent, taskID: task, savedMessage: message, textSize: textSize, onChoose: message.id == store.messages.last?.id ? { store.draft = $0; store.send() } : nil, onContinue: message.id == store.messages.last?.id ? { store.continueAgentTask(task) } : nil, onChooseWorkspace: message.id == store.messages.last?.id ? { store.chooseWorkspaceForTask() } : nil)
+                                            AgentActivityView(store: store.agent, taskID: task, savedMessage: message, textSize: textSize, onChoose: message.id == store.messages.last?.id ? { store.draft = $0; store.send() } : nil, onContinue: message.id == store.messages.last?.id ? { store.continueAgentTask(task) } : nil, onChooseWorkspace: message.id == store.messages.last?.id ? { store.chooseWorkspaceForTask(useProposed: $0) } : nil)
                                         }
                                     } else { messageView(message) }
                                 }
@@ -78,7 +78,11 @@ struct ChatView: View {
             }
             if compact, let id = store.messages.last?.agentTaskId, let task = store.agent.runs[id],
                task.conversationId == store.library.selectedID,
-               AgentPresentation.clarification(task, events: task.events)?["needsWorkspace"].boolean == true {
+               let clarification = AgentPresentation.clarification(task, events: task.events),
+               clarification["needsWorkspace"].boolean == true {
+                if let directory = clarification["directory"].string {
+                    Button("Allow \(directory)") { store.chooseWorkspaceForTask(useProposed: true) }.controlSize(.small)
+                }
                 Button("Choose folder…") { store.chooseWorkspaceForTask() }.controlSize(.small)
             }
             if compact {

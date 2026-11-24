@@ -252,7 +252,7 @@ fn llama_messages(messages: &[Value]) -> Vec<Value> {
         .iter()
         .map(|message| {
             let mut message = message.clone();
-            if let Some(calls) = message["tool_calls"].as_array_mut() {
+            if let Some(calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut) {
                 for call in calls {
                     if call["function"]["arguments"].is_object() {
                         call["function"]["arguments"] = json!(call["function"]["arguments"].to_string());
@@ -268,7 +268,8 @@ fn llama_messages(messages: &[Value]) -> Vec<Value> {
                 let text = message["content"].as_str().unwrap_or("").to_owned();
                 let mut content = vec![json!({"type":"text","text":text})];
                 content.extend(images.iter().filter_map(Value::as_str).map(|data| {
-                    json!({"type":"image_url","image_url":{"url":format!("data:image/jpeg;base64,{data}")}})
+                    let subtype = if data.starts_with("iVBORw0KGgo") { "png" } else { "jpeg" };
+                    json!({"type":"image_url","image_url":{"url":format!("data:image/{subtype};base64,{data}")}})
                 }));
                 message["content"] = json!(content);
                 message.as_object_mut().unwrap().remove("images");
@@ -365,6 +366,22 @@ fn consume_sse_line(
 #[cfg(test)]
 mod finish_tests {
     use super::*;
+
+    #[test]
+    fn first_user_turn_keeps_ordered_image_parts_and_text() {
+        let turns = llama_messages(&[
+            json!({"role":"system","content":"System"}),
+            json!({"role":"user","content":"Describe the attached images.","images":["first","iVBORw0KGgoSecond"]}),
+        ]);
+        assert_eq!(
+            turns[1],
+            json!({"role":"user","content":[
+                {"type":"text","text":"Describe the attached images."},
+                {"type":"image_url","image_url":{"url":"data:image/jpeg;base64,first"}},
+                {"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgoSecond"}}
+            ]})
+        );
+    }
 
     #[test]
     fn length_stop_discards_even_malformed_tool_arguments() {

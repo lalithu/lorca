@@ -12,8 +12,10 @@ impl Tool for ReadFile {
     fn prepare(&self, w: &Workspace, arguments: Value, _limits: &Limits) -> Result<Prepared> {
         check_size(&arguments)?;
         let action = arguments.clone();
-        let payload = arguments;
+        let mut payload = arguments;
         {
+            let a: ReadArgs = parse(payload.clone())?;
+            payload["path"] = json!(w.relative(&a.path)?);
             let a: ReadArgs = parse(payload.clone())?;
             w.require_reference(&a.path)?;
             if !(4..=8192).contains(&a.length) {

@@ -9,11 +9,13 @@ impl Tool for SearchFiles {
         );
         schema("search_files", description, properties, required)
     }
-    fn prepare(&self, _w: &Workspace, arguments: Value, _limits: &Limits) -> Result<Prepared> {
+    fn prepare(&self, w: &Workspace, arguments: Value, _limits: &Limits) -> Result<Prepared> {
         check_size(&arguments)?;
         let action = arguments.clone();
-        let payload = arguments;
+        let mut payload = arguments;
         {
+            let a: SearchArgs = parse(payload.clone())?;
+            payload["path"] = json!(w.relative(&a.path)?);
             let a: SearchArgs = parse(payload.clone())?;
             Workspace::path(&a.path)?;
             if a.query.is_empty() || a.query.len() > 200 {

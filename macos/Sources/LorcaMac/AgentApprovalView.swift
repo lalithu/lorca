@@ -54,7 +54,7 @@ struct AgentApprovalView: View {
                     .foregroundStyle(pending ? ChatAccent.approval : Color.secondary)
             }
             if let command = approval.preparedCommand {
-                if !inline { Text(verbatim: command).font(.system(size: 12, design: .monospaced)) }
+                if !inline || approval.tool == "git_diff" { Text(verbatim: command).font(.system(size: 12, design: .monospaced)) }
                 if let directory = approval.action["workingDirectory"].string {
                     let path = Text(verbatim: directory).font(.system(.callout, design: .monospaced))
                     Text(pending ? "Allow Lorca to run this command in \(path)?" : "Working directory \(path)")
@@ -93,7 +93,7 @@ struct AgentApprovalView: View {
 
 extension AgentApproval {
     var preparedCommand: String? {
-        guard tool == "exec_command" || tool == "run_command",
+        guard ["exec_command", "run_command", "git_diff"].contains(tool),
               let executable = action["executable"].string, !executable.isEmpty,
               case .array(let arguments) = action["arguments"],
               arguments.allSatisfy({ $0.string != nil }) else { return nil }

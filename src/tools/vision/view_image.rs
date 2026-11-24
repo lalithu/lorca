@@ -55,8 +55,11 @@ impl Tool for ViewImage {
         if args.question.len() > 1000 {
             return Err("Image question exceeds 1000 bytes".into());
         }
-        inspect(w, &args.path)?;
-        prepared(a, false)
+        let path = w.relative(&args.path)?;
+        inspect(w, &path)?;
+        let mut arguments = a;
+        arguments["path"] = json!(path);
+        prepared(arguments, false)
     }
     fn execute<'a>(
         &'a self,
