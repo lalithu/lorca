@@ -1285,12 +1285,16 @@ async fn awareness_and_scope_are_persistent_after_compaction_without_duplicate_s
     assert_eq!(view.status, Status::Completed, "{:?}", view.result);
     assert!(view.events.iter().any(|e| e.kind == "context_compacted"));
     for (messages, _) in script.seen.lock().unwrap().iter() {
-        assert_eq!(messages.iter().filter(|m| m["role"] == "system").count(), 1);
+        assert_eq!(messages.iter().filter(|m| m["role"] == "system").count(), 2);
         let policy = messages[0]["content"].as_str().unwrap();
-        assert!(policy.contains("AI agent inside Lorca"));
-        assert!(policy.contains("Rust validates arguments"));
-        assert!(policy.contains("Never silently substitute"));
-        assert!(policy.contains("Unavailable tools:"));
+        assert!(policy.contains(include_str!("../prompts/system.md")));
+
+        let snapshots = messages.iter().filter(|m| m["lorcaRuntime"] == true).collect::<Vec<_>>();
+        assert_eq!(snapshots.len(), 1);
+        let state: Value = serde_json::from_str(snapshots[0]["content"].as_str().unwrap()
+            .strip_prefix("Current runtime state: ").unwrap()).unwrap();
+        assert!(state["scope"]["commands_forbidden"].is_boolean());
+        assert_eq!(state["requiresActionApproval"], true);
     }
     let seen = script.seen.lock().unwrap();
     let last = &seen.last().unwrap().0;
@@ -1367,7 +1371,7 @@ async fn malformed_top_level_tool_json_gets_one_safe_retry_with_current_schemas(
         script.seen.lock().unwrap()[1].0.last().unwrap()["content"]
             .as_str()
             .unwrap()
-            .contains("No tool executed")
+            .contains("rejected before execution")
     );
     let (view, script, _) = drive(
         "Read README.md",

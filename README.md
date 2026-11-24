@@ -12,16 +12,12 @@ I started Lorca to learn how agent harnesses and local inference work. It became
 
 ## Upcoming work
 
-- **MCP** for connecting external tools and resources.
-- **More robust native tools** for everyday workspace and agent workflows.
-- **Leaner tool schemas** with clearer inputs and fewer tokens per declaration.
-- **Broader runtime testing** across models and Apple Silicon Macs.
-
+See the [roadmap](docs/roadmap.md) for MCP, tools, provider compatibility, and runtime improvements.
 
 ## Quick start
 
 - Already running Ollama or llama.cpp? Download the [Apple Silicon app](https://github.com/lalithu/lorca/releases/tag/v0.5.0).
-- Need both runtimes? [Build the portable ZIP](#build-from-source), unzip it, and open **Start Lorca.command**.
+- Need both runtimes? [Build the portable ZIP](docs/portable-start.md#build-from-source), unzip it, and open **Start Lorca.command**.
 
 To download a starter model and launch the portable app, run this from the unzipped folder:
 
@@ -42,7 +38,7 @@ lorca rebuild     # Rebuild the full app
 
 ## Documentation
 
-[Documentation](docs/) covers releases, runtime, tools, and setup. Lorca stores data locally, supports optional private Sheets sync for Job Apps, and is licensed under Apache 2.0.
+[Documentation](docs/README.md) covers setup, architecture, tools, Notes, Job Apps, and releases.
 
 [Apache 2.0](LICENSE)
 

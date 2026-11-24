@@ -35,3 +35,16 @@ The ZIP contains no model weights. Ollama keeps its regular model cache.
 Lorca keeps chats and settings in `~/Library/Application Support/lorca`.
 The app is ad-hoc signed for local testing. A public macOS distribution still
 needs a Developer ID signature and notarization for the normal Gatekeeper flow.
+
+## Build from source
+
+Requires an Apple Silicon Mac, Rust, and Xcode or Swift command-line tools.
+From the repository root:
+
+```sh
+bash macos/package.sh
+```
+
+The script downloads pinned runtime archives, checks SHA-256 hashes, and writes
+the portable ZIP and checksum to `macos/build/`. For app development with your
+own model servers, see [macOS build and launch](../macos/README.md#build-and-launch).

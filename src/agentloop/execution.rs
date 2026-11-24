@@ -38,10 +38,8 @@ impl Agent {
         let original_task = task.clone();
         task = registry.virtualize_user_input(&original_task)?;
         let mut messages = vec![
-            json!({"role":"system","content":format!("Workspace: {}\n{}\nUnavailable tools: {}\nVerified initial entries: {}",
-            w.map(|w|format!("{} (active, already selected). Use this folder directly for relative paths. Only request a folder again for a different location.", w.root.display())).unwrap_or_else(||"None selected. Answer conversationally. If the task needs local files or commands, call request_workspace to let the user choose a folder, then pause.".into()),
-            SYSTEM, json!(registry.unavailable()),
-            bounded(&w.map(|w|w.references()).unwrap_or_default().join(", "),6000))}),
+            json!({"role":"system","content":format!("{}\nVerified initial entries: {}",
+            SYSTEM, bounded(&w.map(|w|w.references()).unwrap_or_default().join(", "),6000))}),
         ];
         messages.extend(history);
         registry.virtualize_messages(&mut messages)?;
@@ -86,7 +84,7 @@ impl Agent {
                 } else {
                     format!("{original}\nLatest user instruction: {latest_instruction}")
                 };
-                messages.push(json!({"role":"system","content":"Continue the explicitly linked unfinished task. Preserve its original scope and restrictions. The latest user instruction may refine it; do not treat prior tool results as fresh verification unless they are linked verified records."}));
+                messages.push(json!({"role":"system","content":"Resume the linked task using its recorded results and the latest user instruction."}));
             }
         } else {
             resume_evidence.clear();
@@ -238,6 +236,7 @@ impl Agent {
             if output.segments > 0 {
                 operational["publicOutput"] = json!({"segments":output.segments,"bytes":output.text.len(),"tail":output.tail()});
             }
+            super::context::refresh_runtime(&mut messages, &operational);
             let budget = crate::context::GenerationBudget::new(
                 capacity,
                 expanded_output || inference.effort() == ThinkingEffort::High,
@@ -341,7 +340,7 @@ impl Agent {
                         ));
                     }
                     invalid_turns += 1;
-                    messages.push(json!({"role":"user","content":format!("Internal Lorca tool validation feedback. No tool executed: {error}. Return a native tool call whose arguments are a JSON object, using the exact current tool schema. Do not serialize nested arrays or objects as strings. Correct this once; preserve the original task.")}));
+                    messages.push(json!({"role":"system","lorcaInternal":true,"content":format!("Tool response rejected before execution: {error}. Retry with arguments matching the available JSON schema.")}));
                     continue;
                 }
                 Err(error)
@@ -416,8 +415,8 @@ impl Agent {
                     }
                     interrupted_tool_retries += 1;
                     expanded_output = true;
-                    messages.push(json!({"role":"user","content":
-                        "Internal Lorca recovery: incomplete tool arguments were discarded. No tool calls from the rejected response executed. Reissue one complete call using small, targeted patches; do not rewrite an entire file. Preserve the original task and permissions."}));
+                    messages.push(json!({"role":"system","lorcaInternal":true,"content":
+                        "Incomplete tool arguments were discarded before execution. Retry with one complete, smaller tool call."}));
                     continue;
                 }
 
@@ -429,8 +428,8 @@ impl Agent {
                         return Err("Task incomplete: The model repeatedly exhausted its generation budget without producing observable output. Its work is preserved; try a different model or reasoning configuration.".into());
                     }
                     expanded_output = true;
-                    messages.push(json!({"role":"user","content":
-                        "Internal Lorca recovery: the previous inference reached its generation cap without public output. Hidden reasoning cannot be resumed byte-for-byte. Continue the original task from the available observations; produce a tool call or a public response."}));
+                    messages.push(json!({"role":"system","lorcaInternal":true,"content":
+                        "Generation ended at the output limit without public output. Continue from available results with a tool call or public response."}));
                     continue;
                 }
                 truncation_retries = 0;
@@ -448,8 +447,8 @@ impl Agent {
                 // This is an already-acknowledged text segment; do not attempt to
                 // replay it as a tool call. Context fitting can archive it later.
                 messages.push(json!({"role":"assistant","content":turn.content}));
-                messages.push(json!({"role":"user","content":
-                    "Internal Lorca output continuation. The preceding assistant text is an acknowledged segment of ONE public answer, not a new user request. Continue from its final word without repeating earlier text. You may use tools if necessary, and you decide when the answer is finished. The original task, permissions and archived context remain in force."}));
+                messages.push(json!({"role":"system","lorcaInternal":true,"content":
+                    "The preceding public answer reached the output limit. Continue from its final word without repeating completed text or actions."}));
                 continue;
             }
             if turn.calls.is_empty() {
@@ -475,7 +474,7 @@ impl Agent {
                     reply_recovery_used = true;
                     recover_public_reply = true;
                     self.emit("public_reply_recovery", json!({"attempt":1}));
-                    messages.push(json!({"role":"user","content":"No public answer was received. Continue the current request using the tool results already in this conversation. Provide your answer in the public response, or call the next necessary tool if work remains. Reuse existing results; do not repeat completed actions."}));
+                    messages.push(json!({"role":"system","lorcaInternal":true,"content":"No public answer was received. Use existing results to provide a public response or take the next necessary action."}));
                     continue;
                 }
                 if output.segments > 0 {
@@ -865,7 +864,7 @@ fn argument_feedback(registry: &Registry, call: &ToolCall, result: &mut Value) -
     result["validationError"] = result["error"].clone();
     result["executed"] = json!(false);
     result["hint"] = json!(
-        "Nothing executed. Use the exact field names and JSON types in expectedSchema, then retry with corrected arguments. Do not repeat this failed call."
+        "Use the field names and JSON types in expectedSchema to correct the arguments."
     );
     result["expectedSchema"] = schema["function"]["parameters"].clone();
     if let Some(example) = schema["function"]["parameters"]["examples"]

@@ -1,4 +1,4 @@
-# Lorca v0.5 architecture
+# Lorca architecture
 
 **Agent = model + harness.** SwiftUI Dashboard/Mini and the terminal use the
 same authenticated Rust core. `agentloop/` owns one active task, `tools/` the
@@ -10,6 +10,16 @@ The portable Apple Silicon package ships both inference runtimes beside the app.
 Its launcher can reuse a running server, start Ollama locally, or serve an
 explicitly selected GGUF through llama.cpp. The native picker refreshes both
 catalogs and routes each selection to the corresponding local server.
+
+## Model input
+
+- **System prompt:** [prompts/system.md](../prompts/system.md) supplies general assistant guidance. It is embedded at build time; rebuild the Rust core after editing it.
+- **Tool schemas:** registered handlers in `src/tools/` supply native declarations, argument requirements, and usage guidance. Discovery exposes additional registered tools as needed.
+- **Runtime context:** the loop refreshes the current workspace, permission state, and operational facts as system context. Tool results retain their native call IDs; recovery feedback is system context rather than a new user request.
+
+The prompt describes conduct, schemas describe capabilities, and runtime context
+describes current state. Rust enforces permissions independently of these descriptions.
+[AGENT.md](../AGENT.md) is contributor documentation, not the model's system prompt.
 
 ## One execution loop
 
@@ -105,7 +115,7 @@ installed Ollama metadata, actual reported context, and llama.cpp memory snapsho
 where supplied. Online Hugging Face listing is opt-in. It does not rank model
 quality, guarantee KV/vision fit, resize context, download or reload models.
 Auto-detection prefers a healthy llama.cpp server with a nonempty catalog, otherwise
-Ollama. The CLI still uses Ollama. No Job Apps workflow or unrelated UI is changed.
+Ollama. The CLI still uses Ollama.
 
 See [validation and limitations](v0.5-validation.md), [tools](tools.md), and
 [AGENT.md](../AGENT.md) for commands and operational boundaries.

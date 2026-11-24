@@ -74,7 +74,7 @@ async fn chat(State(s): State<Arc<Server>>, Json(v): Json<Value>) -> String {
         && !messages
             .iter()
             .rev()
-            .find(|message| message["role"] == "user")
+            .find(|message| message["role"] == "user" || message["lorcaInternal"] == true)
             .and_then(|message| message["content"].as_str())
             .is_some_and(|text| {
                 text.starts_with("No public answer was received.") || text == "Give me output"
@@ -225,10 +225,10 @@ async fn chat_folder_continuation_and_model_lifecycle_use_the_same_core() {
                 .any(|s| s["function"]["name"] == "request_workspace")
         );
         assert!(
-            requests[2]["messages"][0]["content"]
+            requests[2]["messages"][1]["content"]
                 .as_str()
                 .unwrap()
-                .contains("active, already selected")
+                .contains("Active, already selected")
         );
         assert_eq!(
             requests.len(),

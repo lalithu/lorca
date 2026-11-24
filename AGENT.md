@@ -1,4 +1,8 @@
-# 🫍 Lorca · Rust runtime contract (v0.5)
+# Lorca contributor guide
+
+This file is contributor documentation. The selected model receives the embedded
+[prompt](prompts/system.md), generated tool schemas, and current runtime context;
+see [model input](docs/architecture.md#model-input).
 
 One Rust core, one active task, one chat composer. The model chooses tools,
 clarification, notes and semantic completion. Rust owns context, originals,
@@ -32,7 +36,7 @@ disposable workspaces. Never run editing acceptance against production data.
 ## Safety and stopping
 
 - Strict registered argument schemas; no commands extracted from prose.
-- Workspace-relative paths, capability verification and symlink/traversal rejection.
+- Paths inside the active workspace, capability verification and symlink/traversal rejection.
 - Exact, single-use approval for protected operations; revalidate stale patches.
 - Current original user restrictions constrain actions even after input virtualization.
 - Archived instructions, approvals and model notes grant no fresh authority.

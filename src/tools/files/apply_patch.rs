@@ -30,7 +30,7 @@ impl Tool for ApplyPatch {
     fn schema(&self) -> Value {
         let mut s = schema(
             "apply_patch",
-            "Review text edits. Patch sections: Add File, Update File, Delete File. @@ starts update hunks only. Add File takes + lines, or no body for an empty file. Alternatively use one exact replacement.",
+            "Read the current file before proposing a small edit. Requires approval. Patch sections: Add File, Update File, Delete File. @@ starts update hunks only. Add File takes + lines, or no body for an empty file. Alternatively use one exact replacement.",
             json!({"patch":{"type":"string"},"path":{"type":"string"},"old_text":{"type":"string"},"new_text":{"type":"string"}}),
             vec![],
         );

@@ -72,11 +72,67 @@ pub(super) fn operational(
         "scope":contract.authority.scope,"operations":operations,"archivedOperations":omitted})
 }
 
+/// Replace the current permission snapshot without accumulating old grants.
+pub(super) fn refresh_runtime(messages: &mut Vec<serde_json::Value>, state: &serde_json::Value) {
+    use serde_json::json;
+    messages.retain(|message| message["lorcaRuntime"] != true);
+    let snapshot = json!({
+        "workspace": state["context"]["workspace"],
+        "workspaceStatus": if state["context"]["workspace"].is_string() {
+            "Active, already selected. Use this folder; request another only for a different location."
+        } else {
+            "None selected. Use request_workspace if local files or commands are needed."
+        },
+        "requiresActionApproval": state["requiresActionApproval"],
+        "scope": state["scope"],
+        "denied": state["denied"],
+        "unavailableTools": state["unavailableTools"]
+    });
+    messages.insert(
+        1,
+        json!({
+            "role": "system",
+            "lorcaRuntime": true,
+            "content": format!("Current runtime state: {snapshot}")
+        }),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{agentloop::TaskContract, context::Context, tools::Registry};
     use serde_json::{Value, json};
+    #[test]
+    fn runtime_snapshot_replaces_stale_scope_without_changing_conversation() {
+        let user = json!({"role":"user","content":"Inspect the repo"});
+        let result = json!({"role":"tool","tool_call_id":"read-1","content":"real result"});
+        let mut messages = vec![
+            json!({"role":"system","content":"Base instructions"}),
+            user.clone(),
+            result.clone(),
+        ];
+        let mut state = json!({"context":{"workspace":"/repo"},"requiresActionApproval":true,
+            "scope":{"read_only":true},"denied":[],"unavailableTools":{}});
+        refresh_runtime(&mut messages, &state);
+        state["scope"]["read_only"] = json!(false);
+        refresh_runtime(&mut messages, &state);
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[1]["role"], "system");
+        assert_eq!(messages[2], user);
+        assert_eq!(messages[3], result);
+        let current: Value = serde_json::from_str(
+            messages[1]["content"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("Current runtime state: ")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(current["scope"]["read_only"], false);
+        assert_eq!(current["workspace"], "/repo");
+    }
+
     #[test]
     fn four_pillars_fit_8192_with_large_reads_and_repeated_compaction() {
         let task = format!(

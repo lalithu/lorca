@@ -76,6 +76,26 @@ async fn chat(State(server): State<Arc<Server>>, Json(request): Json<Value>) -> 
             .any(|s| s["function"]["name"] == "apply_patch"
                 || s["function"]["name"] == "tool_search")
     );
+    let runtime = request["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message["lorcaRuntime"] == true)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        runtime.len(),
+        1,
+        "Each inference has one current runtime snapshot"
+    );
+    assert_eq!(runtime[0]["role"], "system");
+    for message in request["messages"].as_array().unwrap() {
+        if message["lorcaInternal"] == true {
+            assert_ne!(
+                message["role"], "user",
+                "Runtime feedback must not impersonate the user"
+            );
+        }
+    }
     server.requests.lock().unwrap().push(request.clone());
     let budget = request["options"]["num_predict"].as_u64().unwrap();
     let messages = &request["messages"];
@@ -478,14 +498,11 @@ async fn malformed_tool_http_500_recovers_with_larger_budget_and_small_patch_ins
         requests[2]["options"]["num_predict"].as_u64()
             > requests[1]["options"]["num_predict"].as_u64()
     );
-    let retry = requests[2]["messages"].as_array().unwrap().last().unwrap()["content"]
-        .as_str()
-        .unwrap();
-    assert!(
-        retry.contains("small, targeted patches")
-            && retry.contains("do not rewrite an entire file")
-            && retry.contains("No tool calls")
-    );
+    let feedback = requests[2]["messages"].as_array().unwrap().last().unwrap();
+    assert_eq!(feedback["role"], "system");
+    assert_eq!(feedback["lorcaInternal"], true);
+    let retry = feedback["content"].as_str().unwrap();
+    assert!(retry.contains("discarded before execution") && retry.contains("smaller tool call"));
     assert_ne!(
         requests[1], requests[2],
         "Never replay the identical failing request"

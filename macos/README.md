@@ -4,7 +4,7 @@ Native SwiftUI/AppKit dashboard and floating Mini, backed by the existing Rust c
 
 ## Build and launch
 
-Requires macOS 14+, Rust/Cargo, Xcode or Swift command-line tools, and a local model server. The dashboard automatically prefers the Llama app server at `127.0.0.1:9931`, then falls back to Ollama at `127.0.0.1:11434`. Models are installed in those apps; Lorca does not download them. Python 3 is needed for Job Apps.
+Requires macOS 14+, Rust/Cargo, Xcode or Swift command-line tools, and a local model server. The dashboard lists models from local Ollama (`127.0.0.1:11434`) and llama.cpp (`127.0.0.1:9931` or `127.0.0.1:8080`) servers. Install models through those runtimes or the [portable launcher](../docs/portable-start.md). Python 3 is needed for Job Apps.
 
 From the repository root:
 
@@ -14,7 +14,7 @@ cargo install --path . --locked --force
 lorca main
 ```
 
-For iteration after installing the command, run `lorca rebuild` from any directory. It rebuilds the Rust core, installs the updated CLI, builds the app, and gracefully restarts both UI and backend. The native app icon is 🌊; the Mini pet remains the orca.
+For iteration after installing the command, run `lorca rebuild` from any directory. It rebuilds the Rust core, installs the updated CLI, builds the app, and gracefully restarts both UI and backend. The native app icon is 🌸; the Mini pet remains the orca.
 
 For UI changes, use `lorca rebuild ui`: incrementally compiles Swift in debug mode, signs and relaunches the app, and reuses the bundled Rust core and running backend. No Cargo build or CLI installation. Run a full rebuild once first, and after Rust, protocol, or bundled-resource changes. Saved data is preserved; active work is cancelled when the UI closes.
 
@@ -43,7 +43,7 @@ The build script selects full Xcode when installed. On affected command-line-too
 
 ## Model lifecycle
 
-- The dashboard prefers the Llama app server at `http://127.0.0.1:9931` when healthy, otherwise Ollama at `http://127.0.0.1:11434`; choose an installed model in the composer or Settings.
+- The dashboard checks both Ollama and llama.cpp; choose an installed model in the composer or Settings. The selection determines which server handles the request.
 - Opening the app or selecting a model does not load it. Submitted work prepares it and requests `keep_alive: -1`.
 - A temporary indeterminate loading bar and elapsed time appear under `ctx`. Context and speed use server-reported measurements when available; unavailable values show `—`.
 - **Unload model…** frees memory; **Reload model…** helps recover a stalled model. Stop active work first. Shared-model warnings and Rust session leases apply.

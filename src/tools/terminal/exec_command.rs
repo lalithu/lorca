@@ -46,7 +46,7 @@ impl Tool for ExecCommand {
                 json!({"type":"boolean","description":"Allow outbound network."});
             properties["git_metadata"] =
                 json!({"type":"boolean","description":"Allow Git metadata access."});
-            "Run approved argv in the workspace sandbox. Use apply_patch for text edits. Poll with write_stdin."
+            "Run approved argv in the workspace sandbox. Use apply_patch for text edits. Poll with write_stdin until exitCode is known."
         };
         let mut schema = schema(
             if self.legacy {
