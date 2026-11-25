@@ -37,6 +37,8 @@ struct DashboardView: View {
     @ObservedObject var windows: WindowManager
     @Environment(\.colorScheme) private var scheme
     @State private var hoveredPage: SidebarPage?
+    @State private var journalPath = ""
+    @State private var journalError: String?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("dashboardSidebarWidth") private var preferredSidebarWidth = 190.0
@@ -280,6 +282,32 @@ struct DashboardView: View {
                     ConnectionBadge(store: store)
                     if let error = store.error { Text(error).font(ShellTypography.serif(13)).foregroundStyle(.secondary) }
                 }
+                settingsCard("JOURNALS") {
+                    Text(journalPath.isEmpty ? "Downloads/lorca'sJournal" : journalPath)
+                        .font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
+                    HStack {
+                        Button("Open journal folder") {
+                            Task {
+                                await updateJournalLocation()
+                                if journalError == nil, !journalPath.isEmpty { NSWorkspace.shared.open(URL(fileURLWithPath: journalPath)) }
+                            }
+                        }
+                        Button("Choose folder…") {
+                            let panel = NSOpenPanel()
+                            panel.canChooseFiles = false
+                            panel.canChooseDirectories = true
+                            panel.canCreateDirectories = true
+                            panel.allowsMultipleSelection = false
+                            if panel.runModal() == .OK, let url = panel.url {
+                                Task { await updateJournalLocation(path: url.path) }
+                            }
+                        }
+                    }
+                    Text("Readable journals and checkpoints are generated from saved chats. Changing folders affects future exports; existing copies stay where they are.")
+                        .font(ShellTypography.serif(12)).foregroundStyle(.secondary)
+                    if let journalError { Text(journalError).foregroundStyle(.red) }
+                }
+                .task { await updateJournalLocation() }
                 settingsCard("MINI") {
                     Toggle("Show the floating companion", isOn: Binding(
                         get: { windows.miniVisible },
@@ -296,6 +324,17 @@ struct DashboardView: View {
             .padding(.horizontal, 32).padding(.bottom, 32)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    @MainActor private func updateJournalLocation(path: String? = nil) async {
+        do {
+            var fields: [String: Any] = ["op": "journal_location"]
+            if let path { fields["path"] = path }
+            let data = try await store.backend.command(fields)
+            let response = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            journalPath = response?["path"] as? String ?? ""
+            journalError = nil
+        } catch { journalError = error.localizedDescription }
     }
 
     private func settingsCard<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {

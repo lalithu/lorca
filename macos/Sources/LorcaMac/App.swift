@@ -4,6 +4,10 @@ import AppKit
 @MainActor
 enum LorcaApp {
     static func main() {
+        if CommandLine.arguments.dropFirst().first == "--lorca-open" {
+            NativeOpen.run(arguments: Array(CommandLine.arguments.dropFirst(2)))
+            return
+        }
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate

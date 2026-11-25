@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import pathlib
+import plistlib
 import shutil
 import subprocess
 import tempfile
@@ -24,11 +25,20 @@ root = pathlib.Path(tempfile.mkdtemp(prefix="lorca-native-acceptance-")).resolve
 project = root / "project"
 project.mkdir()
 print("Acceptance artifacts:", root, flush=True)
-fallback = pathlib.Path("/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk")
-sdk = args.sdk or (str(fallback) if fallback.exists() and not pathlib.Path("/Applications/Xcode.app").exists() else os.environ.get("SDKROOT"))
-sdk = sdk or subprocess.check_output(["xcrun", "--show-sdk-path"], text=True).strip()
+# Use exactly the same selection as the app and Swift unit tests.
+if args.sdk:
+    os.environ["SDKROOT"] = args.sdk
+selection = json.loads(subprocess.check_output(
+    ["bash", "-c", 'source macos/toolchain.sh || exit; python3 -c \'import json,os; print(json.dumps({k:os.environ[k] for k in ("SDKROOT","DEVELOPER_DIR","LORCA_SDK_VERSION") if k in os.environ}))\''],
+    cwd=repo, text=True))
+os.environ.update(selection)
+sdk = selection["SDKROOT"]
 if not args.skip_build:
     subprocess.run(["bash", "macos/build.sh"], cwd=repo, check=True, env=dict(os.environ, SDKROOT=sdk, LORCA_BUILD_ONLY="1"))
+with (repo / "macos/build/lorca.app/Contents/Info.plist").open("rb") as info:
+    built = plistlib.load(info)
+if built.get("LorcaBuildSDKPath") != sdk or built.get("LorcaBuildSDKVersion") != selection["LORCA_SDK_VERSION"]:
+    raise SystemExit("App and acceptance SDK differ. Rebuild with the selected SDK before testing.")
 if args.long:
     for name in ["src", "tests", "assets"]:
         shutil.copytree(repo / name, project / name)
@@ -42,7 +52,7 @@ else:
 sources = sorted(p for p in (repo / "macos/Sources/LorcaMac").glob("*.swift") if p.name != "App.swift")
 runner = root / "native-acceptance"
 entries = [pathlib.Path(__file__).with_name("SelectionAcceptance.swift")] if args.selection else [pathlib.Path(__file__).with_name("AgentAcceptance.swift"), pathlib.Path(__file__).with_name("Chunk2Acceptance.swift")]
-subprocess.run(["xcrun", "swiftc", "-parse-as-library", "-sdk", sdk, "-target", "arm64-apple-macos14.0", "-module-cache-path", str(repo / "macos/.build/out/ModuleCache.noindex"), *map(str, sources), *map(str, entries), "-o", str(runner)], check=True, cwd=repo)
+subprocess.run(["xcrun", "swiftc", "-parse-as-library", "-sdk", sdk, "-target", "arm64-apple-macos14.0", "-Xlinker", "-platform_version", "-Xlinker", "macos", "-Xlinker", "14.0", "-Xlinker", selection["LORCA_SDK_VERSION"], "-module-cache-path", str(repo / "macos/.build/out/ModuleCache.noindex"), *map(str, sources), *map(str, entries), "-o", str(runner)], check=True, cwd=repo)
 env = dict(os.environ, LORCA_DATA_DIR=str(root / "data"), LORCA_ACCEPTANCE_ROOT=str(root), LORCA_ACCEPTANCE_MODEL=args.model, LORCA_ACCEPTANCE_EFFORT=args.effort, LORCA_SOURCE_ROOT=str(repo), PATH=str(pathlib.Path.home() / ".cargo/bin") + ":" + os.environ["PATH"])
 if args.v05:
     env["LORCA_ACCEPTANCE_V05"] = "1"

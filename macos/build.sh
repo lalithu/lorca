@@ -2,17 +2,10 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode.app ]]; then
-    export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-fi
+source ./toolchain.sh
 # A minimal rustup install need not alter the user's shell profile.
 if ! command -v cargo >/dev/null && [[ -x "$HOME/.cargo/bin/cargo" ]]; then
     export PATH="$HOME/.cargo/bin:$PATH"
-fi
-# This CLT SDK needs a SwiftUI macro plugin absent from the CLT distribution.
-# Full Xcode and explicit SDK selections keep their normal behavior.
-if [[ -z "${SDKROOT:-}" && ! -d /Applications/Xcode.app && -d /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk ]]; then
-    export SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
 fi
 app="build/lorca.app"
 ui_only="${LORCA_UI_ONLY:-0}"
@@ -26,13 +19,9 @@ else
     configuration="${1:-release}"
     (cd .. && cargo build --release --locked)
 fi
-# SwiftPM's build service can stamp the deployment target as the linked SDK.
-# AppKit uses the linked SDK to opt into the current system appearance.
-sdk_version="$(xcrun --sdk "${SDKROOT:-macosx}" --show-sdk-version)"
-deployment_target="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' Info.plist)"
-xcrun swift build -c "$configuration" \
-    -Xlinker -platform_version -Xlinker macos -Xlinker "$deployment_target" -Xlinker "$sdk_version"
-bin_dir="$(xcrun swift build -c "$configuration" --show-bin-path)"
+# One wrapper supplies the exact SDK and linked SDK version for builds and tests.
+bash ./swift.sh build -c "$configuration"
+bin_dir="$(bash ./swift.sh build -c "$configuration" --show-bin-path)"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 # Replace Mach-O files with new inodes. Overwriting an executable in place can
 # leave macOS's cached signature for the old binary and cause launch-time SIGKILL.
@@ -49,21 +38,59 @@ if [[ "$ui_only" != "1" ]]; then
     cp AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
     cp Info.plist "$app/Contents/Info.plist"
 fi
+# Record the selection so acceptance can reject a mismatched --skip-build app.
+/usr/libexec/PlistBuddy -c "Delete :LorcaBuildSDKPath" "$app/Contents/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add :LorcaBuildSDKPath string $SDKROOT" "$app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Delete :LorcaBuildSDKVersion" "$app/Contents/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add :LorcaBuildSDKVersion string $LORCA_SDK_VERSION" "$app/Contents/Info.plist"
 # Finder/iCloud can attach metadata to generated bundles that codesign rejects.
 xattr -cr "$app"
 if [[ "$ui_only" != "1" ]]; then
     codesign --force --sign - "$app/Contents/MacOS/lorca-core"
 fi
 codesign --force --sign - "$app"
-# Exercise the bundled core, not target/release: {} must reach input validation
-# without loading a model, creating data, or running a research task.
+# Verify the signed bundled chat backend in disposable storage. No models or live
+# clients are touched, and the check does not depend on deferred Job Apps commands.
 if [[ "$ui_only" != "1" ]]; then
 python3 - "$app/Contents/MacOS/lorca-core" <<'PYCORE'
-import pathlib, subprocess, sys
+import json, os, pathlib, subprocess, sys, tempfile, time, urllib.request
+
 core = str(pathlib.Path(sys.argv[1]).resolve())
-result = subprocess.run([core, 'job-session'], input=b'{}', capture_output=True, timeout=10)
-if result.returncode != 1 or b'Missing model' not in result.stderr:
-    raise SystemExit(f'Bundled research core failed startup (exit {result.returncode}): {result.stderr.decode(errors="replace")[:300]}')
+with tempfile.TemporaryDirectory(prefix='lorca-build-check-') as data:
+    environment = dict(os.environ, LORCA_DATA_DIR=data)
+    process = subprocess.Popen([core, 'serve'], env=environment,
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.PIPE)
+    try:
+        endpoint_file = pathlib.Path(data) / 'runtime' / 'endpoint.json'
+        deadline = time.monotonic() + 8
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                detail = process.stderr.read().decode(errors='replace')[:300]
+                raise SystemExit(f'Bundled chat backend failed startup: {detail}')
+            if endpoint_file.exists():
+                endpoint = json.loads(endpoint_file.read_text())
+                request = urllib.request.Request(endpoint['url'] + '/health',
+                    headers={'Authorization': 'Bearer ' + endpoint['token']})
+                with opener.open(request, timeout=2) as response:
+                    health = json.load(response)
+                if health.get('protocol') != 3 or health.get('pid') != process.pid:
+                    raise SystemExit('Bundled chat backend returned incompatible health data')
+                print('Bundled chat backend startup check passed.')
+                break
+            time.sleep(0.05)
+        else:
+            raise SystemExit('Bundled chat backend startup check timed out')
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        process.stderr.close()
 PYCORE
 fi
 # lorca rebuild installs with this same toolchain environment and target cache.

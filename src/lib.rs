@@ -1,14 +1,11 @@
-pub mod agent_types;
-pub mod agentloop;
-pub mod tools;
-// Preserve the v0.4 Rust API while moving implementation into clear modules.
-pub use agentloop as agent;
-pub mod client;
-pub mod context;
-pub mod core;
-pub mod hardware;
+pub mod agent;
+pub mod app;
+pub mod inference;
 pub mod memory;
-pub mod provider;
-pub mod storage;
-pub mod transport;
-pub mod types;
+pub mod tools;
+
+// Preserve module paths used by clients while grouping implementation by responsibility.
+pub use agent::{permissions, runtime};
+pub use app::{server, transport, types};
+pub use inference::providers;
+pub use memory::{sessions, storage};

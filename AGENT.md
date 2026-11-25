@@ -18,7 +18,7 @@ cargo fmt --all -- --check
 cargo test --locked --all-targets --no-fail-fast
 cargo clippy --locked --all-targets -- -D warnings
 python3 -B -m unittest discover -s jobapps/tests
-swift test --package-path macos
+bash macos/swift.sh test
 LORCA_BUILD_ONLY=1 bash macos/build.sh
 ```
 

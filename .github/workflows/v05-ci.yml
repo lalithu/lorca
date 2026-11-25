@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Swift unit tests
-        run: swift test --package-path macos
+        run: bash macos/swift.sh test
   jobapps:
     runs-on: ubuntu-latest
     steps:

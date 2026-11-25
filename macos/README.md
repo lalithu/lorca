@@ -20,7 +20,7 @@ For UI changes, use `lorca rebuild ui`: incrementally compiles Swift in debug mo
 
 Or run `./macos/run.sh` to build and open the app. Open `macos/Package.swift` in Xcode to edit. Full Xcode is required for `swift test`.
 
-The build script selects full Xcode when installed. On affected command-line-tools installations, its macOS 26.5 SDK fallback avoids a missing SwiftUI macro plugin. The bundle is `macos/build/lorca.app`, containing the Swift executable, Rust core, and Job Apps companion.
+Builds, unit tests (`bash macos/swift.sh test`), and native acceptance share `macos/toolchain.sh`. They select full Xcode when installed, with a macOS 26.5 SDK fallback for affected command-line-tools installations. An explicit `SDKROOT` overrides the default for all three. Acceptance rejects an already-built app whose recorded SDK differs. The bundle is `macos/build/lorca.app`, containing the Swift executable, Rust core, and Job Apps companion.
 
 ## Dashboard and Mini
 
@@ -87,7 +87,7 @@ Terminal sessions start fresh; their saved conversations remain accessible in th
 - `JobApps*`, `JobWorkflowView`, `MarkdownNoteEditor`: Job Apps workflow and Notes.
 
 ```sh
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swift test --package-path macos
+bash macos/swift.sh test
 ./macos/build.sh
 ```
 
@@ -101,3 +101,9 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swift test --pack
 - Older apps without the cooperative shutdown marker must be quit normally once before rebuilding. An unknown process, changed backend owner or shutdown timeout stops the restart with an error; the helper never force-kills a client.
 - Ordinary app launches continue to reuse the shared backend. Only an explicit rebuild replaces it. Other terminal clients using that backend may need to reconnect after a rebuild.
 - For packaging or isolated acceptance checks, use `LORCA_BUILD_ONLY=1 ./macos/build.sh` to build without restarting. `lorca rebuild` always requests the complete restart.
+
+### Journals and context
+
+Readable chat journals and working checkpoints are generated under `~/Downloads/lorca'sJournal/`. Settings → Journals opens that folder or selects another location. Changing locations leaves existing exports in place. Disposable/custom data directories default to their own `journals/` folder.
+
+Conversation JSON in Application Support remains authoritative. Checkpoints live in its `checkpoints/` directory and never grant permissions. The runtime compacts history in model-generated batches as context fills; original records remain available through history search and paging. Context allocation comes from the provider; llama.cpp template/tokenizer endpoints are used when supported, otherwise a conservative estimate is adjusted from observed prompt usage. Compaction reserves scale with allocation rather than a fixed output-token ceiling. Journals omit the separate private-reasoning stream and redact recognized structured credential fields; arbitrary user/tool text is still part of the transcript.
