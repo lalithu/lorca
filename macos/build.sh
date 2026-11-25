@@ -38,6 +38,8 @@ if [[ "$ui_only" != "1" ]]; then
     cp AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
     cp Info.plist "$app/Contents/Info.plist"
 fi
+mkdir -p "$app/Contents/Resources/Roster"
+cp -R Sources/LorcaMac/Resources/Roster/. "$app/Contents/Resources/Roster/"
 # Record the selection so acceptance can reject a mismatched --skip-build app.
 /usr/libexec/PlistBuddy -c "Delete :LorcaBuildSDKPath" "$app/Contents/Info.plist" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Add :LorcaBuildSDKPath string $SDKROOT" "$app/Contents/Info.plist"

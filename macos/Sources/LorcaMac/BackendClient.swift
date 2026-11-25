@@ -1,6 +1,7 @@
 import Foundation
 
 struct BackendSnapshot: Codable {
+    var roster: RosterSnapshot? = nil
     let revision: UInt64
     let conversations: [Conversation]
     let sessions: [BackendSession]

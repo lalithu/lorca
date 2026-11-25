@@ -6,7 +6,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [.executable(name: "lorca-macos", targets: ["LorcaMac"])],
     targets: [
-        .executableTarget(name: "LorcaMac", resources: [.copy("Resources/orca.txt")]),
+        .executableTarget(name: "LorcaMac", resources: [.copy("Resources/orca.txt"), .copy("Resources/Roster")]),
         .testTarget(name: "LorcaMacTests", dependencies: ["LorcaMac"])
     ]
 )

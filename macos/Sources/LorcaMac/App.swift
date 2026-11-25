@@ -8,6 +8,10 @@ enum LorcaApp {
             NativeOpen.run(arguments: Array(CommandLine.arguments.dropFirst(2)))
             return
         }
+        if CommandLine.arguments.contains("--roster-preview") {
+            RosterPreview.open()
+            return
+        }
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate

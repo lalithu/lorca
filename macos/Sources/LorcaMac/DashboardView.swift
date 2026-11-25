@@ -2,7 +2,7 @@ import SwiftUI
 
 enum SidebarPage: String, CaseIterable, Identifiable {
     case overview = "Overview", chats = "Chats", tasks = "Job Apps", notes = "Notes"
-    case settings = "Settings"
+    case roster = "Roster", settings = "Settings"
     var id: String { rawValue }
     var symbol: String {
         switch self {
@@ -10,6 +10,7 @@ enum SidebarPage: String, CaseIterable, Identifiable {
         case .chats: return "bubble.left.and.bubble.right"
         case .tasks: return "briefcase"
         case .notes: return "note.text"
+        case .roster: return "person.3.sequence"
         case .settings: return "slider.horizontal.3"
         }
     }
@@ -109,6 +110,11 @@ struct DashboardView: View {
         VStack(spacing: 0) {
             if windows.page == .notes {
                 NotesView(store: windows.notes, following: windows.notesFollowing, chat: store)
+            } else if windows.page == .roster {
+                RosterView(store: store) { id in
+                    store.openRosterConversation(id)
+                    windows.page = .chats
+                }
             } else {
             header
             if windows.page == .chats {

@@ -47,6 +47,8 @@ async fn exercise(llama: bool, mode: &str) {
     let temp = Temp::new();
     let requests = Arc::new(AtomicUsize::new(0));
     let count = requests.clone();
+    let roster_mode = mode == "roster_allow_once";
+    let decision_mode = if roster_mode { "allow_once" } else { mode };
     let compact = mode.starts_with("compact");
     let compact_fail = mode == "compact_fail";
     let chat_only = mode == "chat" || compact;
@@ -107,6 +109,29 @@ async fn exercise(llama: bool, mode: &str) {
         .as_str()
         .unwrap();
     let request = json!({"op":"agent_start","session":owner,"conversationId":cid,"requestId":id(),"task":if chat_only{"hi"}else{"Create the file"},"workspace":work,"model":"mock","effort":if chat_only{"nominal"}else{"off"}});
+    let request = if roster_mode {
+        let tid = id();
+        let add =
+            json!({"op":"roster_add","session":owner,"taskId":tid,"objective":"Create the file"});
+        server.command(add.clone()).await.unwrap();
+        server.command(add).await.unwrap();
+        assert_eq!(
+            server.snapshot().roster.tasks.len(),
+            1,
+            "saving a task replayed"
+        );
+        assert_eq!(
+            server.snapshot().conversations[0].messages.len(),
+            0,
+            "saving roster work changed ordinary chat"
+        );
+        let reopened = Server::new(Repository::new(data.clone()).unwrap()).unwrap();
+        assert_eq!(reopened.snapshot().roster.tasks[0].status, "queued");
+        assert!(reopened.agent().snapshot().is_none());
+        json!({"op":"roster_run","session":owner,"taskId":tid,"workspace":work,"model":"mock"})
+    } else {
+        request
+    };
     let started = server.command(request.clone()).await.unwrap();
     if chat_only {
         let task = wait(&server, "completed").await;
@@ -192,7 +217,29 @@ async fn exercise(llama: bool, mode: &str) {
         "UI approval event shape differs"
     );
     let replay = server.command(request).await.unwrap();
-    assert_eq!(started["taskId"], replay["taskId"]);
+    if roster_mode {
+        assert_eq!(
+            server.snapshot().roster.tasks[0].run_id.as_deref(),
+            approval["id"].as_str()
+        );
+        assert_eq!(
+            started["roster"]["tasks"][0]["conversationId"],
+            replay["roster"]["tasks"][0]["conversationId"]
+        );
+        assert_eq!(
+            server.snapshot().conversations.len(),
+            2,
+            "replayed roster run created another chat"
+        );
+        let reopened = Server::new(Repository::new(data.clone()).unwrap()).unwrap();
+        assert_eq!(reopened.snapshot().roster.tasks[0].status, "incomplete");
+        assert!(
+            reopened.agent().snapshot().is_none(),
+            "restart replayed a protected action"
+        );
+    } else {
+        assert_eq!(started["taskId"], replay["taskId"]);
+    }
     let foreign = server
         .command(json!({"op":"connect","host":host,"provider":if llama{"llama_cpp"}else{"ollama"}}))
         .await
@@ -203,7 +250,7 @@ async fn exercise(llama: bool, mode: &str) {
         "another session approved an action"
     );
     decision["session"] = json!(owner);
-    decision["decision"] = json!(if repeat_denied { "deny" } else { mode });
+    decision["decision"] = json!(if repeat_denied { "deny" } else { decision_mode });
     server.command(decision.clone()).await.unwrap();
     wait(
         &server,
@@ -216,7 +263,7 @@ async fn exercise(llama: bool, mode: &str) {
         },
     )
     .await;
-    if mode == "allow_once" {
+    if decision_mode == "allow_once" {
         assert_eq!(
             std::fs::read_to_string(work.join("created.txt")).unwrap(),
             "hello"
@@ -268,6 +315,23 @@ async fn exercise(llama: bool, mode: &str) {
     }
     let reopened = Server::new(Repository::new(data).unwrap()).unwrap();
     assert!(reopened.agent().snapshot().is_none());
+    if roster_mode {
+        assert_eq!(reopened.snapshot().roster.tasks[0].status, "completed");
+        assert_eq!(
+            reopened.snapshot().roster.tasks[0].run_id.as_deref(),
+            approval["id"].as_str()
+        );
+        assert!(
+            reopened
+                .snapshot()
+                .conversations
+                .iter()
+                .find(|c| c.id == cid)
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+    }
     if mode != "cancel" {
         assert!(
             reopened.snapshot().conversations[0]
@@ -344,4 +408,22 @@ async fn llama_checkpoint_continuation() {
 #[tokio::test]
 async fn failed_compaction_keeps_originals_and_continues() {
     exercise(false, "compact_fail").await;
+}
+
+#[tokio::test]
+async fn roster_local_run_preserves_chat_gates_and_survives_restart() {
+    exercise(false, "roster_allow_once").await;
+}
+
+#[test]
+fn unreadable_roster_does_not_break_chat_or_overwrite_originals() {
+    let temp = Temp::new();
+    let repository = Repository::new(temp.0.clone()).unwrap();
+    let path = temp.0.join("roster.json");
+    std::fs::write(&path, b"not valid json").unwrap();
+    let server = Server::new(repository).unwrap();
+    assert_eq!(server.snapshot().conversations.len(), 1);
+    assert!(server.snapshot().roster.error.is_some());
+    assert!(server.snapshot().roster.save(&temp.0).is_err());
+    assert_eq!(std::fs::read(path).unwrap(), b"not valid json");
 }

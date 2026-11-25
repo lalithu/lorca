@@ -43,7 +43,7 @@ bash macos/swift.sh test
 
 ## Upcoming work
 
-- **Roster (planning only):** a visual tab for local and frontier agents, task handoffs, results, approvals, and usage visibility. No agent-to-agent integration is implemented yet.
+- **Roster:** saved tasks with live local-run status. Save an objective, then choose **Run locally**; results, questions, and approvals use its linked chat. Tasks persist in `roster.json` alongside saved chats, and interrupted actions are never automatically replayed. The native Roster supports saved member profiles (Add, Edit, Remove), draggable cards, and saved layouts. Member connection settings are configuration only: frontier connectors, automatic planning, and scheduling are not implemented yet.
 - Retire obsolete tests and dependencies, refresh CI, and improve tool usability and recovery.
 - Separate durable task ownership from UI sessions for sustained background work.
 - MCP and additional provider integrations. See the [roadmap](docs/roadmap.md).

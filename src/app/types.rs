@@ -148,6 +148,8 @@ pub struct TurnView {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
+    #[serde(default)]
+    pub roster: crate::app::roster::Roster,
     pub revision: u64,
     pub conversations: Vec<Conversation>,
     pub sessions: Vec<SessionView>,

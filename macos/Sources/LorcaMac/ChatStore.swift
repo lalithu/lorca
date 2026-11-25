@@ -20,6 +20,8 @@ final class ChatStore: ObservableObject {
     let modelSession = ModelSession()
     let backend: BackendTransport
     let agent: AgentStore
+    let roster: RosterStore
+    let rosterMembers: RosterMembers
     let jobs = JobAppsStore()
     var agentWorkspace: URL? { agent.workspaces[library.selectedID] }
     var currentAgentActive: Bool { agent.active?.conversationId == library.selectedID }
@@ -114,12 +116,15 @@ final class ChatStore: ObservableObject {
         self.defaults = defaults
         uiZoom = AppZoom(defaults: defaults)
         agent = AgentStore(backend: self.backend)
+        roster = RosterStore(backend: self.backend)
+        rosterMembers = RosterMembers(defaults: defaults)
         selectedModel = defaults.string(forKey: "model") ?? "qwen3.5:9b"
         thinkingEffort = ThinkingEffort(rawValue: defaults.string(forKey: "thinkingEffort") ?? "off") ?? .off
         appearance = Appearance(rawValue: defaults.string(forKey: "appearance") ?? "Dark") ?? .dark
-        for source in [uiZoom.objectWillChange, modelSession.objectWillChange, library.objectWillChange, agent.objectWillChange, jobs.objectWillChange] {
+        for source in [uiZoom.objectWillChange, modelSession.objectWillChange, library.objectWillChange, agent.objectWillChange, jobs.objectWillChange, roster.objectWillChange, rosterMembers.objectWillChange] {
             source.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &updates)
         }
+        roster.receive = { [weak self] in self?.apply($0) }
         library.recoverDrafts(at: self.backend.root.appendingPathComponent("pending-drafts.json"))
         library.perform = { [weak self] in self?.enqueue($0) }
         modelSession.clearAction = { [weak self] in self?.enqueue(["op": "clearError"]) }
@@ -256,6 +261,7 @@ final class ChatStore: ObservableObject {
     func apply(_ snapshot: BackendSnapshot) {
         guard !closing, snapshot.revision >= revision, let session = snapshot.sessions.first(where: { $0.id == backend.sessionID }) else { return }
         revision = snapshot.revision
+        roster.apply(snapshot.roster)
         library.apply(snapshot, selected: session.selectedId)
         agent.restoreArchived(snapshot.conversations,selected:session.selectedId)
         for chat in snapshot.conversations where agent.workspaces[chat.id] == nil {

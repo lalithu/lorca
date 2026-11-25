@@ -56,7 +56,9 @@ impl Server {
             repository.save(&c).map_err(|e| e.to_string())?;
             chats.push(c)
         }
+        let roster = super::roster::Roster::load(&repository.root, &chats);
         let view = Snapshot {
+            roster,
             conversations: chats,
             warning,
             ..Default::default()
@@ -171,6 +173,13 @@ impl Server {
             .insert("runtimePermissions".into(), json!(t.permissions));
         chat.updated_at = now();
         self.repository.save(&chat).map_err(|e| e.to_string())?;
+        let mut roster = s.view.roster.clone();
+        if roster.observe_chat(&chat) {
+            if let Err(error) = roster.save(&self.repository.root) {
+                roster.error = Some(error);
+            }
+            s.view.roster = roster;
+        }
         s.view.conversations[ci] = chat;
         s.task_revision = revision;
         let usage: Usage = serde_json::from_value(t.view["usage"].clone()).unwrap_or_default();
@@ -417,6 +426,85 @@ impl Server {
         self.publish(&mut s);
         Ok(json!({"taskId":task_id}))
     }
+    fn roster_add(&self, v: &Value) -> Result<Value> {
+        let objective = text(v, "objective")?.trim();
+        if objective.is_empty() {
+            return Err("Write a task first".into());
+        }
+        let task_id = valid_id(text(v, "taskId")?).map_err(|e| e.to_string())?;
+        let mut s = self.state.lock().unwrap();
+        let mut roster = s.view.roster.clone();
+        if let Some(existing) = roster.tasks.iter().find(|t| t.id == task_id) {
+            if existing.objective != objective {
+                return Err("Task identifier already used".into());
+            }
+            return Ok(json!(s.view));
+        }
+        let mut task = super::roster::Task::new(objective.into());
+        task.id = task_id;
+        roster.tasks.insert(0, task);
+        roster.save(&self.repository.root)?;
+        s.view.roster = roster;
+        self.publish(&mut s);
+        Ok(json!(s.view))
+    }
+    fn roster_run(self: &Arc<Self>, session: &str, v: &Value) -> Result<Value> {
+        let task_id = valid_id(text(v, "taskId")?).map_err(|e| e.to_string())?;
+        self.checkpoint()?;
+        let (cid, objective) = {
+            let mut s = self.state.lock().unwrap();
+            let mut roster = s.view.roster.clone();
+            let task = roster
+                .tasks
+                .iter_mut()
+                .find(|t| t.id == task_id)
+                .ok_or("Unknown roster task")?;
+            // A repeated request only returns the existing work; it cannot replay it.
+            if task.conversation_id.is_some() {
+                return Ok(json!(s.view));
+            }
+            if self.runtime.active() {
+                return Err("Finish or stop the active task before starting roster work".into());
+            }
+            if let Some(error) = &roster.error {
+                return Err(error.clone());
+            }
+            let task = roster.tasks.iter_mut().find(|t| t.id == task_id).unwrap();
+            let mut chat = Conversation::default();
+            chat.title = task.objective.chars().take(60).collect();
+            self.repository.save(&chat).map_err(|e| e.to_string())?;
+            task.conversation_id = Some(chat.id.clone());
+            task.status = "incomplete".into();
+            task.updated_at = now();
+            let result = (chat.id.clone(), task.objective.clone());
+            roster.save(&self.repository.root)?;
+            s.view.roster = roster;
+            s.view.conversations.push(chat);
+            self.publish(&mut s);
+            result
+        };
+        let mut request = v.clone();
+        request["conversationId"] = json!(cid);
+        request["requestId"] = json!(task_id);
+        request["task"] = json!(objective);
+        // start() remains the single execution path, including all existing gates.
+        if let Err(error) = self.start(session, &request) {
+            let mut s = self.state.lock().unwrap();
+            let mut roster = s.view.roster.clone();
+            if let Some(task) = roster.tasks.iter_mut().find(|t| t.id == task_id) {
+                task.status = "failed".into();
+                task.summary = Some(error.clone());
+            }
+            if let Err(save_error) = roster.save(&self.repository.root) {
+                roster.error = Some(save_error);
+            }
+            s.view.roster = roster;
+            self.publish(&mut s);
+            return Err(error);
+        }
+        self.checkpoint()?;
+        Ok(json!(self.snapshot()))
+    }
     pub async fn command(self: &Arc<Self>, v: Value) -> Result<Value> {
         let op = text(&v, "op")?;
         if op == "journal_location" {
@@ -495,6 +583,12 @@ impl Server {
                 return Ok(json!(self.snapshot()));
             }
             "agent_start" | "send" => return self.start(session, &v),
+            "roster_add" => return self.roster_add(&v),
+            "roster_run" => {
+                // Validate the selected local model before saving an execution reference.
+                self.selected_model(session, &v)?;
+                return self.roster_run(session, &v);
+            }
             "exportConversation" => {
                 self.checkpoint()?;
                 let s = self.state.lock().unwrap();
